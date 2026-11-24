@@ -1,0 +1,33 @@
+{
+  "name": "collect-plus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "postinstall": "wxt prepare"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/chrome": "^0.3.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@wxt-dev/module-react": "^1.2.2",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "wxt": "^0.21.5"
+  },
+  "dependencies": {
+    "dexie": "^4.4.7",
+    "dexie-react-hooks": "^4.4.0",
+    "lucide-react": "^1.77.0",
+    "mediabunny": "^1.66.2",
+    "minisearch": "^7.2.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "ulid": "^3.0.2"
+  }
+}

@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# WXT & Build outputs
+.wxt/
+.output/
+dist/
+*.zip
+
+# Local env & overrides
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Caches & TypeScript build info
+.cache/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# Local vault test directory (prevent accidental commit of personal media)
+CollectVault/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo

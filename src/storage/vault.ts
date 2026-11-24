@@ -1,0 +1,1360 @@
+/**
+ * File System Access API 本地 Vault 管理器。
+ *
+ * 负责 CollectVault 目录绑定与权限管理、`README.txt` 自动生成与守护、
+ * OPFS -> Vault 原子落盘（VaultFlusher）、双层媒体读取回退，以及基于本地目录的容灾索引重建。
+ */
+
+import { ulid } from 'ulid';
+import {
+  isPlatformId,
+  SCHEMA_VERSION,
+  stripRecordToMeta,
+  type AssetKind,
+  type AuthorInfo,
+  type CollectionItemMeta,
+  type CollectionItemRecord,
+  type DownloadStrategy,
+  type FolderNode,
+  type MediaAsset,
+  type MediaKind,
+  type PlatformExtraValue,
+  type TagMeta,
+  type TaxonomyFile,
+  type VaultConfig,
+} from '../types/schema.ts';
+import {
+  db,
+  getSetting,
+  pickTagColor,
+  setSetting,
+} from './db.ts';
+import { readFileFromOpfs, removeItemFromOpfs } from './opfs.ts';
+import { splitRelativePath } from './path.ts';
+
+export const VAULT_README_FILENAME = 'README.txt';
+export const VAULT_CONFIG_FILENAME = '.collect-vault.json';
+export const TAXONOMY_FILENAME = 'taxonomy.json';
+export const ITEMS_DIRNAME = 'items';
+export const TRASH_DIRNAME = '.trash';
+
+export const VAULT_README_CONTENT = `========================================================================
+Collect+ 本地离线收藏库（Local Offline Vault）
+========================================================================
+
+本目录由浏览器扩展 Collect+ 自动创建并管理，作为您的离线内容真相源（Source of Truth）。
+所有收藏的视频、图集、封面以及分类元数据均以人类可读的文件夹结构安全保存在本地硬盘中。
+
+【目录结构说明 / Directory Structure】
+- README.txt            本说明文档（Collect+ 会自动检测并守护此文件）
+- .collect-vault.json   收藏库标识与版本配置文件
+- taxonomy.json         文件夹树与标签体系配置
+- items/                按「平台 / 年月 / 日期_源ID_标题」归档的全部收藏条目与媒体文件
+                        （每个条目目录下包含 meta.json 及对应的视频/图片/封面）
+- .trash/               回收站归档目录
+
+【重要警告 / IMPORTANT WARNING】
+请勿手动重命名、移动、编辑或删除此目录内的任何文件或子文件夹！
+手动改动内部文件结构可能导致索引失效、分类丢失或离线媒体无法读取。
+
+【如何安全迁移收藏库位置 / How to Move This Vault】
+如需将本收藏库迁移到其他磁盘或目录，请按以下步骤操作：
+1. 将整个 CollectVault 文件夹完整复制或移动到新位置；
+2. 打开 Collect+ 管理库页面，在设置中重新绑定新的 CollectVault 目录；
+3. 点击执行「重建索引」，即可瞬间恢复全部收藏条目、文件夹、标签与缩略图。
+
+------------------------------------------------------------------------
+This directory is managed by the Collect+ browser extension.
+DO NOT manually rename, move, edit, or delete files inside this folder.
+To relocate your vault, move the entire folder, re-bind it in Collect+,
+and run "Rebuild Index".
+========================================================================
+`;
+
+export interface FlushProgress {
+  phase:
+    | 'preparing'
+    | 'flushing_staged'
+    | 'syncing_meta'
+    | 'writing_taxonomy'
+    | 'done';
+  current: number;
+  total: number;
+  currentTitle?: string;
+}
+
+export interface FlushSummary {
+  syncedStagedCount: number;
+  syncedMetaCount: number;
+  failedCount: number;
+  errors: Array<{ itemId: string; message: string }>;
+}
+
+export interface RebuildProgress {
+  phase: 'scanning' | 'importing' | 'done';
+  scannedItems: number;
+  currentTitle?: string;
+}
+
+export interface RebuildSummary {
+  restoredItems: number;
+  restoredFolders: number;
+  restoredTags: number;
+  skippedFiles: number;
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'NotFoundError';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function toWritableBuffer(chunk: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (chunk.buffer instanceof ArrayBuffer) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  const copy = new Uint8Array(chunk.byteLength);
+  copy.set(chunk);
+  return copy;
+}
+
+// ============================================================================
+// 1. 权限与目录绑定
+// ============================================================================
+
+/** 读取 IndexedDB 中已持久化的 CollectVault 目录句柄 */
+export async function getSavedVaultHandle(): Promise<FileSystemDirectoryHandle | null> {
+  const handle = await getSetting('vault_directory_handle');
+  return handle ?? null;
+}
+
+/** 查询 Vault 目录句柄当前权限状态 */
+export async function queryVaultPermission(
+  handle: FileSystemDirectoryHandle,
+  mode: FileSystemPermissionMode = 'readwrite',
+): Promise<PermissionState> {
+  return handle.queryPermission({ mode });
+}
+
+/** 请求 Vault 目录句柄的访问权限，已授权时直接返回 `true` */
+export async function requestVaultPermission(
+  handle: FileSystemDirectoryHandle,
+  mode: FileSystemPermissionMode = 'readwrite',
+): Promise<boolean> {
+  const current = await handle.queryPermission({ mode });
+  if (current === 'granted') {
+    return true;
+  }
+  const requested = await handle.requestPermission({ mode });
+  return requested === 'granted';
+}
+
+/** 检测根目录 `README.txt` 是否存在且非空，缺失或为空时自动补写 */
+export async function ensureVaultReadme(
+  root: FileSystemDirectoryHandle,
+): Promise<void> {
+  const existing = await readVaultFile(root, VAULT_README_FILENAME);
+  if (existing && existing.size > 0) {
+    return;
+  }
+  await writeVaultTextFile(root, VAULT_README_FILENAME, VAULT_README_CONTENT);
+}
+
+function parseVaultConfig(raw: unknown): VaultConfig | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  if (
+    raw.schemaVersion !== SCHEMA_VERSION ||
+    typeof raw.vaultId !== 'string' ||
+    !raw.vaultId.trim() ||
+    typeof raw.name !== 'string' ||
+    typeof raw.createdAt !== 'number' ||
+    !Number.isFinite(raw.createdAt) ||
+    typeof raw.updatedAt !== 'number' ||
+    !Number.isFinite(raw.updatedAt)
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    vaultId: raw.vaultId,
+    name: raw.name,
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+  };
+}
+
+/** 检查目录下是否存在至少一个子项 */
+async function hasAnyEntry(dir: FileSystemDirectoryHandle): Promise<boolean> {
+  for await (const _entry of dir.entries()) {
+    void _entry;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 初始化并守护 CollectVault 标准目录结构：
+ * - `README.txt`（缺失/为空时自动写入）
+ * - `.collect-vault.json`
+ * - `taxonomy.json`
+ * - `items/` 与 `.trash/`
+ */
+export async function ensureVaultStructure(
+  root: FileSystemDirectoryHandle,
+): Promise<{ config: VaultConfig; isExistingVault: boolean }> {
+  await ensureVaultReadme(root);
+
+  let isExistingVault = false;
+  let config: VaultConfig | null = null;
+
+  const configFile = await readVaultFile(root, VAULT_CONFIG_FILENAME);
+  if (configFile) {
+    try {
+      const parsed: unknown = JSON.parse(await configFile.text());
+      config = parseVaultConfig(parsed);
+      if (config) {
+        isExistingVault = true;
+      }
+    } catch {
+      // 配置文件损坏时在下方安全重建
+    }
+  }
+
+  const itemsDir = await root.getDirectoryHandle(ITEMS_DIRNAME, {
+    create: true,
+  });
+  await root.getDirectoryHandle(TRASH_DIRNAME, { create: true });
+
+  const taxonomyFile = await readVaultFile(root, TAXONOMY_FILENAME);
+  if (!isExistingVault) {
+    if (taxonomyFile || (await hasAnyEntry(itemsDir))) {
+      isExistingVault = true;
+    }
+  }
+
+  const now = Date.now();
+  if (!config) {
+    config = {
+      schemaVersion: SCHEMA_VERSION,
+      vaultId: ulid(),
+      name: root.name || 'CollectVault',
+      createdAt: now,
+      updatedAt: now,
+    };
+    await writeVaultTextFile(
+      root,
+      VAULT_CONFIG_FILENAME,
+      JSON.stringify(config, null, 2),
+    );
+  }
+
+  if (!taxonomyFile) {
+    const initialTaxonomy: TaxonomyFile = {
+      schemaVersion: SCHEMA_VERSION,
+      updatedAt: now,
+      folders: [],
+      tags: [],
+    };
+    await writeVaultTextFile(
+      root,
+      TAXONOMY_FILENAME,
+      JSON.stringify(initialTaxonomy, null, 2),
+    );
+  }
+
+  return { config, isExistingVault };
+}
+
+/** 弹出系统目录选择器绑定新的 CollectVault，并持久化句柄与配置到 IndexedDB */
+export async function bindNewVaultDirectory(): Promise<{
+  handle: FileSystemDirectoryHandle;
+  config: VaultConfig;
+  isExistingVault: boolean;
+}> {
+  if (
+    typeof window === 'undefined' ||
+    typeof window.showDirectoryPicker !== 'function'
+  ) {
+    throw new Error(
+      'File System Access API (showDirectoryPicker) is not supported in this context.',
+    );
+  }
+
+  const handle = await window.showDirectoryPicker({
+    id: 'collect-plus-vault',
+    mode: 'readwrite',
+  });
+
+  const granted = await requestVaultPermission(handle, 'readwrite');
+  if (!granted) {
+    throw new Error('Read/write permission for the selected Vault directory was denied.');
+  }
+
+  const { config, isExistingVault } = await ensureVaultStructure(handle);
+  await setSetting('vault_directory_handle', handle);
+  await setSetting('vault_config', config);
+
+  return { handle, config, isExistingVault };
+}
+
+// ============================================================================
+// 2. 通用文件读写与双层读取回退
+// ============================================================================
+
+async function resolveVaultTarget(
+  root: FileSystemDirectoryHandle,
+  relativePath: string,
+  createDirs: boolean,
+): Promise<{ parentDir: FileSystemDirectoryHandle; fileName: string } | null> {
+  const segments = splitRelativePath(relativePath);
+  if (segments.length === 0) {
+    throw new Error(`Vault relative path cannot be empty: "${relativePath}"`);
+  }
+
+  const fileName = segments[segments.length - 1];
+  if (!fileName) {
+    throw new Error(`Invalid vault relative path: "${relativePath}"`);
+  }
+
+  let currentDir = root;
+  try {
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      const seg = segments[i];
+      if (!seg) {
+        continue;
+      }
+      currentDir = await currentDir.getDirectoryHandle(seg, {
+        create: createDirs,
+      });
+    }
+  } catch (error) {
+    if (!createDirs && isNotFoundError(error)) {
+      return null;
+    }
+    throw error;
+  }
+
+  return { parentDir: currentDir, fileName };
+}
+
+/** 读取 Vault 中指定相对路径的文件，不存在时返回 `null` */
+export async function readVaultFile(
+  root: FileSystemDirectoryHandle,
+  relativePath: string,
+): Promise<File | null> {
+  const target = await resolveVaultTarget(root, relativePath, false);
+  if (!target) {
+    return null;
+  }
+
+  try {
+    const fileHandle = await target.parentDir.getFileHandle(target.fileName, {
+      create: false,
+    });
+    return await fileHandle.getFile();
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** 判断 Vault 中指定相对路径的文件是否存在 */
+async function hasVaultFile(
+  root: FileSystemDirectoryHandle,
+  relativePath: string,
+): Promise<boolean> {
+  const target = await resolveVaultTarget(root, relativePath, false);
+  if (!target) {
+    return false;
+  }
+  try {
+    await target.parentDir.getFileHandle(target.fileName, { create: false });
+    return true;
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/** 向 Vault 指定相对路径写入 UTF-8 文本文件（自动创建父目录） */
+export async function writeVaultTextFile(
+  root: FileSystemDirectoryHandle,
+  relativePath: string,
+  content: string,
+): Promise<void> {
+  const target = await resolveVaultTarget(root, relativePath, true);
+  if (!target) {
+    throw new Error(`Failed to resolve vault path: "${relativePath}"`);
+  }
+
+  const { parentDir, fileName } = target;
+  const fileHandle = await parentDir.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+
+  try {
+    await writable.write(content);
+    await writable.close();
+  } catch (error) {
+    await writable.abort().catch(() => undefined);
+    throw error;
+  }
+}
+
+/** 将源 `File` 流式拷贝写入 Vault 指定相对路径，避免大视频文件全量载入内存 */
+async function copyFileToVault(
+  root: FileSystemDirectoryHandle,
+  relativePath: string,
+  sourceFile: File,
+): Promise<void> {
+  const target = await resolveVaultTarget(root, relativePath, true);
+  if (!target) {
+    throw new Error(`Failed to resolve vault path: "${relativePath}"`);
+  }
+
+  const { parentDir, fileName } = target;
+  const fileHandle = await parentDir.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  const reader = sourceFile.stream().getReader();
+  let closed = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value && value.byteLength > 0) {
+        await writable.write(toWritableBuffer(value));
+      }
+    }
+    await writable.close();
+    closed = true;
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    if (!closed) {
+      await writable.abort().catch(() => undefined);
+    }
+    await parentDir.removeEntry(fileName).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * 统一读取条目媒体资产：
+ * 1. 优先从 CollectVault（若句柄可用且已获至少 `read` 权限）读取 `${item.relativeDir}/${assetRelativePath}`；
+ * 2. 缺失或无 Vault 权限时自动回退至 OPFS `(item.id, assetRelativePath)`。
+ */
+export async function readItemAssetFile(
+  item: CollectionItemRecord,
+  assetRelativePath: string,
+  vaultHandle?: FileSystemDirectoryHandle | null,
+): Promise<File | null> {
+  const effectiveHandle =
+    vaultHandle === undefined ? await getSavedVaultHandle() : vaultHandle;
+
+  if (effectiveHandle) {
+    try {
+      const permission = await queryVaultPermission(effectiveHandle, 'read');
+      if (permission === 'granted') {
+        const vaultFile = await readVaultFile(
+          effectiveHandle,
+          `${item.relativeDir}/${assetRelativePath}`,
+        );
+        if (vaultFile) {
+          return vaultFile;
+        }
+      }
+    } catch {
+      // Vault 访问异常时静默回退到 OPFS
+    }
+  }
+
+  return readFileFromOpfs(item.id, assetRelativePath);
+}
+
+// ============================================================================
+// 3. 业务落盘与同步（VaultFlusher）
+// ============================================================================
+
+/** 将 IndexedDB 中最新的文件夹树与标签表全量回写到 `CollectVault/taxonomy.json` */
+export async function writeTaxonomyToVault(
+  root: FileSystemDirectoryHandle,
+): Promise<void> {
+  const [folders, tags] = await Promise.all([
+    db.folders.toArray(),
+    db.tags.toArray(),
+  ]);
+
+  folders.sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt);
+  tags.sort((a, b) => a.createdAt - b.createdAt || a.name.localeCompare(b.name));
+
+  const payload: TaxonomyFile = {
+    schemaVersion: SCHEMA_VERSION,
+    updatedAt: Date.now(),
+    folders,
+    tags,
+  };
+
+  await writeVaultTextFile(
+    root,
+    TAXONOMY_FILENAME,
+    JSON.stringify(payload, null, 2),
+  );
+}
+
+/**
+ * 将单个条目的纯净元数据写入 `CollectVault/{item.relativeDir}/meta.json`。
+ * 强制通过 `stripRecordToMeta` 剥离 `thumbnailDataUrl`。
+ */
+export async function writeItemMetaToVault(
+  root: FileSystemDirectoryHandle,
+  item: CollectionItemRecord,
+): Promise<void> {
+  const cleanMeta = stripRecordToMeta(item);
+  await writeVaultTextFile(
+    root,
+    `${cleanMeta.relativeDir}/meta.json`,
+    JSON.stringify(cleanMeta, null, 2),
+  );
+}
+
+/**
+ * 执行 OPFS -> CollectVault 同步落盘：
+ * 1. 守护目录结构与 `README.txt`；
+ * 2. 将 `opfs_staged` 条目的已下载媒体流式拷贝到 Vault，写入 `meta.json`，更新 DB 状态并释放 OPFS；
+ * 3. 将 `meta_dirty` 条目的残余 OPFS 文件（如有）补齐落盘并回写最新 `meta.json`；
+ * 4. 回写 `taxonomy.json` 并更新 `last_sync_at`。
+ */
+export async function flushToVault(
+  root: FileSystemDirectoryHandle,
+  onProgress?: (p: FlushProgress) => void,
+): Promise<FlushSummary> {
+  const summary: FlushSummary = {
+    syncedStagedCount: 0,
+    syncedMetaCount: 0,
+    failedCount: 0,
+    errors: [],
+  };
+
+  onProgress?.({ phase: 'preparing', current: 0, total: 0 });
+  await ensureVaultStructure(root);
+
+  const [stagedItems, dirtyItems] = await Promise.all([
+    db.items.where('syncStatus').equals('opfs_staged').toArray(),
+    db.items.where('syncStatus').equals('meta_dirty').toArray(),
+  ]);
+
+  // Phase 1: 同步 OPFS 暂存条目
+  for (let i = 0; i < stagedItems.length; i += 1) {
+    const item = stagedItems[i];
+    if (!item) {
+      continue;
+    }
+
+    onProgress?.({
+      phase: 'flushing_staged',
+      current: i + 1,
+      total: stagedItems.length,
+      currentTitle: item.title,
+    });
+
+    try {
+      for (const asset of item.assets) {
+        const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
+        const vaultAssetPath = `${item.relativeDir}/${asset.relativePath}`;
+
+        if (opfsFile) {
+          await copyFileToVault(root, vaultAssetPath, opfsFile);
+        } else if (asset.downloaded) {
+          const alreadyInVault = await hasVaultFile(root, vaultAssetPath);
+          if (!alreadyInVault) {
+            throw new Error(
+              `Missing staged asset "${asset.relativePath}" in both OPFS and Vault.`,
+            );
+          }
+        }
+      }
+
+      const syncedSnapshot: CollectionItemRecord = {
+        ...item,
+        syncStatus: 'vault_synced',
+      };
+      await writeItemMetaToVault(root, syncedSnapshot);
+
+      await db.transaction('rw', db.items, async () => {
+        const latest = await db.items.get(item.id);
+        if (!latest) {
+          return;
+        }
+        // 若同步过程中用户又修改了该条目，则转为 meta_dirty 以保留最新编辑待下次写回
+        const nextStatus =
+          latest.updatedAt > item.updatedAt ? 'meta_dirty' : 'vault_synced';
+        await db.items.put({
+          ...latest,
+          syncStatus: nextStatus,
+        });
+      });
+
+      await removeItemFromOpfs(item.id);
+      summary.syncedStagedCount += 1;
+    } catch (error) {
+      summary.failedCount += 1;
+      summary.errors.push({
+        itemId: item.id,
+        message: getErrorMessage(error),
+      });
+    }
+  }
+
+  // Phase 2: 回写元数据变更条目（顺带清理可能残余的 OPFS 文件）
+  for (let i = 0; i < dirtyItems.length; i += 1) {
+    const item = dirtyItems[i];
+    if (!item) {
+      continue;
+    }
+
+    onProgress?.({
+      phase: 'syncing_meta',
+      current: i + 1,
+      total: dirtyItems.length,
+      currentTitle: item.title,
+    });
+
+    try {
+      let copiedResidualFromOpfs = false;
+      for (const asset of item.assets) {
+        const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
+        if (opfsFile) {
+          await copyFileToVault(
+            root,
+            `${item.relativeDir}/${asset.relativePath}`,
+            opfsFile,
+          );
+          copiedResidualFromOpfs = true;
+        }
+      }
+
+      const syncedSnapshot: CollectionItemRecord = {
+        ...item,
+        syncStatus: 'vault_synced',
+      };
+      await writeItemMetaToVault(root, syncedSnapshot);
+
+      await db.transaction('rw', db.items, async () => {
+        const latest = await db.items.get(item.id);
+        if (!latest) {
+          return;
+        }
+        const nextStatus =
+          latest.updatedAt > item.updatedAt ? 'meta_dirty' : 'vault_synced';
+        await db.items.put({
+          ...latest,
+          syncStatus: nextStatus,
+        });
+      });
+
+      if (copiedResidualFromOpfs) {
+        await removeItemFromOpfs(item.id);
+      }
+
+      summary.syncedMetaCount += 1;
+    } catch (error) {
+      summary.failedCount += 1;
+      summary.errors.push({
+        itemId: item.id,
+        message: getErrorMessage(error),
+      });
+    }
+  }
+
+  // Phase 3: 回写分类与标签索引并记录最近同步时间
+  onProgress?.({
+    phase: 'writing_taxonomy',
+    current: 1,
+    total: 1,
+  });
+  await writeTaxonomyToVault(root);
+  await setSetting('last_sync_at', Date.now());
+
+  const totalProcessed = stagedItems.length + dirtyItems.length;
+  onProgress?.({
+    phase: 'done',
+    current: totalProcessed,
+    total: totalProcessed,
+  });
+
+  return summary;
+}
+
+// ============================================================================
+// 4. 缩略图生成与容灾索引重建扫描器
+// ============================================================================
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('FileReader did not produce a string Data URL.'));
+      }
+    };
+    reader.onerror = () => {
+      reject(reader.error ?? new Error('Failed to read thumbnail Blob.'));
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadImageElementFromBlob(blob: Blob): Promise<HTMLImageElement> {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Failed to decode image blob.'));
+    };
+    img.src = objectUrl;
+  });
+}
+
+function computeThumbnailDimensions(
+  srcWidth: number,
+  srcHeight: number,
+  maxWidth: number,
+): { width: number; height: number } {
+  const safeMaxWidth = Math.max(1, Math.floor(maxWidth));
+  if (srcWidth <= safeMaxWidth) {
+    return {
+      width: Math.max(1, Math.round(srcWidth)),
+      height: Math.max(1, Math.round(srcHeight)),
+    };
+  }
+  const scale = safeMaxWidth / srcWidth;
+  return {
+    width: safeMaxWidth,
+    height: Math.max(1, Math.round(srcHeight * scale)),
+  };
+}
+
+/**
+ * 将图片 Blob 压缩为低分辨率 `image/webp` Data URL 缩略图（默认最大宽 360px，quality 0.78）。
+ * 优先使用 `createImageBitmap` + `OffscreenCanvas`，不可用时自动降级到 `HTMLCanvasElement`。
+ * 任何解码或渲染异常均安全吞掉并返回 `undefined`。
+ */
+export async function generateThumbnailFromBlob(
+  blob: Blob,
+  maxWidth = 360,
+): Promise<string | undefined> {
+  if (blob.size === 0) {
+    return undefined;
+  }
+
+  const safeMaxWidth = Math.max(1, Math.floor(maxWidth));
+
+  try {
+    if (
+      typeof createImageBitmap === 'function' &&
+      typeof OffscreenCanvas === 'function'
+    ) {
+      const bitmap = await createImageBitmap(blob);
+      try {
+        if (bitmap.width <= 0 || bitmap.height <= 0) {
+          return undefined;
+        }
+        const { width, height } = computeThumbnailDimensions(
+          bitmap.width,
+          bitmap.height,
+          safeMaxWidth,
+        );
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          return undefined;
+        }
+        ctx.drawImage(bitmap, 0, 0, width, height);
+        const thumbBlob = await canvas.convertToBlob({
+          type: 'image/webp',
+          quality: 0.78,
+        });
+        return await blobToDataUrl(thumbBlob);
+      } finally {
+        bitmap.close();
+      }
+    }
+
+    if (typeof document !== 'undefined') {
+      const img = await loadImageElementFromBlob(blob);
+      const naturalW = img.naturalWidth || img.width;
+      const naturalH = img.naturalHeight || img.height;
+      if (naturalW <= 0 || naturalH <= 0) {
+        return undefined;
+      }
+      const { width, height } = computeThumbnailDimensions(
+        naturalW,
+        naturalH,
+        safeMaxWidth,
+      );
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return undefined;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      return canvas.toDataURL('image/webp', 0.78);
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const VALID_MEDIA_KINDS: ReadonlySet<string> = new Set<MediaKind>([
+  'video',
+  'gallery',
+  'image',
+]);
+
+const VALID_ASSET_KINDS: ReadonlySet<string> = new Set<AssetKind>([
+  'cover',
+  'video',
+  'audio',
+  'image',
+]);
+
+const VALID_DOWNLOAD_STRATEGIES: ReadonlySet<string> = new Set<DownloadStrategy>(
+  ['direct', 'dash_mux', 'hls_mux'],
+);
+
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item === 'string' && item.trim()) {
+      out.push(item.trim());
+    }
+  }
+  return out;
+}
+
+function parseAuthorInfo(raw: unknown): AuthorInfo | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  if (typeof raw.id !== 'string' || typeof raw.name !== 'string') {
+    return null;
+  }
+  return {
+    id: raw.id,
+    name: raw.name,
+    ...(typeof raw.handle === 'string' ? { handle: raw.handle } : {}),
+    ...(typeof raw.avatarUrl === 'string' ? { avatarUrl: raw.avatarUrl } : {}),
+    ...(typeof raw.profileUrl === 'string'
+      ? { profileUrl: raw.profileUrl }
+      : {}),
+  };
+}
+
+function parseMediaAsset(raw: unknown): MediaAsset | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  if (
+    typeof raw.id !== 'string' ||
+    typeof raw.kind !== 'string' ||
+    !VALID_ASSET_KINDS.has(raw.kind) ||
+    typeof raw.strategy !== 'string' ||
+    !VALID_DOWNLOAD_STRATEGIES.has(raw.strategy) ||
+    typeof raw.sourceUrl !== 'string' ||
+    typeof raw.relativePath !== 'string' ||
+    typeof raw.mimeType !== 'string'
+  ) {
+    return null;
+  }
+
+  try {
+    const segs = splitRelativePath(raw.relativePath);
+    if (segs.length === 0) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  const fallbackUrls = Array.isArray(raw.fallbackUrls)
+    ? raw.fallbackUrls.filter((u): u is string => typeof u === 'string')
+    : undefined;
+
+  return {
+    id: raw.id,
+    kind: raw.kind as AssetKind,
+    strategy: raw.strategy as DownloadStrategy,
+    sourceUrl: raw.sourceUrl,
+    relativePath: raw.relativePath,
+    mimeType: raw.mimeType,
+    downloaded: typeof raw.downloaded === 'boolean' ? raw.downloaded : true,
+    ...(fallbackUrls && fallbackUrls.length > 0 ? { fallbackUrls } : {}),
+    ...(typeof raw.audioUrl === 'string' ? { audioUrl: raw.audioUrl } : {}),
+    ...(typeof raw.sizeBytes === 'number' && Number.isFinite(raw.sizeBytes)
+      ? { sizeBytes: raw.sizeBytes }
+      : {}),
+    ...(typeof raw.width === 'number' && Number.isFinite(raw.width)
+      ? { width: raw.width }
+      : {}),
+    ...(typeof raw.height === 'number' && Number.isFinite(raw.height)
+      ? { height: raw.height }
+      : {}),
+    ...(typeof raw.durationSec === 'number' && Number.isFinite(raw.durationSec)
+      ? { durationSec: raw.durationSec }
+      : {}),
+  };
+}
+
+function parsePlatformExtra(
+  raw: unknown,
+): Record<string, PlatformExtraValue> | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const result: Record<string, PlatformExtraValue> = {};
+  let count = 0;
+  for (const [key, val] of Object.entries(raw)) {
+    if (
+      typeof val === 'string' ||
+      typeof val === 'number' ||
+      typeof val === 'boolean' ||
+      val === null
+    ) {
+      result[key] = val;
+      count += 1;
+    }
+  }
+  return count > 0 ? result : undefined;
+}
+
+function parseCollectionItemMeta(
+  raw: unknown,
+  scannedRelativeDir: string,
+): CollectionItemMeta | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+
+  if (
+    typeof raw.id !== 'string' ||
+    !raw.id.trim() ||
+    !isPlatformId(raw.platform) ||
+    typeof raw.sourceId !== 'string' ||
+    !raw.sourceId.trim() ||
+    typeof raw.sourceUrl !== 'string' ||
+    typeof raw.kind !== 'string' ||
+    !VALID_MEDIA_KINDS.has(raw.kind) ||
+    typeof raw.title !== 'string'
+  ) {
+    return null;
+  }
+
+  const author = parseAuthorInfo(raw.author);
+  if (!author) {
+    return null;
+  }
+
+  const collectedAt =
+    typeof raw.collectedAt === 'number' && Number.isFinite(raw.collectedAt)
+      ? raw.collectedAt
+      : Date.now();
+  const updatedAt =
+    typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
+      ? raw.updatedAt
+      : collectedAt;
+
+  const dedupeKey =
+    typeof raw.dedupeKey === 'string' && raw.dedupeKey.trim()
+      ? raw.dedupeKey.trim()
+      : `${raw.platform}:${raw.sourceId}`;
+
+  const assets: MediaAsset[] = [];
+  if (Array.isArray(raw.assets)) {
+    for (const rawAsset of raw.assets) {
+      const parsedAsset = parseMediaAsset(rawAsset);
+      if (parsedAsset) {
+        assets.push(parsedAsset);
+      }
+    }
+  }
+
+  let coverRelativePath: string | undefined;
+  if (typeof raw.coverRelativePath === 'string' && raw.coverRelativePath.trim()) {
+    try {
+      if (splitRelativePath(raw.coverRelativePath).length > 0) {
+        coverRelativePath = raw.coverRelativePath;
+      }
+    } catch {
+      coverRelativePath = undefined;
+    }
+  }
+
+  const platformExtra = parsePlatformExtra(raw.platformExtra);
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    id: raw.id.trim(),
+    dedupeKey,
+    platform: raw.platform,
+    sourceId: raw.sourceId.trim(),
+    sourceUrl: raw.sourceUrl,
+    kind: raw.kind as MediaKind,
+    title: raw.title,
+    description: typeof raw.description === 'string' ? raw.description : '',
+    author,
+    ...(typeof raw.publishedAt === 'number' && Number.isFinite(raw.publishedAt)
+      ? { publishedAt: raw.publishedAt }
+      : {}),
+    collectedAt,
+    updatedAt,
+    folderId: typeof raw.folderId === 'string' ? raw.folderId : null,
+    tags: parseStringArray(raw.tags),
+    note: typeof raw.note === 'string' ? raw.note : '',
+    // 以实际扫描目录为准，确保目录迁移或重整后仍可精准定位同级媒体文件
+    relativeDir: scannedRelativeDir,
+    ...(coverRelativePath !== undefined ? { coverRelativePath } : {}),
+    assets,
+    syncStatus: 'vault_synced',
+    totalSizeBytes:
+      typeof raw.totalSizeBytes === 'number' &&
+      Number.isFinite(raw.totalSizeBytes)
+        ? raw.totalSizeBytes
+        : 0,
+    ...(typeof raw.deletedAt === 'number' && Number.isFinite(raw.deletedAt)
+      ? { deletedAt: raw.deletedAt }
+      : { deletedAt: null }),
+    ...(platformExtra !== undefined ? { platformExtra } : {}),
+  };
+}
+
+function parseTaxonomyFile(raw: unknown): {
+  folders: FolderNode[];
+  tags: TagMeta[];
+} {
+  const folders: FolderNode[] = [];
+  const tags: TagMeta[] = [];
+
+  if (!isRecord(raw)) {
+    return { folders, tags };
+  }
+
+  if (Array.isArray(raw.folders)) {
+    for (const entry of raw.folders) {
+      if (
+        isRecord(entry) &&
+        typeof entry.id === 'string' &&
+        entry.id.trim() &&
+        (entry.parentId === null || typeof entry.parentId === 'string') &&
+        typeof entry.name === 'string' &&
+        entry.name.trim() &&
+        typeof entry.sortOrder === 'number' &&
+        Number.isFinite(entry.sortOrder) &&
+        typeof entry.createdAt === 'number' &&
+        Number.isFinite(entry.createdAt) &&
+        typeof entry.updatedAt === 'number' &&
+        Number.isFinite(entry.updatedAt)
+      ) {
+        folders.push({
+          id: entry.id.trim(),
+          parentId: entry.parentId,
+          name: entry.name.trim(),
+          sortOrder: entry.sortOrder,
+          createdAt: entry.createdAt,
+          updatedAt: entry.updatedAt,
+        });
+      }
+    }
+  }
+
+  if (Array.isArray(raw.tags)) {
+    for (const entry of raw.tags) {
+      if (
+        isRecord(entry) &&
+        typeof entry.name === 'string' &&
+        entry.name.trim() &&
+        typeof entry.color === 'string' &&
+        entry.color.trim() &&
+        typeof entry.createdAt === 'number' &&
+        Number.isFinite(entry.createdAt)
+      ) {
+        tags.push({
+          name: entry.name.trim(),
+          color: entry.color.trim(),
+          createdAt: entry.createdAt,
+        });
+      }
+    }
+  }
+
+  return { folders, tags };
+}
+
+interface ScannedMetaFile {
+  dirHandle: FileSystemDirectoryHandle;
+  fileHandle: FileSystemFileHandle;
+  relativeDir: string;
+}
+
+async function scanMetaFilesRecursively(
+  dir: FileSystemDirectoryHandle,
+  currentRelativeDir: string,
+  results: ScannedMetaFile[],
+): Promise<void> {
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind === 'file' && name === 'meta.json') {
+      results.push({
+        dirHandle: dir,
+        fileHandle: handle,
+        relativeDir: currentRelativeDir,
+      });
+    } else if (handle.kind === 'directory') {
+      const nextRelativeDir = currentRelativeDir
+        ? `${currentRelativeDir}/${name}`
+        : name;
+      await scanMetaFilesRecursively(handle, nextRelativeDir, results);
+    }
+  }
+}
+
+/**
+ * 容灾重建 IndexedDB 索引：
+ * 1. 守护 `README.txt` 并读取 `.collect-vault.json` 与 `taxonomy.json`；
+ * 2. 递归扫描 `items/` 下全部 `meta.json`，校验核心字段合法性并生成缩略图；
+ * 3. 在 Dexie 事务中重建 `items`、`folders`、`tags`，清理已结束的 `tasks` 残留，
+ *    绝不破坏 `settings` 中的 `vault_directory_handle`；
+ * 4. 所有恢复条目标记为 `vault_synced`，并自动补齐被条目引用但 `taxonomy.json` 遗漏的标签。
+ */
+export async function rebuildIndexFromVault(
+  root: FileSystemDirectoryHandle,
+  onProgress?: (p: RebuildProgress) => void,
+): Promise<RebuildSummary> {
+  await ensureVaultReadme(root);
+
+  // 读取并同步 .collect-vault.json（如果合法）
+  const configFile = await readVaultFile(root, VAULT_CONFIG_FILENAME);
+  if (configFile) {
+    try {
+      const parsedConfig = parseVaultConfig(
+        JSON.parse(await configFile.text()) as unknown,
+      );
+      if (parsedConfig) {
+        await setSetting('vault_config', parsedConfig);
+      }
+    } catch {
+      // 忽略损坏配置，不阻塞索引恢复
+    }
+  }
+
+  // 读取并解析 taxonomy.json
+  let taxonomyFolders: FolderNode[] = [];
+  let taxonomyTags: TagMeta[] = [];
+  const taxonomyFile = await readVaultFile(root, TAXONOMY_FILENAME);
+  if (taxonomyFile) {
+    try {
+      const parsedTaxonomy = parseTaxonomyFile(
+        JSON.parse(await taxonomyFile.text()) as unknown,
+      );
+      taxonomyFolders = parsedTaxonomy.folders;
+      taxonomyTags = parsedTaxonomy.tags;
+    } catch {
+      // taxonomy.json 缺失或损坏时仍继续恢复 items 并从条目标签自动补齐
+    }
+  }
+
+  const folderMap = new Map<string, FolderNode>();
+  for (const folder of taxonomyFolders) {
+    folderMap.set(folder.id, folder);
+  }
+  // 清理悬空的 parentId 引用
+  const normalizedFolders: FolderNode[] = [];
+  for (const folder of folderMap.values()) {
+    normalizedFolders.push({
+      ...folder,
+      parentId:
+        folder.parentId !== null && folderMap.has(folder.parentId)
+          ? folder.parentId
+          : null,
+    });
+  }
+
+  const tagMap = new Map<string, TagMeta>();
+  for (const tag of taxonomyTags) {
+    tagMap.set(tag.name, tag);
+  }
+
+  // 递归收集 items/ 下全部 meta.json
+  const metaFiles: ScannedMetaFile[] = [];
+  try {
+    const itemsDir = await root.getDirectoryHandle(ITEMS_DIRNAME, {
+      create: false,
+    });
+    await scanMetaFilesRecursively(itemsDir, ITEMS_DIRNAME, metaFiles);
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw error;
+    }
+  }
+
+  let skippedFiles = 0;
+  const recordsById = new Map<string, CollectionItemRecord>();
+  const idByDedupeKey = new Map<string, string>();
+
+  for (const entry of metaFiles) {
+    try {
+      const file = await entry.fileHandle.getFile();
+      const raw: unknown = JSON.parse(await file.text());
+      const parsedMeta = parseCollectionItemMeta(raw, entry.relativeDir);
+      if (!parsedMeta) {
+        skippedFiles += 1;
+        continue;
+      }
+
+      // 若 folderId 不存在于恢复出的文件夹中，回退为未归类
+      if (
+        parsedMeta.folderId !== null &&
+        !folderMap.has(parsedMeta.folderId)
+      ) {
+        parsedMeta.folderId = null;
+      }
+
+      // 去重冲突处理：同一 id 或 dedupeKey 保留 updatedAt 较新的记录
+      const existingById = recordsById.get(parsedMeta.id);
+      if (existingById) {
+        skippedFiles += 1;
+        if (existingById.updatedAt >= parsedMeta.updatedAt) {
+          continue;
+        }
+      }
+
+      const existingIdForDedupe = idByDedupeKey.get(parsedMeta.dedupeKey);
+      if (existingIdForDedupe && existingIdForDedupe !== parsedMeta.id) {
+        const prev = recordsById.get(existingIdForDedupe);
+        skippedFiles += 1;
+        if (prev && prev.updatedAt >= parsedMeta.updatedAt) {
+          continue;
+        }
+        recordsById.delete(existingIdForDedupe);
+      }
+
+      // 尝试从条目目录读取封面并生成轻量缩略图
+      let thumbnailDataUrl: string | undefined;
+      if (parsedMeta.coverRelativePath) {
+        const coverFile = await readVaultFile(
+          entry.dirHandle,
+          parsedMeta.coverRelativePath,
+        );
+        if (coverFile) {
+          thumbnailDataUrl = await generateThumbnailFromBlob(coverFile, 360);
+        }
+      }
+
+      const record: CollectionItemRecord = {
+        ...parsedMeta,
+        syncStatus: 'vault_synced',
+        ...(thumbnailDataUrl !== undefined ? { thumbnailDataUrl } : {}),
+      };
+
+      recordsById.set(record.id, record);
+      idByDedupeKey.set(record.dedupeKey, record.id);
+
+      onProgress?.({
+        phase: 'scanning',
+        scannedItems: recordsById.size,
+        currentTitle: record.title,
+      });
+    } catch {
+      skippedFiles += 1;
+    }
+  }
+
+  const restoredRecords = [...recordsById.values()];
+
+  // 补齐条目引用到但 taxonomy.json 遗漏的标签
+  const now = Date.now();
+  for (const record of restoredRecords) {
+    for (const tagName of record.tags) {
+      if (!tagMap.has(tagName)) {
+        tagMap.set(tagName, {
+          name: tagName,
+          color: pickTagColor(tagName),
+          createdAt: now,
+        });
+      }
+    }
+  }
+  const normalizedTags = [...tagMap.values()];
+
+  onProgress?.({
+    phase: 'importing',
+    scannedItems: restoredRecords.length,
+  });
+
+  await db.transaction('rw', db.items, db.folders, db.tags, db.tasks, async () => {
+    await Promise.all([db.items.clear(), db.folders.clear(), db.tags.clear()]);
+
+    // 仅清理已结束的历史任务残留，不干扰 settings（特别是 vault_directory_handle）
+    const finishedTasks = await db.tasks
+      .where('status')
+      .anyOf(['completed', 'failed', 'cancelled'])
+      .primaryKeys();
+    if (finishedTasks.length > 0) {
+      await db.tasks.bulkDelete(finishedTasks);
+    }
+
+    if (normalizedFolders.length > 0) {
+      await db.folders.bulkPut(normalizedFolders);
+    }
+    if (normalizedTags.length > 0) {
+      await db.tags.bulkPut(normalizedTags);
+    }
+    if (restoredRecords.length > 0) {
+      await db.items.bulkPut(restoredRecords);
+    }
+  });
+
+  await setSetting('last_sync_at', Date.now());
+
+  onProgress?.({
+    phase: 'done',
+    scannedItems: restoredRecords.length,
+  });
+
+  return {
+    restoredItems: restoredRecords.length,
+    restoredFolders: normalizedFolders.length,
+    restoredTags: normalizedTags.length,
+    skippedFiles,
+  };
+}
