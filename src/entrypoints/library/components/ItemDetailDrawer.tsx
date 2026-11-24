@@ -180,12 +180,12 @@ export function ItemDetailDrawer({
     setDraftTags(item.tags);
     setDraftNote(item.note);
     setTagInput('');
-    setSaveFeedback(null);
   }, [item.id, item.updatedAt, item.title, item.folderId, item.tags, item.note]);
 
-  // 切换条目时重置图集页码
+  // 仅在切换不同条目时重置图集页码与保存反馈提示，避免保存后 liveQuery 刷新把成功提示瞬间擦除
   useEffect(() => {
     setActiveSlideIndex(0);
+    setSaveFeedback(null);
   }, [item.id]);
 
   // 仅在媒体来源或授权状态真正变化时重新加载，避免编辑标题/标签/备注时打断播放

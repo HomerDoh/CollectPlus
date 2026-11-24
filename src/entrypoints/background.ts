@@ -820,29 +820,43 @@ async function handleOffscreenProgress(
   message: Extract<BackgroundMessage, { type: 'OFFSCREEN_PROGRESS' }>,
 ): Promise<BackgroundResponseMap['OFFSCREEN_PROGRESS']> {
   try {
-    const task = await db.tasks.get(message.taskId);
-    if (!task || task.status === 'cancelled' || task.status === 'completed') {
-      return { ok: true };
-    }
-
     const clampedProgress = Math.max(0, Math.min(100, Math.round(message.progress)));
-    await db.tasks.put({
-      ...task,
-      status: 'downloading',
-      progress: clampedProgress,
-      completedAssets: message.completedAssets,
-      totalAssets: message.totalAssets,
-      downloadedBytes: message.downloadedBytes,
-      totalBytes: message.totalBytes,
-      updatedAt: Date.now(),
+    let taskTitle: string | undefined;
+    let shouldPush = false;
+
+    await db.transaction('rw', db.tasks, async () => {
+      const task = await db.tasks.get(message.taskId);
+      if (
+        !task ||
+        task.status === 'cancelled' ||
+        task.status === 'completed' ||
+        task.status === 'failed'
+      ) {
+        return;
+      }
+
+      taskTitle = task.title;
+      shouldPush = true;
+      await db.tasks.put({
+        ...task,
+        status: 'downloading',
+        progress: clampedProgress,
+        completedAssets: message.completedAssets,
+        totalAssets: message.totalAssets,
+        downloadedBytes: message.downloadedBytes,
+        totalBytes: message.totalBytes,
+        updatedAt: Date.now(),
+      });
     });
 
-    await pushTaskStatusToOriginTab(message.taskId, {
-      itemId: message.itemId,
-      status: 'downloading',
-      progress: clampedProgress,
-      title: task.title,
-    });
+    if (shouldPush && taskTitle !== undefined) {
+      await pushTaskStatusToOriginTab(message.taskId, {
+        itemId: message.itemId,
+        status: 'downloading',
+        progress: clampedProgress,
+        title: taskTitle,
+      });
+    }
   } catch (error) {
     console.warn('[Collect+] Failed to handle OFFSCREEN_PROGRESS:', error);
   }

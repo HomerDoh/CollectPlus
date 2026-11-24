@@ -31,6 +31,13 @@ coverage/
 # Local vault test directory (prevent accidental commit of personal media)
 CollectVault/
 
+# Playwright E2E test outputs & persistent browser profile
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.playwright-profile/
+
 # OS files
 .DS_Store
 Thumbs.db

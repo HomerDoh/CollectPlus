@@ -11,6 +11,7 @@
   - 前端 UI：`React 19` + `TypeScript` (`strict: true`) + `Tailwind CSS v4` + `lucide-react`
   - 媒体下载（方案 A）：Offscreen Document 内原生 `fetch()` + `ReadableStream` + `chrome.declarativeNetRequest`（会话级动态 Referer 防盗链）+ `Mediabunny`（纯 TS DASH/HLS 无损混流封装）
   - 双层存储：`Dexie.js` + `dexie-react-hooks`（IndexedDB 高速索引）+ `MiniSearch`（中英文全文检索）+ `OPFS`（后台静默流式暂存）+ `File System Access API`（本地 `CollectVault/` 真相源）
+  - 自动化验证：`@playwright/test`（基于 Chrome for Testing 加载 `.output/chrome-mv3` 扩展，结合 `context.route()` 与浏览器级 CDP `Fetch` 拦截 Offscreen 下载，实现确定性全链路 E2E 回归）
 
 ## 2. Setup, Build & Verification Commands
 
@@ -20,14 +21,24 @@
 # 安装依赖（postinstall 会自动执行 wxt prepare）
 pnpm install
 
+# 首次运行 E2E 前安装 Playwright Chrome for Testing 浏览器内核
+pnpm exec playwright install chromium
+
 # 开发模式（热更新加载）
 pnpm dev
 
-# 严格 TypeScript 类型检查（必须 0 错误）
+# 严格 TypeScript 类型检查（必须 0 错误，覆盖 src/ 与 tests/）
 pnpm compile
 
 # 生产构建（产物输出至 .output/chrome-mv3/）
 pnpm build
+
+# 浏览器全链路 E2E 测试（无头模式，运行前须先执行 pnpm build）
+pnpm test:e2e
+
+# 有头可视化调试模式 / Playwright UI 交互式追踪
+pnpm test:e2e:headed
+pnpm test:e2e:ui
 
 # 打包发布用 zip
 pnpm zip
@@ -40,15 +51,24 @@ pnpm zip
 1. 运行 `pnpm compile`（`tsc --noEmit`）确认 0 类型错误。
 2. 运行 `pnpm build`（`wxt build`）确认 `.output/chrome-mv3/manifest.json`、页面入口、Content Script 与图标完整生成。
 3. 检索改动文件确认无 `any`、`@ts-ignore`、`@ts-expect-error` 或未实现的 `TODO` 空壳。
-4. 如改动了核心纯逻辑（路径清洗、适配器解析、搜索分词），使用 Node 24 原生 TS 能力运行断言脚本快速回归验证。
+4. 涉及内容脚本、Shadow DOM、消息协议、Offscreen 下载管线、存储状态机或扩展页面 UI 改动时，运行 `pnpm test:e2e` 确认浏览器全链路 E2E 全部通过。
+5. 如改动了核心纯逻辑（路径清洗、适配器解析、搜索分词），同步补充或运行断言/E2E 回归验证。
 
 ## 3. Repository Map
 
 ```text
 .
 ├── wxt.config.ts                          # WXT 与 MV3 Manifest（权限、host_permissions、快捷键）
-├── tsconfig.json                          # TS 严格配置（注意 TS 7 需在 types 中显式声明 chrome）
+├── tsconfig.json                          # TS 严格配置（TS 7 显式声明 types: ["chrome", "node"]）
+├── playwright.config.ts                   # Playwright E2E 配置（单 worker 串行、失败自动保留截图与 trace）
 ├── .cursor/agents/coder.md                # 专属编码子 Agent 规范（主 Agent 调度 + /coder 实现）
+├── tests/
+│   └── e2e/
+│       ├── fixtures/
+│       │   ├── extension.ts               # MV3 扩展测试 Fixture（launchPersistentContext、extensionId、SW、pageErrors）
+│       │   └── douyin-mock.ts             # 抖音页面/API Mock + 浏览器级 CDP Fetch 拦截 Offscreen CDN 请求
+│       ├── extension-smoke.spec.ts        # 启动冒烟：SW 初始化、DNR initiator 安全红线、Popup/SidePanel/Library 渲染
+│       └── douyin-capture.spec.ts         # 抖音全链路 E2E：悬浮按钮/原生收藏、OPFS 暂存、快捷分类、检索、离线播放与画廊
 └── src/
     ├── types/
     │   ├── schema.ts                      # 统一元数据 Schema、stripRecordToMeta、SettingRecord
@@ -89,7 +109,7 @@ pnpm zip
 
 - **零 `any` 铁律**：严格启用 `strict: true`，严禁使用 `any`、非必要类型断言或 `@ts-ignore`。所有外部 API、页面拦截数据、`window.postMessage` 和 `chrome.runtime.onMessage` 负载均以 `unknown` 接收，并经运行时类型守卫收窄。
 - **模块导入规范**：遵循 `verbatimModuleSyntax`，纯类型导入必须使用 `import type`；相对导入保留显式 `.ts` / `.tsx` 扩展名。
-- **TypeScript 7 全局类型**：项目使用 TypeScript 7，`tsconfig.json` 中显式声明 `"types": ["chrome"]`。如新增仅依赖全局声明的 `@types/*` 包，必须同步补充到 `compilerOptions.types`。
+- **TypeScript 7 全局类型**：项目使用 TypeScript 7，`tsconfig.json` 中显式声明 `"types": ["chrome", "node"]`（`playwright.config.ts` 与 `tests/e2e/**` 同样纳入 `pnpm compile` 严格校验与零 `any` 约束）。如新增仅依赖全局声明的 `@types/*` 包，必须同步补充到 `compilerOptions.types`。
 - **跨上下文消息隔离**：所有内部扩展消息必须携带 `target: 'background' | 'offscreen' | 'content'`，各上下文监听器先用 `isBackgroundMessage` / `isOffscreenMessage` / `isContentMessage` 过滤，非目标消息直接 `return false`，防止 Background 与 Offscreen 互相误消费。
 - **Main World 纯净性**：`world: 'MAIN'` 脚本（如 `main-hook.ts`、`*-main.content.ts`）运行在宿主网页上下文，**严禁**引入 `chrome.*` API、Dexie 或 React 运行时；仅允许通过 `window.postMessage` + `PAGE_BRIDGE_CHANNEL` 与 Isolated Content Script 通信。
 - **Shadow DOM 样式隔离**：注入宿主页面的 UI 必须使用 WXT `createShadowRootUi` + `cssInjectionMode: 'ui'`，样式表优先使用固定 `px` 单位与 `:host { all: initial; }`，避免受宿主页字体缩放或全局 CSS 干扰。
@@ -138,15 +158,49 @@ pnpm zip
 4. **注册适配器**：在 `src/adapters/registry.ts` 的 `REGISTERED_ADAPTERS` 中加入新适配器，DNR 防盗链与 URL 匹配将自动生效。
 5. **添加内容脚本入口**：在 `src/entrypoints/` 新增 `<platform>-main.content.ts`（`world: 'MAIN'`, `runAt: 'document_start'`）与 `<platform>.content.tsx`（复用 `CaptureOverlay` Shadow DOM 组件）。
 6. **UI 文案与徽标**：在 `src/entrypoints/library/utils/format.ts` 的 `platformMeta` 中确认该平台的展示文案与配色。
+7. **补齐 Playwright E2E 回归**：在 `tests/e2e/fixtures/<platform>-mock.ts` 与 `tests/e2e/<platform>-capture.spec.ts` 中编写确定性 Mock 采集与离线播放用例，运行 `pnpm build` 与 `pnpm test:e2e` 验收。
 
-## 7. Security & Anti-Abuse Guardrails
+## 7. Browser E2E Testing with Playwright
+
+本项目统一采用 **Playwright + Chrome for Testing** 作为 Agent 浏览器验证与回归测试方案（禁止使用无法加载 MV3 扩展的 Cursor 内置 Browser WebView 或缺乏断言体系的通用浏览代理替代回归测试）。
+
+### 核心架构约束与避坑指南
+
+1. **浏览器通道选择（Chrome 137+ 兼容性）**：
+   - 品牌正式版 Google Chrome（137+）已移除 `--load-extension` 参数，**严禁**在 Fixture 中硬编码 `channel: 'chrome'`。
+   - `tests/e2e/fixtures/extension.ts` 统一使用 `chromium.launchPersistentContext(userDataDir, { channel: 'chromium', headless, args: ['--disable-extensions-except=...', '--load-extension=...'] })`，调用 Playwright 自带的 Chrome for Testing，在无头（`pnpm test:e2e`）和有头（`pnpm test:e2e:headed`）模式下均可稳定加载 MV3 扩展与 Service Worker。
+   - 注意：测试加载的是构建产物 `.output/chrome-mv3/`，每次修改 `src/` 代码后**必须先执行 `pnpm build` 再运行 `pnpm test:e2e`**。
+2. **复用标准 Fixture（`tests/e2e/fixtures/extension.ts`）**：
+   - 每个用例自动分配独立的临时 `userDataDir` 并在结束时清理，保证 IndexedDB、OPFS 与 DNR 会话状态 100% 隔离。
+   - 直接解构使用 `{ context, serviceWorker, extensionId, extensionUrl, pageErrors }`：
+     - `serviceWorker.evaluate(...)` 可直接验证后台 `chrome.declarativeNetRequest.getSessionRules()` 等扩展内部状态；
+     - `extensionUrl('library.html' | 'sidepanel.html' | 'popup.html')` 自动拼接动态 `extensionId`；
+     - 用例结尾应断言 `expect(pageErrors).toEqual([])` 确保无未捕获运行时异常。
+3. **MV3 Offscreen Document 网络拦截关键机制**：
+   - Playwright 的 `page.route()` / `context.route()` **无法拦截** Chrome MV3 Offscreen Document 发出的 `fetch()` 请求。
+   - 测试媒体下载链路时，**必须**参照 `tests/e2e/fixtures/douyin-mock.ts` 中的 `attachBrowserCdpCdnMock`，通过 `context.browser().newBrowserCDPSession()` 启用浏览器级 CDP `Fetch.enable` + `Fetch.fulfillRequest` 拦截 Offscreen 发出的媒体 CDN 请求，返回合法 PNG/MP4 二进制负载，从而 100% 离线验证：流式下载 → OPFS 落盘 → `createImageBitmap` 生成离线 WebP 缩略图 → 管理台 `blob:` 离线播放。
+   - 用例结束后务必调用 `tracker.dispose()` 释放 CDP Session。
+4. **Shadow DOM 交互与状态断言**：
+   - Playwright CSS Locator 默认穿透开放 Shadow DOM（如 `page.locator('button.cp-fab-btn')`、`.cp-toast-card`），无需手写 `shadowRoot` 查找。
+   - File System Access API（`showDirectoryPicker`）受操作系统原生弹窗限制，若需单测 Vault 落盘逻辑应在页面上下文注入内存 Mock `FileSystemDirectoryHandle`，不要尝试自动化 OS 文件选择器弹窗。
+5. **真实站点有头联调（按需手工验证）**：
+   - 默认 E2E 全程走确定性 Mock，免登录、零风控、数秒完成回归。
+   - 如需在真实抖音页面验证页面结构/接口变更，可配合持久化用户目录启动有头模式（`.playwright-profile/` 已加入 `.gitignore`）：
+     ```powershell
+     $env:E2E_USER_DATA_DIR=".playwright-profile"; pnpm test:e2e:headed
+     ```
+6. **失败诊断与 Agent 自修复**：
+   - `playwright.config.ts` 已开启 `screenshot: 'only-on-failure'`、`trace: 'retain-on-failure'`，并配置 HTML 报告 `open: 'never'`（不会阻塞终端）。
+   - 用例失败后，Agent 应优先读取 `test-results/<case>/error-context.md`（含页面无障碍树快照）与失败截图 `.png` 定位根因，再针对性修复代码并重新 `pnpm build` + `pnpm test:e2e` 验证。
+
+## 8. Security & Anti-Abuse Guardrails
 
 - **最小影响原则**：所有 Session DNR 规则**必须**设置 `initiatorDomains: [chrome.runtime.id]`，严禁修改用户正常浏览网页的请求头。
 - **免风控被动采集**：严禁在扩展内逆向或高频主动调用平台受签名保护的私有接口，所有数据尽量由页面自然浏览响应旁路截获。
 - **零敏感凭证落盘**：严禁在 `meta.json`、IndexedDB 或控制台日志中存储用户的 Cookie、`Authorization`、Session Token 或私有鉴权参数。
 - **不引入未批准重型依赖**：优先复用现有技术栈与原生 Web/Extension API，新增运行时依赖前需确认体积与 MV3 CSP 兼容性（禁止 `eval` / 远程脚本）。
 
-## 8. Multi-Agent Collaboration Workflow
+## 9. Multi-Agent Collaboration Workflow
 
 - 本仓库在 `.cursor/agents/coder.md` 中配置了专属编码子 Agent（`/coder`）。推荐采用「**主 Agent 负责需求拆解、架构把关、任务书派发与构建验收；`/coder` 负责精准编码落地**」的协作模式。
 - 编码改动应严格控制在当前里程碑或任务书范围内，不越权改动跨模块公开契约；如需调整 `src/types/*` 或存储 Schema 版本（`SCHEMA_VERSION`），必须同步评估向后兼容与 `rebuildIndexFromVault` 迁移策略。

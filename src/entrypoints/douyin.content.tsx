@@ -156,6 +156,8 @@ export default defineContentScript({
 
     const pendingRequests = new Map<string, PendingItemRequest>();
     const recentNativeCaptures = new Map<string, number>();
+    /** 暂存早于 CAPTURE_ITEM 响应到达的后台状态推送，防止极速下载丢失终态事件 */
+    const earlyStatusByItemId = new Map<string, ContentCaptureStatusMessage>();
 
     const nextRevision = (): number => {
       toastRevision += 1;
@@ -200,14 +202,12 @@ export default defineContentScript({
         title: payload.title,
       });
 
-      const [captureResponse] = await Promise.all([
-        sendToBackground({
-          target: 'background',
-          type: 'CAPTURE_ITEM',
-          payload,
-        }),
-        refreshTaxonomy(),
-      ]);
+      const captureResponse = await sendToBackground({
+        target: 'background',
+        type: 'CAPTURE_ITEM',
+        payload,
+      });
+      void refreshTaxonomy();
 
       if (!captureResponse || !captureResponse.ok) {
         const errMsg =
@@ -234,6 +234,12 @@ export default defineContentScript({
         title: item.title,
         item,
       });
+
+      const earlyStatus = earlyStatusByItemId.get(itemId);
+      if (earlyStatus) {
+        earlyStatusByItemId.delete(itemId);
+        applyContentCaptureStatus(earlyStatus);
+      }
     };
 
     const requestCurrentItemFromMainWorld = (
@@ -394,6 +400,8 @@ export default defineContentScript({
     const applyContentCaptureStatus = (
       message: ContentCaptureStatusMessage,
     ): void => {
+      let matchedCurrentToast = false;
+
       updateState((prev) => {
         const current = prev.toast;
         if (!current) {
@@ -404,6 +412,15 @@ export default defineContentScript({
         const matchesTask =
           message.taskId !== undefined && current.taskId === message.taskId;
         if (!matchesItem && !matchesTask) {
+          return prev;
+        }
+        matchedCurrentToast = true;
+
+        // 终态防乱序回退：已进入 staged 后忽略迟到的 queued/downloading 进度包
+        if (
+          current.status === 'staged' &&
+          (message.status === 'queued' || message.status === 'downloading')
+        ) {
           return prev;
         }
 
@@ -452,6 +469,23 @@ export default defineContentScript({
           },
         };
       });
+
+      if (!matchedCurrentToast) {
+        const existingEarly = earlyStatusByItemId.get(message.itemId);
+        if (
+          existingEarly?.status === 'staged' &&
+          (message.status === 'queued' || message.status === 'downloading')
+        ) {
+          return;
+        }
+        earlyStatusByItemId.set(message.itemId, message);
+        if (earlyStatusByItemId.size > 32) {
+          const oldestKey = earlyStatusByItemId.keys().next().value;
+          if (oldestKey !== undefined) {
+            earlyStatusByItemId.delete(oldestKey);
+          }
+        }
+      }
     };
 
     // 1. 监听 Main World 桥接消息
