@@ -33,6 +33,7 @@ import {
   type FlushSummary,
   type RebuildProgress,
   type RebuildSummary,
+  type VaultPermissionStatus,
 } from '@/storage/vault.ts';
 import type {
   CollectionItemRecord,
@@ -50,25 +51,24 @@ import {
   type ItemEditPatch,
   type SaveItemResult,
 } from './components/ItemDetailDrawer.tsx';
-import { SettingsPanel } from './components/SettingsPanel.tsx';
+import {
+  SettingsPanel,
+  type VaultActionError,
+} from './components/SettingsPanel.tsx';
 import {
   SidebarTree,
   type MediaKindFilter,
   type PlatformFilter,
   type QuickNavView,
+  type SidebarSyncStatus,
 } from './components/SidebarTree.tsx';
-import {
-  VaultBanner,
-  type VaultBannerError,
-  type VaultPermissionStatus,
-} from './components/VaultBanner.tsx';
 import { getErrorMessage } from './utils/format.ts';
 
-function toVaultBannerError(
+function toVaultActionError(
   prefix: string,
   error: unknown,
   fallbackDirName?: string,
-): string | VaultBannerError {
+): string | VaultActionError {
   if (isFilesystemWriteDeniedError(error)) {
     const message =
       error instanceof VaultFilesystemPermissionError
@@ -185,8 +185,8 @@ export default function App() {
   const [lastRebuildSummary, setLastRebuildSummary] =
     useState<RebuildSummary | null>(null);
   const [showRebuildSuggestion, setShowRebuildSuggestion] = useState(false);
-  const [bannerError, setBannerError] = useState<
-    string | VaultBannerError | null
+  const [vaultError, setVaultError] = useState<
+    string | VaultActionError | null
   >(null);
 
   const vaultBusyRef = useRef(false);
@@ -197,6 +197,7 @@ export default function App() {
   const [activePage, setActivePage] = useState<'library' | 'settings'>(
     'library',
   );
+  const [vaultSectionFocusTick, setVaultSectionFocusTick] = useState(0);
   const [activeView, setActiveView] = useState<QuickNavView>('all');
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [mediaKindFilter, setMediaKindFilter] =
@@ -291,7 +292,7 @@ export default function App() {
       }
       vaultBusyRef.current = true;
       setIsFlushing(true);
-      setBannerError(null);
+      setVaultError(null);
       setLastRebuildSummary(null);
       setFlushProgress({ phase: 'preparing', current: 0, total: 0 });
 
@@ -308,8 +309,8 @@ export default function App() {
           setLastFlushSummary(summary);
         }
       } catch (error) {
-        setBannerError(
-          toVaultBannerError('同步到 CollectVault 失败', error, handle.name),
+        setVaultError(
+          toVaultActionError('同步到 CollectVault 失败', error, handle.name),
         );
       } finally {
         setIsFlushing(false);
@@ -361,7 +362,7 @@ export default function App() {
         }
       } catch (error) {
         if (!disposed) {
-          setBannerError(`读取本地目录状态失败：${getErrorMessage(error)}`);
+          setVaultError(`读取本地目录状态失败：${getErrorMessage(error)}`);
         }
       }
     };
@@ -378,7 +379,7 @@ export default function App() {
     if (vaultBusyRef.current) {
       return;
     }
-    setBannerError(null);
+    setVaultError(null);
     setLastFlushSummary(null);
     setLastRebuildSummary(null);
 
@@ -404,13 +405,13 @@ export default function App() {
       if (isAbortError(error)) {
         return;
       }
-      setBannerError(toVaultBannerError('绑定本地目录失败', error));
+      setVaultError(toVaultActionError('绑定本地目录失败', error));
     }
   }, [runFlushToVault]);
 
   // 9. 请求已有目录权限并在授权后同步待落盘条目
   const handleRequestPermissionAndSync = useCallback(async (): Promise<boolean> => {
-    setBannerError(null);
+    setVaultError(null);
 
     if (!vaultHandle) {
       await handleBindVault();
@@ -430,7 +431,7 @@ export default function App() {
       setPermissionState(nextPerm);
 
       if (!granted) {
-        setBannerError('未授予本地 CollectVault 目录的读写权限。');
+        setVaultError('未授予本地 CollectVault 目录的读写权限。');
         return false;
       }
 
@@ -441,7 +442,7 @@ export default function App() {
       return true;
     } catch (error) {
       if (!isAbortError(error)) {
-        setBannerError(`请求本地目录权限失败：${getErrorMessage(error)}`);
+        setVaultError(`请求本地目录权限失败：${getErrorMessage(error)}`);
       }
       return false;
     }
@@ -455,7 +456,7 @@ export default function App() {
     const granted = await requestVaultPermission(vaultHandle, 'readwrite');
     if (!granted) {
       setPermissionState(await queryVaultPermission(vaultHandle, 'readwrite'));
-      setBannerError('缺少本地目录写权限，无法执行同步。');
+      setVaultError('缺少本地目录写权限，无法执行同步。');
       return;
     }
     setPermissionState('granted');
@@ -470,7 +471,7 @@ export default function App() {
     const granted = await requestVaultPermission(vaultHandle, 'readwrite');
     if (!granted) {
       setPermissionState(await queryVaultPermission(vaultHandle, 'readwrite'));
-      setBannerError('缺少本地目录权限，无法重建索引。');
+      setVaultError('缺少本地目录权限，无法重建索引。');
       return;
     }
     setPermissionState('granted');
@@ -478,7 +479,7 @@ export default function App() {
     vaultBusyRef.current = true;
     setIsRebuilding(true);
     setShowRebuildSuggestion(false);
-    setBannerError(null);
+    setVaultError(null);
     setLastFlushSummary(null);
     setRebuildProgress({ phase: 'scanning', scannedItems: 0 });
 
@@ -488,7 +489,7 @@ export default function App() {
       });
       setLastRebuildSummary(summary);
     } catch (error) {
-      setBannerError(`重建索引失败：${getErrorMessage(error)}`);
+      setVaultError(`重建索引失败：${getErrorMessage(error)}`);
     } finally {
       setIsRebuilding(false);
       setRebuildProgress(null);
@@ -501,7 +502,7 @@ export default function App() {
     if (vaultBusyRef.current) {
       return;
     }
-    setBannerError(null);
+    setVaultError(null);
     setLastFlushSummary(null);
     setLastRebuildSummary(null);
 
@@ -529,7 +530,7 @@ export default function App() {
         setShowRebuildSuggestion(true);
       }
     } catch (error) {
-      setBannerError(`清空浏览器缓存索引失败：${getErrorMessage(error)}`);
+      setVaultError(`清空浏览器缓存索引失败：${getErrorMessage(error)}`);
     }
   }, [closeItemDrawer, vaultHandle, permissionState]);
 
@@ -541,8 +542,8 @@ export default function App() {
     try {
       await writeTaxonomyToVault(vaultHandle);
     } catch (error) {
-      setBannerError(
-        toVaultBannerError('回写 taxonomy.json 失败', error, vaultHandle.name),
+      setVaultError(
+        toVaultActionError('回写 taxonomy.json 失败', error, vaultHandle.name),
       );
     }
   }, [vaultHandle, permissionState]);
@@ -606,7 +607,8 @@ export default function App() {
         // 若条目仍处于 opfs_staged，媒体文件尚在 OPFS 中，保留 opfs_staged 等待落盘以免丢失媒体
         return {
           syncedToVault: false,
-          message: '分类已保存并更新 taxonomy.json，请点击顶部同步将暂存媒体落盘',
+          message:
+            '分类已保存并更新 taxonomy.json，请在设置页点击「立即同步」将暂存媒体落盘',
         };
       }
 
@@ -635,8 +637,8 @@ export default function App() {
           await db.items.put(synced);
         }
       } catch (error) {
-        setBannerError(
-          toVaultBannerError('回写条目元数据失败', error, vaultHandle.name),
+        setVaultError(
+          toVaultActionError('回写条目元数据失败', error, vaultHandle.name),
         );
       }
     },
@@ -868,6 +870,19 @@ export default function App() {
     [items],
   );
 
+  const sidebarSyncStatus: SidebarSyncStatus =
+    vaultHandle !== null &&
+    permissionState === 'granted' &&
+    vaultError === null &&
+    !(lastFlushSummary !== null && lastFlushSummary.failedCount > 0)
+      ? 'syncing'
+      : 'failed';
+
+  const handleOpenVaultSettings = useCallback(() => {
+    setActivePage('settings');
+    setVaultSectionFocusTick((n) => n + 1);
+  }, []);
+
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 text-slate-900">
       {/* 左侧导航与多级文件夹分类树 */}
@@ -881,6 +896,7 @@ export default function App() {
         platformFilter={platformFilter}
         selectedTag={selectedTag}
         isSettingsOpen={activePage === 'settings'}
+        syncStatus={sidebarSyncStatus}
         onSelectView={(view) => {
           setActivePage('library');
           setSelectedFolderId(null);
@@ -905,6 +921,7 @@ export default function App() {
         onOpenSettings={() => {
           setActivePage('settings');
         }}
+        onOpenVaultSettings={handleOpenVaultSettings}
         onCreateFolder={handleCreateFolder}
         onRenameFolder={handleRenameFolder}
         onDeleteFolder={handleDeleteFolder}
@@ -912,35 +929,6 @@ export default function App() {
 
       {/* 右侧主工作区 */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Vault 状态横幅 */}
-        <VaultBanner
-          vaultHandle={vaultHandle}
-          permissionState={permissionState}
-          lastSyncAt={lastSyncAt}
-          stagedCount={stagedCount}
-          metaDirtyCount={metaDirtyCount}
-          isFlushing={isFlushing}
-          flushProgress={flushProgress}
-          lastFlushSummary={lastFlushSummary}
-          isRebuilding={isRebuilding}
-          rebuildProgress={rebuildProgress}
-          lastRebuildSummary={lastRebuildSummary}
-          showRebuildSuggestion={showRebuildSuggestion}
-          bannerError={bannerError}
-          onBindVault={handleBindVault}
-          onRequestPermissionAndSync={async () => {
-            await handleRequestPermissionAndSync();
-          }}
-          onFlushToVault={handleManualFlush}
-          onRebuildIndex={handleRebuildIndex}
-          onDismissSuggestion={() => setShowRebuildSuggestion(false)}
-          onDismissFeedback={() => {
-            setLastFlushSummary(null);
-            setLastRebuildSummary(null);
-            setBannerError(null);
-          }}
-        />
-
         {/* 后台下载进行中轻提示条 */}
         {activeDownloadCount !== undefined && activeDownloadCount > 0 && (
           <div className="flex items-center gap-2 border-b border-indigo-100 bg-indigo-50/70 px-6 py-1.5 text-xs text-indigo-800">
@@ -965,7 +953,14 @@ export default function App() {
             totalFolderCount={folders.length}
             totalTagCount={tags.length}
             isFlushing={isFlushing}
+            flushProgress={flushProgress}
+            lastFlushSummary={lastFlushSummary}
             isRebuilding={isRebuilding}
+            rebuildProgress={rebuildProgress}
+            lastRebuildSummary={lastRebuildSummary}
+            showRebuildSuggestion={showRebuildSuggestion}
+            vaultError={vaultError}
+            focusVaultSectionTick={vaultSectionFocusTick}
             onUpdatePreferences={handleUpdatePreferences}
             onBindVault={handleBindVault}
             onRequestPermissionAndSync={async () => {
@@ -974,6 +969,12 @@ export default function App() {
             onFlushToVault={handleManualFlush}
             onRebuildIndex={handleRebuildIndex}
             onClearBrowserCache={handleClearBrowserCache}
+            onDismissSuggestion={() => setShowRebuildSuggestion(false)}
+            onDismissFeedback={() => {
+              setLastFlushSummary(null);
+              setLastRebuildSummary(null);
+              setVaultError(null);
+            }}
           />
         ) : (
           /* 工具栏与卡片网格/紧凑列表 */

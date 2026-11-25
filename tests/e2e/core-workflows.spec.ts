@@ -282,21 +282,40 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       await folderInput.press('Enter');
       await expect(sidebar.getByText('容灾验证目录')).toBeVisible();
 
+      // 确认内容区顶部已无旧同步横幅，且侧边栏顶部 Logo 右侧展示「同步失败」及悬停跳转链接
       await expect(
-        libraryPage.getByRole('button', {
-          name: '选择 / 初始化 CollectVault 目录',
-        }),
-      ).toBeVisible();
-
-      // 3. 绑定 CollectVault 目录并自动落盘同步
-      await libraryPage
-        .getByRole('button', { name: '选择 / 初始化 CollectVault 目录' })
+        libraryPage.getByText('尚未绑定本地 CollectVault 目录'),
+      ).toHaveCount(0);
+      const syncStatusBtn = sidebar.getByTestId('sidebar-sync-status');
+      await expect(syncStatusBtn).toContainText('同步失败');
+      await syncStatusBtn.hover();
+      const syncTooltip = sidebar.getByRole('tooltip');
+      await expect(syncTooltip).toContainText('请选择本地同步文件夹');
+      await syncTooltip
+        .getByRole('link', { name: '前往本地同步目录设置' })
         .click();
 
-      await expect(libraryPage.getByText('CollectVault 已就绪')).toBeVisible();
+      // 3. 在设置页「本地同步目录」卡片内绑定 CollectVault 目录并自动落盘同步
+      const vaultSection = libraryPage.getByTestId('settings-vault-section');
+      await expect(vaultSection).toBeVisible();
+      await vaultSection
+        .getByRole('button', { name: '选择本地同步目录' })
+        .click();
+
+      await expect(vaultSection.getByText('已授权就绪')).toBeVisible();
       await expect(
-        libraryPage.getByText(/同步完成：落盘媒体条目\s*1\s*条/),
+        vaultSection.getByText(/同步完成：落盘媒体条目\s*1\s*条/),
       ).toBeVisible({ timeout: 20_000 });
+
+      // 验证侧边栏状态点切换为「同步中」且悬停文案正确
+      await expect(syncStatusBtn).toContainText('同步中');
+      await syncStatusBtn.hover();
+      await expect(sidebar.getByRole('tooltip')).toContainText(
+        '收藏内容正在同步保存到本地文件夹',
+      );
+
+      // 切回全部收藏校验条目状态已变为「已同步」
+      await sidebar.getByRole('button', { name: /全部收藏/ }).click();
       await expect(libraryPage.locator('article').getByText('已同步')).toBeVisible();
 
       // 4. 校验 CollectVault 落盘文件结构、README.txt 守护、纯净 meta.json（无 thumbnailDataUrl）与 OPFS 暂存清理
@@ -505,15 +524,26 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
     });
 
     await libraryPage.goto(extensionUrl('library.html'));
-    await libraryPage
-      .getByRole('button', { name: '选择 / 初始化 CollectVault 目录' })
+    const sidebar = libraryPage.locator('aside');
+    const syncStatusBtn = sidebar.getByTestId('sidebar-sync-status');
+    await expect(syncStatusBtn).toContainText('同步失败');
+    await syncStatusBtn.hover();
+    await sidebar
+      .getByRole('tooltip')
+      .getByRole('link', { name: '前往本地同步目录设置' })
+      .click();
+
+    const vaultSection = libraryPage.getByTestId('settings-vault-section');
+    await expect(vaultSection).toBeVisible();
+    await vaultSection
+      .getByRole('button', { name: '选择本地同步目录' })
       .click();
 
     await expect(
-      libraryPage.getByText(/所选目录“LockedVault”当前无法写入/),
+      vaultSection.getByText(/所选目录“LockedVault”当前无法写入/),
     ).toBeVisible();
 
-    const helpLink = libraryPage.getByRole('link', {
+    const helpLink = vaultSection.getByRole('link', {
       name: '查看权限问题解决办法',
     });
     await expect(helpLink).toBeVisible();
@@ -530,9 +560,10 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
     expect(pickerCalls[0]?.mode).toBe('readwrite');
 
     // 点击错误条中的「重新选择目录」切换至可写目录后应成功绑定并清除报错
-    await libraryPage.getByRole('button', { name: '重新选择目录' }).click();
-    await expect(libraryPage.getByText('CollectVault 已就绪')).toBeVisible();
+    await vaultSection.getByRole('button', { name: '重新选择目录' }).click();
+    await expect(vaultSection.getByText('已授权就绪')).toBeVisible();
     await expect(helpLink).toBeHidden();
+    await expect(syncStatusBtn).toContainText('同步中');
 
     expect(pageErrors).toEqual([]);
   });

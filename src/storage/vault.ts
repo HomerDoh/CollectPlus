@@ -38,6 +38,8 @@ export const TAXONOMY_FILENAME = 'taxonomy.json';
 export const ITEMS_DIRNAME = 'items';
 export const TRASH_DIRNAME = '.trash';
 
+export type VaultPermissionStatus = PermissionState | 'unbound';
+
 // shortcut: 帮助页暂未创建，后续替换为正式文档链接
 export const VAULT_PERMISSION_HELP_URL =
   'https://github.com/collect-plus/collect-plus/wiki/vault-permission';

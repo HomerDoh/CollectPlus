@@ -24,6 +24,7 @@ import {
 import type { CollectionItemRecord, FolderNode, TagMeta } from '@/types/schema.ts';
 
 export type QuickNavView = 'all' | 'uncategorized' | 'pending_sync' | 'trash';
+export type SidebarSyncStatus = 'syncing' | 'failed';
 export type MediaKindFilter = 'all' | 'video' | 'gallery' | 'article';
 export type PlatformFilter =
   | 'all'
@@ -43,12 +44,14 @@ export interface SidebarTreeProps {
   platformFilter: PlatformFilter;
   selectedTag: string | null;
   isSettingsOpen: boolean;
+  syncStatus: SidebarSyncStatus;
   onSelectView: (view: QuickNavView) => void;
   onSelectFolder: (folderId: string) => void;
   onSelectMediaKind: (kind: MediaKindFilter) => void;
   onSelectPlatform: (platform: PlatformFilter) => void;
   onSelectTag: (tagName: string | null) => void;
   onOpenSettings: () => void;
+  onOpenVaultSettings: () => void;
   onCreateFolder: (name: string, parentId: string | null) => Promise<void>;
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;
@@ -96,12 +99,14 @@ export function SidebarTree({
   platformFilter,
   selectedTag,
   isSettingsOpen,
+  syncStatus,
   onSelectView,
   onSelectFolder,
   onSelectMediaKind,
   onSelectPlatform,
   onSelectTag,
   onOpenSettings,
+  onOpenVaultSettings,
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder,
@@ -117,6 +122,7 @@ export function SidebarTree({
   const [renameDraft, setRenameDraft] = useState('');
   const [deletingFolder, setDeletingFolder] = useState<FolderNode | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [syncTipOpen, setSyncTipOpen] = useState(false);
 
   // 计算快捷视图计数、每个文件夹含子级计数、标签使用计数
   const {
@@ -486,15 +492,78 @@ export function SidebarTree({
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-slate-200 bg-white">
       {/* 品牌头部 */}
-      <div className="flex items-center gap-2.5 border-b border-slate-200 px-4 py-3.5">
-        <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-xs">
-          <BookmarkPlus className="h-4 w-4" />
-        </span>
-        <div className="min-w-0">
-          <h1 className="truncate text-sm font-bold tracking-tight text-slate-900">
-            Collect+
-          </h1>
-          <p className="truncate text-[11px] text-slate-500">本地离线媒体库</p>
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-xs">
+            <BookmarkPlus className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-bold tracking-tight text-slate-900">
+              Collect+
+            </h1>
+            <p className="truncate text-[11px] text-slate-500">本地离线媒体库</p>
+          </div>
+        </div>
+
+        {/* 本地目录同步状态点与悬浮提示 */}
+        <div
+          className="relative shrink-0"
+          onMouseEnter={() => setSyncTipOpen(true)}
+          onMouseLeave={() => setSyncTipOpen(false)}
+          onFocus={() => setSyncTipOpen(true)}
+          onBlur={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget)) {
+              setSyncTipOpen(false);
+            }
+          }}
+        >
+          <button
+            type="button"
+            data-testid="sidebar-sync-status"
+            aria-describedby={syncTipOpen ? 'sidebar-sync-tooltip' : undefined}
+            className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[11px] font-medium transition ${
+              syncStatus === 'syncing'
+                ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100/80'
+                : 'bg-rose-50 text-rose-700 hover:bg-rose-100/80'
+            }`}
+          >
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full ${
+                syncStatus === 'syncing' ? 'bg-emerald-500' : 'bg-rose-500'
+              }`}
+              aria-hidden="true"
+            />
+            <span>{syncStatus === 'syncing' ? '同步中' : '同步失败'}</span>
+          </button>
+
+          {syncTipOpen && (
+            <div className="absolute right-0 top-full z-40 w-56 pt-1.5">
+              <div
+                id="sidebar-sync-tooltip"
+                role="tooltip"
+                className="rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-700 shadow-lg"
+              >
+                {syncStatus === 'syncing' ? (
+                  <p>收藏内容正在同步保存到本地文件夹</p>
+                ) : (
+                  <div>
+                    <p>请选择本地同步文件夹</p>
+                    <a
+                      href="#settings-vault-section"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setSyncTipOpen(false);
+                        onOpenVaultSettings();
+                      }}
+                      className="mt-1.5 inline-flex items-center font-medium text-indigo-600 underline decoration-indigo-300 underline-offset-2 transition hover:text-indigo-700"
+                    >
+                      前往本地同步目录设置
+                    </a>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

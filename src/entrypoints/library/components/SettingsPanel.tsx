@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  CheckCircle2,
   DatabaseBackup,
   ExternalLink,
   FolderCheck,
@@ -17,11 +18,19 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   getBrowserStorageEstimate,
   type BrowserStorageEstimate,
 } from '@/storage/opfs.ts';
+import type {
+  FlushProgress,
+  FlushSummary,
+  RebuildProgress,
+  RebuildSummary,
+  VaultPermissionStatus,
+} from '@/storage/vault.ts';
 import type {
   FolderNode,
   LibrarySortOption,
@@ -34,7 +43,13 @@ import {
   formatRelativeTime,
   getErrorMessage,
 } from '../utils/format.ts';
-import type { VaultPermissionStatus } from './VaultBanner.tsx';
+
+export interface VaultActionError {
+  message: string;
+  helpUrl?: string;
+  helpLabel?: string;
+  canRebind?: boolean;
+}
 
 export interface SettingsPanelProps {
   preferences: UserPreferences;
@@ -48,14 +63,37 @@ export interface SettingsPanelProps {
   totalFolderCount: number;
   totalTagCount: number;
   isFlushing: boolean;
+  flushProgress: FlushProgress | null;
+  lastFlushSummary: FlushSummary | null;
   isRebuilding: boolean;
+  rebuildProgress: RebuildProgress | null;
+  lastRebuildSummary: RebuildSummary | null;
+  showRebuildSuggestion: boolean;
+  vaultError: string | VaultActionError | null;
+  focusVaultSectionTick: number;
   onUpdatePreferences: (patch: Partial<UserPreferences>) => Promise<void>;
   onBindVault: () => Promise<void>;
   onRequestPermissionAndSync: () => Promise<void>;
   onFlushToVault: () => Promise<void>;
   onRebuildIndex: () => Promise<void>;
   onClearBrowserCache: () => Promise<void>;
+  onDismissSuggestion: () => void;
+  onDismissFeedback: () => void;
 }
+
+const FLUSH_PHASE_LABEL: Record<FlushProgress['phase'], string> = {
+  preparing: '准备本地目录结构与 README.txt...',
+  flushing_staged: '正在将 OPFS 暂存媒体流式落盘至 CollectVault',
+  syncing_meta: '正在回写条目元数据 meta.json',
+  writing_taxonomy: '正在回写文件夹与标签 taxonomy.json',
+  done: '同步完成',
+};
+
+const REBUILD_PHASE_LABEL: Record<RebuildProgress['phase'], string> = {
+  scanning: '正在扫描 CollectVault/items 下的 meta.json 并生成缩略图',
+  importing: '正在原子写入浏览器 IndexedDB 索引',
+  done: '索引重建完成',
+};
 
 interface FlatFolderOption {
   id: string;
@@ -148,14 +186,25 @@ export function SettingsPanel({
   totalFolderCount,
   totalTagCount,
   isFlushing,
+  flushProgress,
+  lastFlushSummary,
   isRebuilding,
+  rebuildProgress,
+  lastRebuildSummary,
+  showRebuildSuggestion,
+  vaultError,
+  focusVaultSectionTick,
   onUpdatePreferences,
   onBindVault,
   onRequestPermissionAndSync,
   onFlushToVault,
   onRebuildIndex,
   onClearBrowserCache,
+  onDismissSuggestion,
+  onDismissFeedback,
 }: SettingsPanelProps) {
+  const vaultSectionRef = useRef<HTMLElement | null>(null);
+  const [highlightVaultSection, setHighlightVaultSection] = useState(false);
   const [storageEstimate, setStorageEstimate] =
     useState<BrowserStorageEstimate | null>(null);
   const [loadingStorage, setLoadingStorage] = useState(true);
@@ -167,6 +216,19 @@ export function SettingsPanel({
   const [shortcutNotice, setShortcutNotice] = useState<string | null>(null);
   const [savingNotice, setSavingNotice] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (focusVaultSectionTick === 0) {
+      return;
+    }
+    vaultSectionRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    });
+    setHighlightVaultSection(true);
+    const timer = window.setTimeout(() => setHighlightVaultSection(false), 1600);
+    return () => window.clearTimeout(timer);
+  }, [focusVaultSectionTick]);
+
   const folderOptions = useMemo(
     () => flattenFoldersForSelect(folders),
     [folders],
@@ -174,6 +236,12 @@ export function SettingsPanel({
 
   const pendingSyncCount = stagedCount + metaDirtyCount;
   const isBusy = isFlushing || isRebuilding || isClearingCache;
+  const flushPercent =
+    flushProgress && flushProgress.total > 0
+      ? Math.min(100, Math.round((flushProgress.current / flushProgress.total) * 100))
+      : flushProgress?.phase === 'done'
+        ? 100
+        : 12;
 
   const refreshStorageEstimate = useCallback(async () => {
     setLoadingStorage(true);
@@ -461,7 +529,16 @@ export function SettingsPanel({
           </section>
 
           {/* 2. 本地同步目录（CollectVault） */}
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs">
+          <section
+            id="settings-vault-section"
+            data-testid="settings-vault-section"
+            ref={vaultSectionRef}
+            className={`scroll-mt-4 rounded-2xl border bg-white p-5 shadow-2xs transition ${
+              highlightVaultSection
+                ? 'border-indigo-400 ring-2 ring-indigo-200'
+                : 'border-slate-200'
+            }`}
+          >
             <div className="mb-4 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 {permissionState === 'granted' && vaultHandle ? (
@@ -570,6 +647,208 @@ export function SettingsPanel({
                 </div>
               </div>
             </div>
+
+            {/* 绑定已有 Vault 且 IndexedDB 为空时的一键重建引导 */}
+            {showRebuildSuggestion &&
+              vaultHandle &&
+              permissionState === 'granted' &&
+              !isRebuilding && (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-xs text-indigo-900">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="h-4 w-4 shrink-0 text-indigo-600" />
+                    <span>
+                      检测到目录 <strong>{vaultHandle.name}</strong> 中已有 CollectVault 数据且当前浏览器索引为空，建议一键重建索引以恢复全部收藏与分类。
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onDismissSuggestion();
+                        void onRebuildIndex();
+                      }}
+                      className="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-semibold text-white transition hover:bg-indigo-700"
+                    >
+                      立即重建索引
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onDismissSuggestion}
+                      className="rounded-lg px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                    >
+                      稍后再说
+                    </button>
+                  </div>
+                </div>
+              )}
+
+            {/* 同步进度条 */}
+            {isFlushing && flushProgress && (
+              <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 px-4 py-2.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-medium text-indigo-900">
+                    {FLUSH_PHASE_LABEL[flushProgress.phase]}
+                    {flushProgress.currentTitle
+                      ? `：${flushProgress.currentTitle}`
+                      : ''}
+                  </span>
+                  <span className="shrink-0 font-semibold tabular-nums text-indigo-700">
+                    {flushProgress.total > 0
+                      ? `${flushProgress.current} / ${flushProgress.total}`
+                      : `${flushPercent}%`}
+                  </span>
+                </div>
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-indigo-100">
+                  <div
+                    className="h-full rounded-full bg-indigo-600 transition-all duration-300"
+                    style={{ width: `${flushPercent}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* 索引重建进度条 */}
+            {isRebuilding && rebuildProgress && (
+              <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50/70 px-4 py-2.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="flex items-center gap-2 font-medium text-sky-900">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-600" />
+                    <span>
+                      {REBUILD_PHASE_LABEL[rebuildProgress.phase]}
+                      {rebuildProgress.currentTitle
+                        ? `：${rebuildProgress.currentTitle}`
+                        : ''}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-semibold tabular-nums text-sky-700">
+                    已扫描 {rebuildProgress.scannedItems} 条
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* 同步完成结果反馈 */}
+            {!isFlushing && lastFlushSummary && (
+              <div
+                className={`mt-3 flex items-start justify-between gap-3 rounded-xl border px-4 py-2 text-xs ${
+                  lastFlushSummary.failedCount > 0
+                    ? 'border-amber-200 bg-amber-50 text-amber-900'
+                    : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                }`}
+              >
+                <div className="flex items-start gap-2">
+                  {lastFlushSummary.failedCount > 0 ? (
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  ) : (
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                  )}
+                  <div>
+                    <span>
+                      同步完成：落盘媒体条目{' '}
+                      <strong>{lastFlushSummary.syncedStagedCount}</strong> 条，回写元数据{' '}
+                      <strong>{lastFlushSummary.syncedMetaCount}</strong> 条
+                      {lastFlushSummary.failedCount > 0
+                        ? `，失败 ${lastFlushSummary.failedCount} 条`
+                        : '，taxonomy.json 已同步更新'}
+                      。
+                    </span>
+                    {lastFlushSummary.errors.length > 0 && (
+                      <p className="mt-1 text-[11px] text-amber-800">
+                        首个错误：{lastFlushSummary.errors[0]?.message}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onDismissFeedback}
+                  className="rounded p-0.5 opacity-70 hover:bg-black/5 hover:opacity-100"
+                  aria-label="关闭通知"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* 索引重建结果反馈 */}
+            {!isRebuilding && lastRebuildSummary && (
+              <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-900">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <span>
+                    索引重建成功：已恢复{' '}
+                    <strong>{lastRebuildSummary.restoredItems}</strong> 条收藏、
+                    <strong>{lastRebuildSummary.restoredFolders}</strong> 个文件夹、
+                    <strong>{lastRebuildSummary.restoredTags}</strong> 个标签
+                    {lastRebuildSummary.skippedFiles > 0
+                      ? `（跳过 ${lastRebuildSummary.skippedFiles} 个无效或重复文件）`
+                      : ''}
+                    。
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={onDismissFeedback}
+                  className="rounded p-0.5 opacity-70 hover:bg-black/5 hover:opacity-100"
+                  aria-label="关闭通知"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* 错误提示 */}
+            {vaultError && (
+              <div className="mt-3 flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-800">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                  <div className="flex flex-col gap-1.5">
+                    <span>
+                      {typeof vaultError === 'string'
+                        ? vaultError
+                        : vaultError.message}
+                    </span>
+                    {typeof vaultError !== 'string' &&
+                      (vaultError.helpUrl || vaultError.canRebind) && (
+                        <div className="flex flex-wrap items-center gap-3 pt-0.5">
+                          {vaultError.canRebind && (
+                            <button
+                              type="button"
+                              onClick={() => void onBindVault()}
+                              disabled={isBusy}
+                              className="inline-flex items-center gap-1 rounded-md bg-rose-600 px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-rose-700 disabled:opacity-60"
+                            >
+                              <FolderOpen className="h-3 w-3" />
+                              <span>重新选择目录</span>
+                            </button>
+                          )}
+                          {vaultError.helpUrl && (
+                            <a
+                              href={vaultError.helpUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 font-medium text-rose-700 underline decoration-rose-400 underline-offset-2 hover:text-rose-900"
+                            >
+                              <span>
+                                {vaultError.helpLabel ?? '查看权限问题解决办法'}
+                              </span>
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                        </div>
+                      )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onDismissFeedback}
+                  className="rounded p-0.5 text-rose-600 hover:bg-rose-100"
+                  aria-label="关闭错误"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
 
             <div className="mt-4 flex items-center justify-between gap-4 border-t border-slate-100 pt-4">
               <div className="min-w-0">

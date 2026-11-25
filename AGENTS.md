@@ -103,7 +103,7 @@ pnpm zip
         ├── douyin.content.tsx             # Isolated World 桥接 + Shadow DOM 浮层挂载
         ├── popup/App.tsx                  # 扩展快捷弹窗（状态检测、一键触发采集、统计速览）
         ├── sidepanel/App.tsx              # 实时下载队列 + 最近收藏侧边栏（useLiveQuery）
-        └── library/                       # 全屏管理台（VaultBanner、SidebarTree、ItemCardGrid、ItemDetailDrawer）
+        └── library/                       # 全屏管理台（SidebarTree、SettingsPanel、ItemCardGrid、ItemDetailDrawer）
 ```
 
 ## 4. Code Style & TypeScript Invariants

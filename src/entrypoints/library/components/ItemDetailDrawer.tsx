@@ -23,7 +23,10 @@ import {
   User,
   X,
 } from 'lucide-react';
-import { readItemAssetFile } from '@/storage/vault.ts';
+import {
+  readItemAssetFile,
+  type VaultPermissionStatus,
+} from '@/storage/vault.ts';
 import type {
   CollectionItemRecord,
   FolderNode,
@@ -38,7 +41,6 @@ import {
   platformMeta,
   syncStatusMeta,
 } from '../utils/format.ts';
-import type { VaultPermissionStatus } from './VaultBanner.tsx';
 
 export interface ItemEditPatch {
   title: string;
