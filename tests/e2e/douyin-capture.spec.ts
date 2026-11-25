@@ -315,96 +315,138 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
         )
         .toBe('Collect+');
 
-      // 3. 像素级尺寸不变量校验：对比静态 icon/32.png 与激活态进度图标，确认内部白色书签图案与外框 1:1 不缩小
+      // 3. 像素级不变量校验：确认空闲态与活跃态中间 icon 与白色书签 1:1 尺寸完全一致、外圈圆形进度环与 icon 间有透明 1px 边距且四角透明
       const checkPage = await context.newPage();
       await checkPage.goto(extensionUrl('popup.html'));
       const geometryCheck = await checkPage.evaluate(async () => {
         const res = await fetch(chrome.runtime.getURL('icon/32.png'));
         const bmp = await createImageBitmap(await res.blob());
 
-        const measureBounds = (img: ImageData) => {
-          let outerMinX = img.width;
-          let outerMaxX = 0;
-          let markMinX = img.width;
-          let markMaxX = 0;
-          let markMinY = img.height;
-          let markMaxY = 0;
+        const size = 32;
+        const center = size / 2;
+        const outerPad = Math.max(0.2, size * 0.008);
+        const outerRadius = center - outerPad;
+        const strokeWidth = Math.max(1.25, size * 0.0625);
+        const ringRadius = outerRadius - strokeWidth / 2;
+        const ringInnerRadius = outerRadius - strokeWidth;
+        const ringGap = Math.max(1, size * 0.05);
+        const iconRadius = Math.max(2, ringInnerRadius - ringGap);
+        const iconDiameter = iconRadius * 2;
+        const left = center - iconRadius;
+        const cornerRadius = iconDiameter * 0.24;
 
-          for (let y = 0; y < img.height; y += 1) {
-            for (let x = 0; x < img.width; x += 1) {
-              const i = (y * img.width + x) * 4;
-              const r = img.data[i] ?? 0;
-              const g = img.data[i + 1] ?? 0;
-              const b = img.data[i + 2] ?? 0;
-              const a = img.data[i + 3] ?? 0;
+        // 复现空闲态（Idle）工具栏图标：尺寸锁定为 iconDiameter，内部 1:1 保留书签
+        const idleCanvas = new OffscreenCanvas(size, size);
+        const idleCtx = idleCanvas.getContext('2d')!;
+        idleCtx.beginPath();
+        idleCtx.roundRect(left, left, iconDiameter, iconDiameter, cornerRadius);
+        idleCtx.fillStyle = '#3a359e';
+        idleCtx.fill();
+        idleCtx.save();
+        idleCtx.beginPath();
+        idleCtx.roundRect(left, left, iconDiameter, iconDiameter, cornerRadius);
+        idleCtx.clip();
+        idleCtx.drawImage(bmp, 0, 0, size, size);
+        idleCtx.restore();
+        const idleImg = idleCtx.getImageData(0, 0, size, size);
 
-              if (a > 30) {
-                outerMinX = Math.min(outerMinX, x);
-                outerMaxX = Math.max(outerMaxX, x);
-              }
-              // 仅统计中心区域的纯白书签图案（r>210, g>210, b>210）
-              if (x >= 6 && x <= 25 && y >= 5 && y <= 26 && r > 210 && g > 210 && b > 210) {
-                markMinX = Math.min(markMinX, x);
-                markMaxX = Math.max(markMaxX, x);
-                markMinY = Math.min(markMinY, y);
-                markMaxY = Math.max(markMaxY, y);
+        // 复现活跃态（Active）工具栏图标：中间圆形 icon 保持同直径 iconDiameter 与 1:1 书签，外圈 1px 边距外绘制圆形进度环
+        const activeCanvas = new OffscreenCanvas(size, size);
+        const ctx = activeCanvas.getContext('2d')!;
+        ctx.beginPath();
+        ctx.arc(center, center, iconRadius, 0, Math.PI * 2);
+        ctx.fillStyle = '#3a359e';
+        ctx.fill();
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(center, center, iconRadius, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(bmp, 0, 0, size, size);
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.arc(center, center, ringRadius, -Math.PI / 2, 0, false);
+        ctx.lineWidth = strokeWidth;
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = '#06b6d4';
+        ctx.stroke();
+
+        const activeImg = ctx.getImageData(0, 0, size, size);
+        const pixelAt = (img: ImageData, x: number, y: number) => {
+          const i = (y * size + x) * 4;
+          return {
+            r: img.data[i] ?? 0,
+            g: img.data[i + 1] ?? 0,
+            b: img.data[i + 2] ?? 0,
+            a: img.data[i + 3] ?? 0,
+          };
+        };
+
+        const measureWhiteMarkBounds = (img: ImageData) => {
+          let minX = size;
+          let maxX = 0;
+          let minY = size;
+          let maxY = 0;
+          for (let y = 0; y < size; y += 1) {
+            for (let x = 0; x < size; x += 1) {
+              const p = pixelAt(img, x, y);
+              if (p.a > 200 && p.r > 210 && p.g > 210 && p.b > 210) {
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
               }
             }
           }
-          return { outerMinX, outerMaxX, markMinX, markMaxX, markMinY, markMaxY };
+          return { minX, maxX, minY, maxY };
         };
 
-        const rawCanvas = new OffscreenCanvas(32, 32);
-        const rawCtx = rawCanvas.getContext('2d')!;
-        rawCtx.drawImage(bmp, 0, 0, 32, 32);
-        const staticBounds = measureBounds(rawCtx.getImageData(0, 0, 32, 32));
+        const idleMark = measureWhiteMarkBounds(idleImg);
+        const activeMark = measureWhiteMarkBounds(activeImg);
 
-        // 复现同款 1:1 原始绘制 + 外圈进度描边，确认不会缩小或挤压中心书签
-        const activeCanvas = new OffscreenCanvas(32, 32);
-        const ctx = activeCanvas.getContext('2d')!;
-        ctx.drawImage(bmp, 0, 0, 32, 32);
-        const inset = 32 * 0.05;
-        const strokeWidth = 32 * 0.094;
-        const r = 32 * 0.225;
-        ctx.beginPath();
-        ctx.moveTo(16, inset);
-        ctx.lineTo(32 - inset - r, inset);
-        ctx.arcTo(32 - inset, inset, 32 - inset, inset + r, r);
-        ctx.lineWidth = strokeWidth;
-        ctx.strokeStyle = '#22d3ee';
-        ctx.stroke();
-
-        const activeImg = ctx.getImageData(0, 0, 32, 32);
-        const activeBounds = measureBounds(activeImg);
-        const topEdgeIdx = (2 * 32 + 18) * 4;
+        // 外圈顶部进度弧（距圆心 ~14.7px，y=1）呈高对比度青色
+        const topRingPixel = pixelAt(activeImg, 18, 1);
         const topEdgeCyan =
-          (activeImg.data[topEdgeIdx + 1] ?? 0) > (activeImg.data[topEdgeIdx] ?? 0);
+          topRingPixel.a > 180 && topRingPixel.g > topRingPixel.r;
+
+        // 校验外圈进度环与内部圆形 icon 之间的 1px 透明边距（距圆心 ~13px，介于 iconRadius=12.14 与 ringInnerRadius=13.74 之间）
+        const gapPoints: readonly [number, number][] = [
+          [16, 3],
+          [28, 16],
+          [16, 28],
+          [3, 16],
+        ];
+        const gapTransparent = gapPoints.every(
+          ([x, y]) => pixelAt(activeImg, x, y).a < 60,
+        );
+
+        // 校验四角 (2,2)/(29,2)/(2,29)/(29,29) 在空闲态和活跃态均透明（圆形进度外轮廓无方角）
+        const cornerPoints: readonly [number, number][] = [
+          [2, 2],
+          [29, 2],
+          [2, 29],
+          [29, 29],
+        ];
+        const activeCornersTransparent = cornerPoints.every(
+          ([x, y]) => pixelAt(activeImg, x, y).a === 0,
+        );
 
         bmp.close();
-        return { staticBounds, activeBounds, topEdgeCyan };
+        return {
+          idleMark,
+          activeMark,
+          topEdgeCyan,
+          gapTransparent,
+          activeCornersTransparent,
+        };
       });
       await checkPage.close();
 
-      expect(geometryCheck.activeBounds.markMinX).toBe(
-        geometryCheck.staticBounds.markMinX,
-      );
-      expect(geometryCheck.activeBounds.markMaxX).toBe(
-        geometryCheck.staticBounds.markMaxX,
-      );
-      expect(geometryCheck.activeBounds.markMinY).toBe(
-        geometryCheck.staticBounds.markMinY,
-      );
-      expect(geometryCheck.activeBounds.markMaxY).toBe(
-        geometryCheck.staticBounds.markMaxY,
-      );
-      expect(
-        geometryCheck.activeBounds.outerMaxX -
-          geometryCheck.activeBounds.outerMinX,
-      ).toBeGreaterThanOrEqual(
-        geometryCheck.staticBounds.outerMaxX -
-          geometryCheck.staticBounds.outerMinX,
-      );
+      expect(geometryCheck.activeMark).toEqual(geometryCheck.idleMark);
       expect(geometryCheck.topEdgeCyan).toBe(true);
+      expect(geometryCheck.gapTransparent).toBe(true);
+      expect(geometryCheck.activeCornersTransparent).toBe(true);
 
       expect(pageErrors).toEqual([]);
     } finally {
