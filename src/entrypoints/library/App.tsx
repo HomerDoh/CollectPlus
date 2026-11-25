@@ -4,6 +4,7 @@ import { Download } from 'lucide-react';
 import {
   createFolder,
   db,
+  DEFAULT_USER_PREFERENCES,
   deleteFolder,
   getSetting,
   getUserPreferences,
@@ -12,15 +13,20 @@ import {
   restoreItem,
   softDeleteItem,
   updateItemClassification,
+  updateUserPreferences,
 } from '@/storage/db.ts';
+import { sendToBackground } from '@/types/messages.ts';
 import { CollectionSearchEngine } from '@/storage/search.ts';
 import {
   bindNewVaultDirectory,
   flushToVault,
   getSavedVaultHandle,
+  isFilesystemWriteDeniedError,
   queryVaultPermission,
   rebuildIndexFromVault,
   requestVaultPermission,
+  VAULT_PERMISSION_HELP_URL,
+  VaultFilesystemPermissionError,
   writeItemMetaToVault,
   writeTaxonomyToVault,
   type FlushProgress,
@@ -32,6 +38,7 @@ import type {
   CollectionItemRecord,
   FolderNode,
   TagMeta,
+  UserPreferences,
 } from '@/types/schema.ts';
 import {
   ItemCardGrid,
@@ -43,16 +50,42 @@ import {
   type ItemEditPatch,
   type SaveItemResult,
 } from './components/ItemDetailDrawer.tsx';
+import { SettingsPanel } from './components/SettingsPanel.tsx';
 import {
   SidebarTree,
   type MediaKindFilter,
+  type PlatformFilter,
   type QuickNavView,
 } from './components/SidebarTree.tsx';
 import {
   VaultBanner,
+  type VaultBannerError,
   type VaultPermissionStatus,
 } from './components/VaultBanner.tsx';
 import { getErrorMessage } from './utils/format.ts';
+
+function toVaultBannerError(
+  prefix: string,
+  error: unknown,
+  fallbackDirName?: string,
+): string | VaultBannerError {
+  if (isFilesystemWriteDeniedError(error)) {
+    const message =
+      error instanceof VaultFilesystemPermissionError
+        ? error.message
+        : new VaultFilesystemPermissionError(
+            fallbackDirName || 'CollectVault',
+            error,
+          ).message;
+    return {
+      message,
+      helpUrl: VAULT_PERMISSION_HELP_URL,
+      helpLabel: '查看权限问题解决办法',
+      canRebind: true,
+    };
+  }
+  return `${prefix}：${getErrorMessage(error)}`;
+}
 
 function parseItemIdFromHash(hash: string): string | null {
   const match = hash.match(/^#item=(.+)$/);
@@ -126,10 +159,13 @@ export default function App() {
     [],
   );
   const lastSyncAt = useLiveQuery(() => getSetting('last_sync_at'), []);
+  const livePreferences = useLiveQuery(() => getUserPreferences(), []);
 
   const items: readonly CollectionItemRecord[] = liveItems ?? [];
   const folders: readonly FolderNode[] = liveFolders ?? [];
   const tags: readonly TagMeta[] = liveTags ?? [];
+  const preferences: UserPreferences =
+    livePreferences ?? DEFAULT_USER_PREFERENCES;
 
   // 2. Vault 目录句柄与同步/重建状态
   const [vaultHandle, setVaultHandle] =
@@ -149,22 +185,56 @@ export default function App() {
   const [lastRebuildSummary, setLastRebuildSummary] =
     useState<RebuildSummary | null>(null);
   const [showRebuildSuggestion, setShowRebuildSuggestion] = useState(false);
-  const [bannerError, setBannerError] = useState<string | null>(null);
+  const [bannerError, setBannerError] = useState<
+    string | VaultBannerError | null
+  >(null);
 
   const vaultBusyRef = useRef(false);
   const autoSyncTriggeredRef = useRef(false);
+  const prefsHydratedRef = useRef(false);
 
-  // 3. 视图筛选与详情抽屉状态
+  // 3. 视图筛选、设置页与详情抽屉状态
+  const [activePage, setActivePage] = useState<'library' | 'settings'>(
+    'library',
+  );
   const [activeView, setActiveView] = useState<QuickNavView>('all');
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [mediaKindFilter, setMediaKindFilter] =
     useState<MediaKindFilter>('all');
+  const [platformFilter, setPlatformFilter] = useState<PlatformFilter>('all');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<SortOption>('collectedAt');
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [selectedItemId, setSelectedItemId] = useState<string | null>(() =>
     parseItemIdFromHash(window.location.hash),
+  );
+
+  // 首次加载持久化偏好时同步默认视图与默认排序
+  useEffect(() => {
+    if (!livePreferences || prefsHydratedRef.current) {
+      return;
+    }
+    prefsHydratedRef.current = true;
+    setViewMode(livePreferences.defaultViewMode);
+    setSortBy(livePreferences.defaultSortBy);
+  }, [livePreferences]);
+
+  const handleUpdatePreferences = useCallback(
+    async (patch: Partial<UserPreferences>) => {
+      const updated = await updateUserPreferences(patch);
+      if (patch.defaultViewMode !== undefined) {
+        setViewMode(updated.defaultViewMode);
+      }
+      if (patch.defaultSortBy !== undefined) {
+        setSortBy(updated.defaultSortBy);
+      }
+      void sendToBackground({
+        target: 'background',
+        type: 'NOTIFY_PREFERENCES_UPDATED',
+      }).catch(() => undefined);
+    },
+    [],
   );
 
   // 4. MiniSearch 全文检索引擎联动
@@ -238,7 +308,9 @@ export default function App() {
           setLastFlushSummary(summary);
         }
       } catch (error) {
-        setBannerError(`同步到 CollectVault 失败：${getErrorMessage(error)}`);
+        setBannerError(
+          toVaultBannerError('同步到 CollectVault 失败', error, handle.name),
+        );
       } finally {
         setIsFlushing(false);
         setFlushProgress(null);
@@ -332,7 +404,7 @@ export default function App() {
       if (isAbortError(error)) {
         return;
       }
-      setBannerError(`绑定本地目录失败：${getErrorMessage(error)}`);
+      setBannerError(toVaultBannerError('绑定本地目录失败', error));
     }
   }, [runFlushToVault]);
 
@@ -469,7 +541,9 @@ export default function App() {
     try {
       await writeTaxonomyToVault(vaultHandle);
     } catch (error) {
-      setBannerError(`回写 taxonomy.json 失败：${getErrorMessage(error)}`);
+      setBannerError(
+        toVaultBannerError('回写 taxonomy.json 失败', error, vaultHandle.name),
+      );
     }
   }, [vaultHandle, permissionState]);
 
@@ -561,7 +635,9 @@ export default function App() {
           await db.items.put(synced);
         }
       } catch (error) {
-        setBannerError(`回写条目元数据失败：${getErrorMessage(error)}`);
+        setBannerError(
+          toVaultBannerError('回写条目元数据失败', error, vaultHandle.name),
+        );
       }
     },
     [vaultHandle, permissionState],
@@ -686,6 +762,13 @@ export default function App() {
       ) {
         return false;
       }
+      if (mediaKindFilter === 'article' && item.kind !== 'article') {
+        return false;
+      }
+
+      if (platformFilter !== 'all' && item.platform !== platformFilter) {
+        return false;
+      }
 
       if (selectedTag !== null && !item.tags.includes(selectedTag)) {
         return false;
@@ -730,6 +813,7 @@ export default function App() {
     activeView,
     selectedFolderId,
     mediaKindFilter,
+    platformFilter,
     selectedTag,
     searchQuery,
     sortBy,
@@ -762,6 +846,7 @@ export default function App() {
   const hasActiveFilters =
     searchQuery.trim().length > 0 ||
     mediaKindFilter !== 'all' ||
+    platformFilter !== 'all' ||
     selectedTag !== null ||
     selectedFolderId !== null ||
     activeView === 'uncategorized' ||
@@ -770,12 +855,18 @@ export default function App() {
   const handleResetFilters = useCallback(() => {
     setSearchQuery('');
     setMediaKindFilter('all');
+    setPlatformFilter('all');
     setSelectedTag(null);
     setSelectedFolderId(null);
     if (activeView !== 'trash') {
       setActiveView('all');
     }
   }, [activeView]);
+
+  const activeItemCount = useMemo(
+    () => items.filter((item) => item.deletedAt == null).length,
+    [items],
+  );
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 text-slate-900">
@@ -787,16 +878,33 @@ export default function App() {
         activeView={activeView}
         selectedFolderId={selectedFolderId}
         mediaKindFilter={mediaKindFilter}
+        platformFilter={platformFilter}
         selectedTag={selectedTag}
+        isSettingsOpen={activePage === 'settings'}
         onSelectView={(view) => {
+          setActivePage('library');
           setSelectedFolderId(null);
           setActiveView(view);
         }}
         onSelectFolder={(folderId) => {
+          setActivePage('library');
           setSelectedFolderId(folderId);
         }}
-        onSelectMediaKind={setMediaKindFilter}
-        onSelectTag={setSelectedTag}
+        onSelectMediaKind={(kind) => {
+          setActivePage('library');
+          setMediaKindFilter(kind);
+        }}
+        onSelectPlatform={(platform) => {
+          setActivePage('library');
+          setPlatformFilter(platform);
+        }}
+        onSelectTag={(tag) => {
+          setActivePage('library');
+          setSelectedTag(tag);
+        }}
+        onOpenSettings={() => {
+          setActivePage('settings');
+        }}
         onCreateFolder={handleCreateFolder}
         onRenameFolder={handleRenameFolder}
         onDeleteFolder={handleDeleteFolder}
@@ -825,7 +933,6 @@ export default function App() {
           }}
           onFlushToVault={handleManualFlush}
           onRebuildIndex={handleRebuildIndex}
-          onClearBrowserCache={handleClearBrowserCache}
           onDismissSuggestion={() => setShowRebuildSuggestion(false)}
           onDismissFeedback={() => {
             setLastFlushSummary(null);
@@ -845,24 +952,49 @@ export default function App() {
           </div>
         )}
 
-        {/* 工具栏与卡片网格/紧凑列表 */}
-        <ItemCardGrid
-          items={filteredItems}
-          tagsByName={tagsByName}
-          searchQuery={searchQuery}
-          sortBy={sortBy}
-          viewMode={viewMode}
-          isTrashView={selectedFolderId === null && activeView === 'trash'}
-          hasActiveFilters={hasActiveFilters}
-          contextTitle={contextTitle}
-          onSearchChange={setSearchQuery}
-          onSortChange={setSortBy}
-          onViewModeChange={setViewMode}
-          onResetFilters={handleResetFilters}
-          onOpenItem={openItemDrawer}
-          onSoftDeleteItem={handleSoftDeleteItem}
-          onRestoreItem={handleRestoreItem}
-        />
+        {activePage === 'settings' ? (
+          <SettingsPanel
+            preferences={preferences}
+            folders={folders}
+            vaultHandle={vaultHandle}
+            permissionState={permissionState}
+            lastSyncAt={lastSyncAt}
+            stagedCount={stagedCount}
+            metaDirtyCount={metaDirtyCount}
+            totalItemCount={activeItemCount}
+            totalFolderCount={folders.length}
+            totalTagCount={tags.length}
+            isFlushing={isFlushing}
+            isRebuilding={isRebuilding}
+            onUpdatePreferences={handleUpdatePreferences}
+            onBindVault={handleBindVault}
+            onRequestPermissionAndSync={async () => {
+              await handleRequestPermissionAndSync();
+            }}
+            onFlushToVault={handleManualFlush}
+            onRebuildIndex={handleRebuildIndex}
+            onClearBrowserCache={handleClearBrowserCache}
+          />
+        ) : (
+          /* 工具栏与卡片网格/紧凑列表 */
+          <ItemCardGrid
+            items={filteredItems}
+            tagsByName={tagsByName}
+            searchQuery={searchQuery}
+            sortBy={sortBy}
+            viewMode={viewMode}
+            isTrashView={selectedFolderId === null && activeView === 'trash'}
+            hasActiveFilters={hasActiveFilters}
+            contextTitle={contextTitle}
+            onSearchChange={setSearchQuery}
+            onSortChange={setSortBy}
+            onViewModeChange={setViewMode}
+            onResetFilters={handleResetFilters}
+            onOpenItem={openItemDrawer}
+            onSoftDeleteItem={handleSoftDeleteItem}
+            onRestoreItem={handleRestoreItem}
+          />
+        )}
       </main>
 
       {/* 离线播放与元数据编辑抽屉/模态框 */}

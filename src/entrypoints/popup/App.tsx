@@ -32,6 +32,8 @@ type CaptureFeedback =
 const PLATFORM_READY_TEXT: Record<PlatformId, string> = {
   douyin: '已就绪：抖音网页版（收藏自动拦截已开启）',
   bilibili: '已就绪：B站网页版',
+  zhihu: '已就绪：知乎网页版',
+  youtube: '已就绪：YouTube 网页版',
   xiaohongshu: '已就绪：小红书网页版',
   twitter: '已就绪：X / Twitter 网页版',
   instagram: '已就绪：Instagram 网页版',

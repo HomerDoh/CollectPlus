@@ -163,6 +163,16 @@ export function platformMeta(platform: PlatformId): PlatformVisual {
         label: 'B站',
         badgeClass: 'bg-pink-600/85 text-white backdrop-blur-xs',
       };
+    case 'zhihu':
+      return {
+        label: '知乎',
+        badgeClass: 'bg-sky-600/85 text-white backdrop-blur-xs',
+      };
+    case 'youtube':
+      return {
+        label: 'YouTube',
+        badgeClass: 'bg-red-600/85 text-white backdrop-blur-xs',
+      };
     case 'xiaohongshu':
       return {
         label: '小红书',
@@ -190,6 +200,8 @@ export function mediaKindLabel(kind: MediaKind): string {
       return '图集';
     case 'image':
       return '图片';
+    case 'article':
+      return '文章';
   }
 }
 

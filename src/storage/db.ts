@@ -48,6 +48,8 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   floatingButtonEnabled: true,
   defaultFolderId: null,
   maxConcurrentDownloads: 2,
+  defaultViewMode: 'grid',
+  defaultSortBy: 'collectedAt',
 };
 
 /** 协调的 Tailwind 友好标签调色板 */
@@ -145,6 +147,21 @@ export async function getUserPreferences(): Promise<UserPreferences> {
     ...DEFAULT_USER_PREFERENCES,
     ...saved,
   };
+}
+
+/** 局部更新用户偏好设置并返回合并后的最新配置 */
+export async function updateUserPreferences(
+  patch: Partial<UserPreferences>,
+): Promise<UserPreferences> {
+  return db.transaction('rw', db.settings, async () => {
+    const current = await getUserPreferences();
+    const next: UserPreferences = {
+      ...current,
+      ...patch,
+    };
+    await setSetting('user_preferences', next);
+    return next;
+  });
 }
 
 /** 清洗并幂等写入标签元数据，已存在的标签保留原颜色与创建时间 */

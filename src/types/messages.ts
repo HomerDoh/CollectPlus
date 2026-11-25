@@ -8,10 +8,9 @@
 import type { CapturedPayload, CaptureTriggerSource } from './adapter.ts';
 import type {
   CollectionItemRecord,
-  FolderNode,
   MediaAsset,
   PlatformId,
-  TagMeta,
+  UserPreferences,
 } from './schema.ts';
 
 /** 消息目标上下文标识 */
@@ -42,27 +41,6 @@ export interface CaptureItemMessage {
   tags?: string[];
 }
 
-export interface UpdateItemClassificationMessage {
-  target: 'background';
-  type: 'UPDATE_ITEM_CLASSIFICATION';
-  itemId: string;
-  folderId?: string | null;
-  tags?: string[];
-  note?: string;
-}
-
-export interface GetTaxonomyMessage {
-  target: 'background';
-  type: 'GET_TAXONOMY';
-}
-
-export interface CreateFolderQuickMessage {
-  target: 'background';
-  type: 'CREATE_FOLDER_QUICK';
-  name: string;
-  parentId?: string | null;
-}
-
 export interface GetStatusSummaryMessage {
   target: 'background';
   type: 'GET_STATUS_SUMMARY';
@@ -91,6 +69,16 @@ export interface OpenLibraryPageMessage {
   target: 'background';
   type: 'OPEN_LIBRARY_PAGE';
   itemId?: string;
+}
+
+export interface GetUserPreferencesMessage {
+  target: 'background';
+  type: 'GET_USER_PREFERENCES';
+}
+
+export interface NotifyPreferencesUpdatedMessage {
+  target: 'background';
+  type: 'NOTIFY_PREFERENCES_UPDATED';
 }
 
 export interface OffscreenProgressMessage {
@@ -127,14 +115,13 @@ export interface OffscreenErrorMessage {
 /** 所有发往 Background 的消息判别联合 */
 export type BackgroundMessage =
   | CaptureItemMessage
-  | UpdateItemClassificationMessage
-  | GetTaxonomyMessage
-  | CreateFolderQuickMessage
   | GetStatusSummaryMessage
   | TriggerActiveTabCaptureMessage
   | RetryDownloadTaskMessage
   | CancelDownloadTaskMessage
   | OpenLibraryPageMessage
+  | GetUserPreferencesMessage
+  | NotifyPreferencesUpdatedMessage
   | OffscreenProgressMessage
   | OffscreenCompleteMessage
   | OffscreenErrorMessage;
@@ -153,13 +140,6 @@ export interface BackgroundResponseMap {
         item: CollectionItemRecord;
       }
     | ErrorResult;
-  UPDATE_ITEM_CLASSIFICATION:
-    | { ok: true; item: CollectionItemRecord }
-    | ErrorResult;
-  GET_TAXONOMY:
-    | { ok: true; folders: FolderNode[]; tags: TagMeta[] }
-    | ErrorResult;
-  CREATE_FOLDER_QUICK: { ok: true; folder: FolderNode } | ErrorResult;
   GET_STATUS_SUMMARY:
     | {
         ok: true;
@@ -174,6 +154,10 @@ export interface BackgroundResponseMap {
   RETRY_DOWNLOAD_TASK: { ok: true } | ErrorResult;
   CANCEL_DOWNLOAD_TASK: { ok: true } | ErrorResult;
   OPEN_LIBRARY_PAGE: { ok: true };
+  GET_USER_PREFERENCES:
+    | { ok: true; preferences: UserPreferences }
+    | ErrorResult;
+  NOTIFY_PREFERENCES_UPDATED: { ok: true };
   OFFSCREEN_PROGRESS: { ok: true };
   OFFSCREEN_COMPLETE: { ok: true };
   OFFSCREEN_ERROR: { ok: true };
@@ -224,34 +208,22 @@ export interface OffscreenResponseMap {
 // 3. 发往 Content Script 的消息协议 (target: 'content')
 // ============================================================================
 
-export type ContentCaptureStatusState =
-  | 'queued'
-  | 'downloading'
-  | 'staged'
-  | 'deduplicated'
-  | 'failed';
-
 export interface ContentTriggerCaptureMessage {
   target: 'content';
   type: 'CONTENT_TRIGGER_CAPTURE';
   triggerSource: CaptureTriggerSource;
 }
 
-export interface ContentCaptureStatusMessage {
+export interface ContentPreferencesUpdatedMessage {
   target: 'content';
-  type: 'CONTENT_CAPTURE_STATUS';
-  itemId: string;
-  taskId?: string;
-  status: ContentCaptureStatusState;
-  progress?: number;
-  title?: string;
-  error?: string;
+  type: 'CONTENT_PREFERENCES_UPDATED';
+  floatingButtonEnabled: boolean;
 }
 
 /** 所有发往 Content Script 的消息判别联合 */
 export type ContentMessage =
   | ContentTriggerCaptureMessage
-  | ContentCaptureStatusMessage;
+  | ContentPreferencesUpdatedMessage;
 
 /** Content Script 消息类型名联合 */
 export type ContentRequestType = ContentMessage['type'];
@@ -259,7 +231,7 @@ export type ContentRequestType = ContentMessage['type'];
 /** Content Script 各消息类型对应的响应映射表 */
 export interface ContentResponseMap {
   CONTENT_TRIGGER_CAPTURE: { ok: true } | ErrorResult;
-  CONTENT_CAPTURE_STATUS: { ok: true };
+  CONTENT_PREFERENCES_UPDATED: { ok: true };
 }
 
 /** Extension 内部所有跨上下文消息总联合类型 */
@@ -276,14 +248,13 @@ const BACKGROUND_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   BackgroundRequestType
 >([
   'CAPTURE_ITEM',
-  'UPDATE_ITEM_CLASSIFICATION',
-  'GET_TAXONOMY',
-  'CREATE_FOLDER_QUICK',
   'GET_STATUS_SUMMARY',
   'TRIGGER_ACTIVE_TAB_CAPTURE',
   'RETRY_DOWNLOAD_TASK',
   'CANCEL_DOWNLOAD_TASK',
   'OPEN_LIBRARY_PAGE',
+  'GET_USER_PREFERENCES',
+  'NOTIFY_PREFERENCES_UPDATED',
   'OFFSCREEN_PROGRESS',
   'OFFSCREEN_COMPLETE',
   'OFFSCREEN_ERROR',
@@ -295,7 +266,7 @@ const OFFSCREEN_MESSAGE_TYPES: ReadonlySet<string> = new Set<
 
 const CONTENT_MESSAGE_TYPES: ReadonlySet<string> = new Set<ContentRequestType>([
   'CONTENT_TRIGGER_CAPTURE',
-  'CONTENT_CAPTURE_STATUS',
+  'CONTENT_PREFERENCES_UPDATED',
 ]);
 
 function isMessageObject(

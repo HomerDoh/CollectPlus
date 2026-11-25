@@ -1,0 +1,333 @@
+import { expect, test } from './fixtures/extension.ts';
+import {
+  installDouyinMockRoutes,
+  MOCK_VIDEO_AWEME_ID,
+} from './fixtures/douyin-mock.ts';
+
+interface SeedItemInput {
+  id: string;
+  platform: 'douyin' | 'bilibili' | 'zhihu' | 'youtube' | 'twitter';
+  sourceId: string;
+  kind: 'video' | 'gallery' | 'image' | 'article';
+  title: string;
+  description: string;
+  authorName: string;
+  collectedAt: number;
+  totalSizeBytes: number;
+}
+
+function buildSeedRecord(input: SeedItemInput): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    id: input.id,
+    dedupeKey: `${input.platform}:${input.sourceId}`,
+    platform: input.platform,
+    sourceId: input.sourceId,
+    sourceUrl: `https://example.com/${input.platform}/${input.sourceId}`,
+    kind: input.kind,
+    title: input.title,
+    description: input.description,
+    author: {
+      id: `author-${input.platform}`,
+      name: input.authorName,
+    },
+    collectedAt: input.collectedAt,
+    updatedAt: input.collectedAt,
+    folderId: null,
+    tags: [],
+    note: '',
+    relativeDir: `items/${input.platform}/2026-11/20261125_${input.sourceId}`,
+    assets: [],
+    syncStatus: 'opfs_staged',
+    totalSizeBytes: input.totalSizeBytes,
+    deletedAt: null,
+  };
+}
+
+test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证', () => {
+  test('设置页悬浮图标开关实时同步、偏好持久化、缓存统计与清空浏览器缓存', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const tracker = await installDouyinMockRoutes(context);
+    try {
+      const douyinPage = await context.newPage();
+      await douyinPage.goto(
+        `https://www.douyin.com/video/${MOCK_VIDEO_AWEME_ID}`,
+        { waitUntil: 'domcontentloaded' },
+      );
+
+      const fabButton = douyinPage.locator('button.cp-fab-btn');
+      await expect(fabButton).toBeVisible();
+
+      // 打开控制台并切换到设置页
+      const libraryPage = await context.newPage();
+      await libraryPage.goto(extensionUrl('library.html'));
+
+      await libraryPage.getByRole('button', { name: '设置', exact: true }).click();
+      await expect(
+        libraryPage.getByRole('heading', { name: '插件设置' }),
+      ).toBeVisible();
+      await expect(
+        libraryPage.getByTestId('browser-cache-total-size'),
+      ).toBeVisible();
+      await expect(
+        libraryPage.getByTestId('browser-cache-opfs-size'),
+      ).toBeVisible();
+      await expect(
+        libraryPage.getByTestId('browser-cache-index-size'),
+      ).toBeVisible();
+
+      // 关闭悬浮图标开关 -> 已打开页面实时隐藏，新开页面也不显示
+      const floatingSwitch = libraryPage.getByRole('switch', {
+        name: '在支持的网页显示悬浮收藏图标',
+      });
+      await expect(floatingSwitch).toHaveAttribute('aria-checked', 'true');
+      await floatingSwitch.click();
+      await expect(floatingSwitch).toHaveAttribute('aria-checked', 'false');
+      await expect(fabButton).toBeHidden();
+
+      const secondDouyinPage = await context.newPage();
+      await secondDouyinPage.goto(
+        `https://www.douyin.com/video/${MOCK_VIDEO_AWEME_ID}`,
+        { waitUntil: 'domcontentloaded' },
+      );
+      await secondDouyinPage.waitForTimeout(400);
+      await expect(secondDouyinPage.locator('button.cp-fab-btn')).toHaveCount(0);
+
+      // 重新开启悬浮图标开关 -> 两个已打开页面实时恢复显示
+      await floatingSwitch.click();
+      await expect(floatingSwitch).toHaveAttribute('aria-checked', 'true');
+      await expect(fabButton).toBeVisible();
+      await expect(secondDouyinPage.locator('button.cp-fab-btn')).toBeVisible();
+
+      // 修改并发数、自动同步与默认显示偏好并验证刷新后持久化
+      const concurrencyGroup = libraryPage.getByRole('group', {
+        name: '最大并发下载任务数',
+      });
+      await concurrencyGroup.getByRole('button', { name: '4', exact: true }).click();
+
+      const autoSyncSwitch = libraryPage.getByRole('switch', {
+        name: '打开控制台时自动同步暂存内容',
+      });
+      await autoSyncSwitch.click();
+      await expect(autoSyncSwitch).toHaveAttribute('aria-checked', 'false');
+
+      await libraryPage.getByRole('button', { name: '紧凑列表' }).click();
+      await libraryPage.locator('#setting-default-sort').selectOption('totalSizeBytes');
+
+      // 注入 1 条索引记录，验证清空缓存后索引归零且偏好保留
+      const seededRecord = buildSeedRecord({
+        id: '01JSETTINGSSEEDITEM00000001',
+        platform: 'zhihu',
+        sourceId: 'zhihu-cache-test',
+        kind: 'article',
+        title: '缓存清理验证文章',
+        description: '用于验证清空浏览器缓存索引。',
+        authorName: '测试作者',
+        collectedAt: Date.now(),
+        totalSizeBytes: 2048,
+      });
+
+      await libraryPage.evaluate(async (record) => {
+        await new Promise<void>((resolve, reject) => {
+          const req = indexedDB.open('CollectPlusDB');
+          req.onerror = () => reject(req.error);
+          req.onsuccess = () => {
+            const idb = req.result;
+            const tx = idb.transaction('items', 'readwrite');
+            tx.objectStore('items').put(record);
+            tx.oncomplete = () => {
+              idb.close();
+              resolve();
+            };
+            tx.onerror = () => {
+              idb.close();
+              reject(tx.error);
+            };
+          };
+        });
+      }, seededRecord);
+
+      await libraryPage.reload();
+      await expect(libraryPage.getByLabel('排序方式')).toHaveValue('totalSizeBytes');
+      await libraryPage.getByRole('button', { name: '设置', exact: true }).click();
+      await expect(
+        libraryPage.getByTestId('browser-cache-record-counts'),
+      ).toContainText('1 条');
+      await expect(
+        libraryPage.getByRole('switch', {
+          name: '打开控制台时自动同步暂存内容',
+        }),
+      ).toHaveAttribute('aria-checked', 'false');
+
+      await libraryPage.getByRole('button', { name: '清空浏览器缓存' }).click();
+      const confirmDialog = libraryPage.getByRole('dialog');
+      await expect(confirmDialog).toBeVisible();
+      await confirmDialog
+        .getByRole('button', { name: '确认清空浏览器缓存' })
+        .click();
+
+      await expect(
+        libraryPage.getByTestId('browser-cache-record-counts'),
+      ).toContainText('0 条 · 0 目录 · 0 标签');
+
+      // 验证清空缓存不会清除偏好设置
+      await expect(
+        libraryPage.getByRole('switch', {
+          name: '打开控制台时自动同步暂存内容',
+        }),
+      ).toHaveAttribute('aria-checked', 'false');
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await tracker.dispose();
+    }
+  });
+
+  test('媒体类型「文章」与 5 平台筛选（抖音/B站/知乎/YouTube/X）及文章离线阅读', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const libraryPage = await context.newPage();
+    await libraryPage.goto(extensionUrl('library.html'));
+
+    const now = Date.now();
+    const seedItems = [
+      buildSeedRecord({
+        id: '01JFILTERITEM0000000000001',
+        platform: 'douyin',
+        sourceId: 'dy-01',
+        kind: 'video',
+        title: '抖音短视频样本',
+        description: '抖音视频描述',
+        authorName: '抖音创作者',
+        collectedAt: now - 1000,
+        totalSizeBytes: 1024 * 1024,
+      }),
+      buildSeedRecord({
+        id: '01JFILTERITEM0000000000002',
+        platform: 'bilibili',
+        sourceId: 'bv-01',
+        kind: 'video',
+        title: 'B站教程视频样本',
+        description: 'B站视频描述',
+        authorName: 'B站UP主',
+        collectedAt: now - 2000,
+        totalSizeBytes: 2 * 1024 * 1024,
+      }),
+      buildSeedRecord({
+        id: '01JFILTERITEM0000000000003',
+        platform: 'zhihu',
+        sourceId: 'zh-01',
+        kind: 'article',
+        title: '知乎深度专栏文章样本',
+        description: '这是一篇保存在本地的知乎离线文章正文内容。',
+        authorName: '知乎答主',
+        collectedAt: now - 3000,
+        totalSizeBytes: 4096,
+      }),
+      buildSeedRecord({
+        id: '01JFILTERITEM0000000000004',
+        platform: 'youtube',
+        sourceId: 'yt-01',
+        kind: 'video',
+        title: 'YouTube 科技测评样本',
+        description: 'YouTube 视频描述',
+        authorName: 'Tech Channel',
+        collectedAt: now - 4000,
+        totalSizeBytes: 5 * 1024 * 1024,
+      }),
+      buildSeedRecord({
+        id: '01JFILTERITEM0000000000005',
+        platform: 'twitter',
+        sourceId: 'x-01',
+        kind: 'gallery',
+        title: 'X 图文动态样本',
+        description: 'X 动态正文',
+        authorName: 'X Author',
+        collectedAt: now - 5000,
+        totalSizeBytes: 512 * 1024,
+      }),
+    ];
+
+    await libraryPage.evaluate(async (records) => {
+      await new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open('CollectPlusDB');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const idb = req.result;
+          const tx = idb.transaction('items', 'readwrite');
+          const store = tx.objectStore('items');
+          for (const rec of records) {
+            store.put(rec);
+          }
+          tx.oncomplete = () => {
+            idb.close();
+            resolve();
+          };
+          tx.onerror = () => {
+            idb.close();
+            reject(tx.error);
+          };
+        };
+      });
+    }, seedItems);
+
+    await libraryPage.reload();
+    await expect(libraryPage.locator('article')).toHaveCount(5);
+
+    // 1. 媒体类型筛选：文章
+    await libraryPage.getByRole('button', { name: '文章', exact: true }).click();
+    await expect(libraryPage.locator('article')).toHaveCount(1);
+    await expect(libraryPage.getByText('知乎深度专栏文章样本')).toBeVisible();
+
+    // 打开文章详情抽屉，验证离线阅读预览正常渲染无报错
+    await libraryPage.locator('article').first().click();
+    const dialog = libraryPage.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText('离线文章阅读')).toBeVisible();
+    await expect(
+      dialog
+        .locator('article')
+        .getByText('这是一篇保存在本地的知乎离线文章正文内容。'),
+    ).toBeVisible();
+    await libraryPage.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+
+    // 重置媒体类型为全部
+    await libraryPage
+      .getByRole('group', { name: '媒体类型筛选' })
+      .getByRole('button', { name: '全部', exact: true })
+      .click();
+    await expect(libraryPage.locator('article')).toHaveCount(5);
+
+    // 2. 平台筛选：抖音 / B站 / 知乎 / YouTube / X
+    const platformGroup = libraryPage.getByRole('group', {
+      name: '来源平台筛选',
+    });
+
+    const platformChecks: Array<{ label: string; expectedTitle: string }> = [
+      { label: '抖音', expectedTitle: '抖音短视频样本' },
+      { label: 'B站', expectedTitle: 'B站教程视频样本' },
+      { label: '知乎', expectedTitle: '知乎深度专栏文章样本' },
+      { label: 'YouTube', expectedTitle: 'YouTube 科技测评样本' },
+      { label: 'X', expectedTitle: 'X 图文动态样本' },
+    ];
+
+    for (const check of platformChecks) {
+      await platformGroup
+        .getByRole('button', { name: check.label, exact: true })
+        .click();
+      await expect(libraryPage.locator('article')).toHaveCount(1);
+      await expect(libraryPage.getByText(check.expectedTitle)).toBeVisible();
+    }
+
+    await platformGroup.getByRole('button', { name: '全部', exact: true }).click();
+    await expect(libraryPage.locator('article')).toHaveCount(5);
+
+    expect(pageErrors).toEqual([]);
+  });
+});

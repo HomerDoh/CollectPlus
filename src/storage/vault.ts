@@ -38,6 +38,33 @@ export const TAXONOMY_FILENAME = 'taxonomy.json';
 export const ITEMS_DIRNAME = 'items';
 export const TRASH_DIRNAME = '.trash';
 
+// shortcut: 帮助页暂未创建，后续替换为正式文档链接
+export const VAULT_PERMISSION_HELP_URL =
+  'https://github.com/collect-plus/collect-plus/wiki/vault-permission';
+
+export class VaultFilesystemPermissionError extends Error {
+  readonly directoryName: string;
+
+  constructor(directoryName: string, cause?: unknown) {
+    super(
+      `所选目录“${directoryName}”当前无法写入（常见原因：Windows 文件夹缺少当前用户的写入权限、目录为只读，或被安全软件拦截）。建议改选「文档」目录，或修改该文件夹权限后重试。`,
+      { cause },
+    );
+    this.name = 'VaultFilesystemPermissionError';
+    this.directoryName = directoryName;
+  }
+}
+
+export function isFilesystemWriteDeniedError(error: unknown): boolean {
+  if (error instanceof VaultFilesystemPermissionError) {
+    return true;
+  }
+  if (error instanceof DOMException) {
+    return error.name === 'NoModificationAllowedError';
+  }
+  return error instanceof Error && error.name === 'NoModificationAllowedError';
+}
+
 export const VAULT_README_CONTENT = `========================================================================
 Collect+ 本地离线收藏库（Local Offline Vault）
 ========================================================================
@@ -294,6 +321,7 @@ export async function bindNewVaultDirectory(): Promise<{
   const handle = await window.showDirectoryPicker({
     id: 'collect-plus-vault',
     mode: 'readwrite',
+    startIn: 'documents',
   });
 
   const granted = await requestVaultPermission(handle, 'readwrite');
@@ -301,7 +329,21 @@ export async function bindNewVaultDirectory(): Promise<{
     throw new Error('Read/write permission for the selected Vault directory was denied.');
   }
 
-  const { config, isExistingVault } = await ensureVaultStructure(handle);
+  let config: VaultConfig;
+  let isExistingVault: boolean;
+  try {
+    const ensured = await ensureVaultStructure(handle);
+    config = ensured.config;
+    isExistingVault = ensured.isExistingVault;
+  } catch (error) {
+    if (isFilesystemWriteDeniedError(error)) {
+      throw new VaultFilesystemPermissionError(
+        handle.name || 'CollectVault',
+        error,
+      );
+    }
+    throw error;
+  }
   await setSetting('vault_directory_handle', handle);
   await setSetting('vault_config', config);
 
@@ -838,6 +880,7 @@ const VALID_MEDIA_KINDS: ReadonlySet<string> = new Set<MediaKind>([
   'video',
   'gallery',
   'image',
+  'article',
 ]);
 
 const VALID_ASSET_KINDS: ReadonlySet<string> = new Set<AssetKind>([

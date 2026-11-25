@@ -38,64 +38,75 @@ export const MOCK_MP4_BYTES = Buffer.concat([
 const MOCK_CDN_HOST_RE =
   /^https:\/\/(?:v26-web\.douyinvod\.com|p3-pc-sign\.douyinpic\.com)\//;
 
-const MOCK_VIDEO_DETAIL_RESPONSE = {
-  status_code: 0,
-  aweme_detail: {
-    aweme_id: MOCK_VIDEO_AWEME_ID,
-    aweme_type: 0,
-    desc: `${MOCK_VIDEO_TITLE} #前端工程 #离线归档`,
-    create_time: 1_760_000_000,
-    author: {
-      uid: '10086001',
-      sec_uid: 'MS4wLjABAAAA_mock_author_video',
-      nickname: '自动化测试作者A',
-      unique_id: 'mock_author_a',
-    },
-    statistics: {
-      digg_count: 1280,
-      collect_count: 320,
-      comment_count: 45,
-      share_count: 19,
-    },
-    video: {
-      width: 1080,
-      height: 1920,
-      duration: 15_200,
-      origin_cover: {
-        url_list: [
-          'https://p3-pc-sign.douyinpic.com/mock-cover-video.heic',
-          'https://p3-pc-sign.douyinpic.com/mock-cover-video.png',
+function buildMockVideoDetailResponse(awemeId: string): Record<string, unknown> {
+  const isDefaultVideo = awemeId === MOCK_VIDEO_AWEME_ID;
+  const title = isDefaultVideo
+    ? `${MOCK_VIDEO_TITLE} #前端工程 #离线归档`
+    : `连刷测试视频_${awemeId} #批量收藏`;
+  const coverName = isDefaultVideo
+    ? 'mock-cover-video.png'
+    : `mock-cover-${awemeId}.png`;
+  const videoId = isDefaultVideo ? 'h264_primary' : `h264_${awemeId}`;
+
+  return {
+    status_code: 0,
+    aweme_detail: {
+      aweme_id: awemeId,
+      aweme_type: 0,
+      desc: title,
+      create_time: 1_760_000_000,
+      author: {
+        uid: '10086001',
+        sec_uid: 'MS4wLjABAAAA_mock_author_video',
+        nickname: '自动化测试作者A',
+        unique_id: 'mock_author_a',
+      },
+      statistics: {
+        digg_count: 1280,
+        collect_count: 320,
+        comment_count: 45,
+        share_count: 19,
+      },
+      video: {
+        width: 1080,
+        height: 1920,
+        duration: 15_200,
+        origin_cover: {
+          url_list: [
+            'https://p3-pc-sign.douyinpic.com/mock-cover-video.heic',
+            `https://p3-pc-sign.douyinpic.com/${coverName}`,
+          ],
+        },
+        bit_rate: [
+          {
+            gear_name: 'hevc_1080p',
+            is_h265: 1,
+            bit_rate: 3_200_000,
+            play_addr: {
+              width: 1080,
+              height: 1920,
+              url_list: [
+                'https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=hevc_should_not_be_first',
+              ],
+            },
+          },
+          {
+            gear_name: 'normal_1080p',
+            is_h265: 0,
+            bit_rate: 1_800_000,
+            play_addr: {
+              width: 1080,
+              height: 1920,
+              url_list: [
+                `https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=${videoId}`,
+              ],
+            },
+          },
         ],
       },
-      bit_rate: [
-        {
-          gear_name: 'hevc_1080p',
-          is_h265: 1,
-          bit_rate: 3_200_000,
-          play_addr: {
-            width: 1080,
-            height: 1920,
-            url_list: [
-              'https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=hevc_should_not_be_first',
-            ],
-          },
-        },
-        {
-          gear_name: 'normal_1080p',
-          is_h265: 0,
-          bit_rate: 1_800_000,
-          play_addr: {
-            width: 1080,
-            height: 1920,
-            url_list: [
-              'https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=h264_primary',
-            ],
-          },
-        },
-      ],
     },
-  },
-};
+  };
+}
 
 const MOCK_GALLERY_DETAIL_RESPONSE = {
   status_code: 0,
@@ -207,6 +218,11 @@ interface CdpFetchPausedEvent {
   };
 }
 
+export interface DouyinMockOptions {
+  /** 可选钩子：在返回 CDN 媒体二进制前挂起等待，用于验证并发队列与图标进度状态 */
+  beforeFulfillMedia?: (url: string) => Promise<void>;
+}
+
 /**
  * 浏览器级 CDP `Fetch` 拦截器：
  * Playwright 的 `context.route()` 无法自动挂接到 Chrome MV3 的 Offscreen Document target，
@@ -215,6 +231,7 @@ interface CdpFetchPausedEvent {
 async function attachBrowserCdpCdnMock(
   context: BrowserContext,
   tracker: DouyinMockTracker,
+  options?: DouyinMockOptions,
 ): Promise<CDPSession | null> {
   const browser = context.browser();
   if (!browser) {
@@ -234,9 +251,12 @@ async function attachBrowserCdpCdnMock(
     const { requestId, request } = event;
     tracker.requestedMediaUrls.push(request.url);
 
-    const { contentType, body } = buildMockMediaPayload(request.url);
-    void cdp
-      .send('Fetch.fulfillRequest', {
+    void (async () => {
+      if (options?.beforeFulfillMedia) {
+        await options.beforeFulfillMedia(request.url);
+      }
+      const { contentType, body } = buildMockMediaPayload(request.url);
+      await cdp.send('Fetch.fulfillRequest', {
         requestId,
         responseCode: 200,
         responseHeaders: [
@@ -245,8 +265,8 @@ async function attachBrowserCdpCdnMock(
           { name: 'access-control-allow-origin', value: '*' },
         ],
         body: body.toString('base64'),
-      })
-      .catch(() => undefined);
+      });
+    })().catch(() => undefined);
   });
 
   // 兜底：若未来 Chromium 将 Offscreen 网络层隔离到独立 Target，则同时监听 Target 附着
@@ -268,13 +288,14 @@ export interface DouyinMockTracker {
  */
 export async function installDouyinMockRoutes(
   context: BrowserContext,
+  options?: DouyinMockOptions,
 ): Promise<DouyinMockTracker> {
   const tracker: DouyinMockTracker = {
     requestedMediaUrls: [],
     dispose: async () => undefined,
   };
 
-  const cdpSession = await attachBrowserCdpCdnMock(context, tracker);
+  const cdpSession = await attachBrowserCdpCdnMock(context, tracker, options);
   tracker.dispose = async () => {
     if (cdpSession) {
       await cdpSession.detach().catch(() => undefined);
@@ -285,11 +306,11 @@ export async function installDouyinMockRoutes(
     const url = new URL(route.request().url());
 
     if (url.pathname.startsWith('/aweme/v1/web/aweme/detail')) {
-      const awemeId = url.searchParams.get('aweme_id');
+      const awemeId = url.searchParams.get('aweme_id') ?? MOCK_VIDEO_AWEME_ID;
       const body =
         awemeId === MOCK_GALLERY_AWEME_ID
           ? MOCK_GALLERY_DETAIL_RESPONSE
-          : MOCK_VIDEO_DETAIL_RESPONSE;
+          : buildMockVideoDetailResponse(awemeId);
       await route.fulfill({
         status: 200,
         contentType: 'application/json; charset=utf-8',
@@ -335,6 +356,9 @@ export async function installDouyinMockRoutes(
   await context.route(MOCK_CDN_HOST_RE, async (route: Route) => {
     const url = route.request().url();
     tracker.requestedMediaUrls.push(url);
+    if (options?.beforeFulfillMedia) {
+      await options.beforeFulfillMedia(url);
+    }
     const { contentType, body } = buildMockMediaPayload(url);
     await route.fulfill({
       status: 200,

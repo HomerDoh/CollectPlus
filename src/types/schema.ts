@@ -12,6 +12,8 @@ export const SCHEMA_VERSION = 1 as const;
 export const PLATFORM_IDS = [
   'douyin',
   'bilibili',
+  'zhihu',
+  'youtube',
   'xiaohongshu',
   'twitter',
   'instagram',
@@ -29,7 +31,7 @@ export function isPlatformId(value: unknown): value is PlatformId {
 }
 
 /** 收藏条目的媒体形态分类 */
-export type MediaKind = 'video' | 'gallery' | 'image';
+export type MediaKind = 'video' | 'gallery' | 'image' | 'article';
 
 /** 媒体资源下载与混流策略 */
 export type DownloadStrategy = 'direct' | 'dash_mux' | 'hls_mux';
@@ -262,6 +264,12 @@ export interface TaxonomyFile {
   tags: TagMeta[];
 }
 
+/** 控制台默认展示视图 */
+export type LibraryViewMode = 'grid' | 'list';
+
+/** 控制台默认排序方式 */
+export type LibrarySortOption = 'collectedAt' | 'publishedAt' | 'totalSizeBytes';
+
 /** 用户可配置的偏好设置 */
 export interface UserPreferences {
   /** 打开管理库页面且已获目录权限时自动同步 OPFS 暂存内容 */
@@ -272,6 +280,10 @@ export interface UserPreferences {
   defaultFolderId: string | null;
   /** 最大并发下载任务数 */
   maxConcurrentDownloads: number;
+  /** 控制台默认列表展示视图 */
+  defaultViewMode: LibraryViewMode;
+  /** 控制台默认排序方式 */
+  defaultSortBy: LibrarySortOption;
 }
 
 /** IndexedDB `settings` 表：已绑定的 CollectVault 目录句柄 */

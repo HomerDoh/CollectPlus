@@ -45,32 +45,34 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         )
         .toBe(true);
 
-      // 使用页面内 Alt+S 快捷键触发采集
+      // 使用页面内 Alt+S 快捷键触发静默采集，确认不出现页面弹窗
       await douyinPage.keyboard.press('Alt+s');
-
-      const toastCard = douyinPage.locator('.cp-toast-card');
-      await expect(toastCard).toBeVisible();
-      await expect(toastCard.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
-      await expect(toastCard.getByText('已离线暂存')).toBeVisible({
-        timeout: 20_000,
-      });
+      await expect(douyinPage.locator('.cp-toast-card')).toHaveCount(0);
 
       // 等待超过 600ms 节流窗口后再次点击悬浮按钮，验证去重机制（不重复创建条目）
       await douyinPage.waitForTimeout(700);
       await douyinPage.locator('button.cp-fab-btn').click();
-      await expect(toastCard.getByText('已在收藏库')).toBeVisible();
+      await expect(douyinPage.locator('.cp-toast-card')).toHaveCount(0);
 
-      // 打开 Popup 验证统计卡（总收藏 1 / 待同步 1 / 下载中 0）
+      // 打开 Popup 轮询等待后台静默下载完成并验证统计卡（总收藏 1 / 待同步 1 / 下载中 0）
       const popupPage = await context.newPage();
-      await popupPage.goto(extensionUrl('popup.html'));
+      await expect
+        .poll(
+          async () => {
+            await popupPage.goto(extensionUrl('popup.html'));
+            const statValues = popupPage.locator('section.grid span.text-lg');
+            const total = await statValues.nth(0).textContent();
+            const pending = await statValues.nth(1).textContent();
+            const active = await statValues.nth(2).textContent();
+            return `${total}:${pending}:${active}`;
+          },
+          { timeout: 20_000 },
+        )
+        .toBe('1:1:0');
+
       await expect(
         popupPage.getByRole('heading', { name: 'Collect+' }),
       ).toBeVisible();
-
-      const statValues = popupPage.locator('section.grid span.text-lg');
-      await expect(statValues.nth(0)).toHaveText('1');
-      await expect(statValues.nth(1)).toHaveText('1');
-      await expect(statValues.nth(2)).toHaveText('0');
 
       // 点击「打开 Collect+ 全屏管理台」验证正常拉起 library.html 且仅存在 1 条记录
       const newPagePromise = context.waitForEvent('page');
@@ -98,7 +100,7 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
   }) => {
     const tracker = await installDouyinMockRoutes(context);
     try {
-      // 1. 先采集 1 条视频 + 1 条图集
+      // 1. 先静默采集 1 条视频 + 1 条图集
       const videoPage = await context.newPage();
       await videoPage.goto(
         `https://www.douyin.com/video/${MOCK_VIDEO_AWEME_ID}`,
@@ -115,9 +117,7 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         )
         .toBe(true);
       await videoPage.locator('button.cp-fab-btn').click();
-      await expect(
-        videoPage.locator('.cp-toast-card').getByText('已离线暂存'),
-      ).toBeVisible({ timeout: 20_000 });
+      await expect(videoPage.locator('.cp-toast-card')).toHaveCount(0);
 
       const galleryPage = await context.newPage();
       await galleryPage.goto(
@@ -135,16 +135,14 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         )
         .toBe(true);
       await galleryPage.click('#mock-native-collect');
-      await expect(
-        galleryPage.locator('.cp-toast-card').getByText('已离线暂存'),
-      ).toBeVisible({ timeout: 20_000 });
+      await expect(galleryPage.locator('.cp-toast-card')).toHaveCount(0);
 
-      // 2. 在 SidePanel 验证 2 条最近收藏，并点击图集直达 Library 详情抽屉
+      // 2. 在 SidePanel 验证 2 条最近收藏全部暂存完成，并点击图集直达 Library 详情抽屉
       const sidePanelPage = await context.newPage();
       await sidePanelPage.goto(extensionUrl('sidepanel.html'));
       await expect(
         sidePanelPage.getByText('2 条内容待同步至 CollectVault'),
-      ).toBeVisible();
+      ).toBeVisible({ timeout: 20_000 });
       await expect(sidePanelPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
       await expect(sidePanelPage.getByText(MOCK_GALLERY_TITLE)).toBeVisible();
 
@@ -167,15 +165,24 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       await expect(libraryPage.locator('article')).toHaveCount(2);
 
       const sidebar = libraryPage.locator('aside');
-      await sidebar.getByRole('button', { name: '视频', exact: true }).click();
+      const mediaKindGroup = sidebar.getByRole('group', {
+        name: '媒体类型筛选',
+      });
+      await mediaKindGroup
+        .getByRole('button', { name: '视频', exact: true })
+        .click();
       await expect(libraryPage.locator('article')).toHaveCount(1);
       await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
 
-      await sidebar.getByRole('button', { name: '图集', exact: true }).click();
+      await mediaKindGroup
+        .getByRole('button', { name: '图集', exact: true })
+        .click();
       await expect(libraryPage.locator('article')).toHaveCount(1);
       await expect(libraryPage.getByText(MOCK_GALLERY_TITLE)).toBeVisible();
 
-      await sidebar.getByRole('button', { name: '全部', exact: true }).click();
+      await mediaKindGroup
+        .getByRole('button', { name: '全部', exact: true })
+        .click();
       await expect(libraryPage.locator('article')).toHaveCount(2);
 
       // 4. 验证卡片网格 / 紧凑列表视图切换
@@ -228,7 +235,7 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
   }) => {
     const tracker = await installDouyinMockRoutes(context);
     try {
-      // 1. 采集 1 条视频并在 Toast 内新建分类文件夹
+      // 1. 静默采集 1 条视频
       const douyinPage = await context.newPage();
       await douyinPage.goto(
         `https://www.douyin.com/video/${MOCK_VIDEO_AWEME_ID}`,
@@ -246,19 +253,9 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         .toBe(true);
 
       await douyinPage.locator('button.cp-fab-btn').click();
-      const toastCard = douyinPage.locator('.cp-toast-card');
-      await expect(toastCard.getByText('已离线暂存')).toBeVisible({
-        timeout: 20_000,
-      });
+      await expect(douyinPage.locator('.cp-toast-card')).toHaveCount(0);
 
-      await toastCard.getByRole('button', { name: '新建' }).click();
-      await toastCard
-        .getByPlaceholder('输入新文件夹名称...')
-        .fill('容灾验证目录');
-      await toastCard.getByRole('button', { name: '确定' }).click();
-      await expect(toastCard.getByText('已保存')).toBeVisible();
-
-      // 2. 打开 Library，注入基于原生 OPFS 目录句柄的 showDirectoryPicker Mock
+      // 2. 打开 Library，注入基于原生 OPFS 目录句柄的 showDirectoryPicker Mock，并在侧边栏新建分类目录
       const libraryPage = await context.newPage();
       await libraryPage.addInitScript(() => {
         const win = window as unknown as {
@@ -271,7 +268,20 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       });
 
       await libraryPage.goto(extensionUrl('library.html'));
-      await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
+      await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible({
+        timeout: 20_000,
+      });
+      await expect(
+        libraryPage.locator('article').getByText('待同步'),
+      ).toBeVisible({ timeout: 20_000 });
+
+      const sidebar = libraryPage.locator('aside');
+      await sidebar.getByTitle('新建顶级文件夹').click();
+      const folderInput = sidebar.getByPlaceholder('输入文件夹名称');
+      await folderInput.fill('容灾验证目录');
+      await folderInput.press('Enter');
+      await expect(sidebar.getByText('容灾验证目录')).toBeVisible();
+
       await expect(
         libraryPage.getByRole('button', {
           name: '选择 / 初始化 CollectVault 目录',
@@ -391,15 +401,19 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       expect(inspection.videoFileSize).toBeGreaterThan(0);
       expect(inspection.stageStillExists).toBe(false);
 
-      // 5. 清空浏览器缓存索引（确认不删硬盘文件且保留目录绑定，触发重建引导）
+      // 5. 前往设置页清空浏览器缓存索引（确认不删硬盘文件且保留目录绑定，触发重建引导）
       await libraryPage
-        .getByRole('button', { name: '清空浏览器缓存索引' })
+        .locator('aside')
+        .getByRole('button', { name: '设置', exact: true })
         .click();
+      await libraryPage.getByRole('button', { name: '清空浏览器缓存' }).click();
       await libraryPage
-        .getByRole('button', { name: '确认清空浏览器索引' })
+        .getByRole('button', { name: '确认清空浏览器缓存' })
         .click();
 
-      await expect(libraryPage.getByText('还没有收藏任何作品')).toBeVisible();
+      await expect(
+        libraryPage.getByTestId('browser-cache-record-counts'),
+      ).toContainText('0 条 · 0 目录 · 0 标签');
       await expect(
         libraryPage.getByRole('button', { name: '立即重建索引' }),
       ).toBeVisible();
@@ -410,6 +424,10 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         libraryPage.getByText(/索引重建成功：已恢复\s*1\s*条收藏/),
       ).toBeVisible({ timeout: 20_000 });
 
+      await libraryPage
+        .locator('aside')
+        .getByRole('button', { name: /全部收藏/ })
+        .click();
       await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
       await expect(
         libraryPage.locator('aside').getByText('容灾验证目录'),
@@ -429,5 +447,93 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
     } finally {
       await tracker.dispose();
     }
+  });
+
+  test('Vault 绑定默认打开文档目录，遇到 NTFS/只读权限错误时分流并展示帮助链接与重试入口', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const libraryPage = await context.newPage();
+
+    await libraryPage.addInitScript(() => {
+      interface PickerOptionsRecord {
+        id?: string;
+        mode?: string;
+        startIn?: unknown;
+      }
+
+      const win = window as unknown as {
+        __pickerCalls?: PickerOptionsRecord[];
+        showDirectoryPicker?: (
+          options?: PickerOptionsRecord,
+        ) => Promise<FileSystemDirectoryHandle>;
+      };
+      win.__pickerCalls = [];
+
+      let callCount = 0;
+      win.showDirectoryPicker = async (options?: PickerOptionsRecord) => {
+        win.__pickerCalls?.push({
+          id: options?.id,
+          mode: options?.mode,
+          startIn: options?.startIn,
+        });
+        callCount += 1;
+
+        if (callCount === 1) {
+          const readonlyDir = {
+            kind: 'directory',
+            name: 'LockedVault',
+            queryPermission: async () => 'granted',
+            requestPermission: async () => 'granted',
+            getFileHandle: async (_name: string, opts?: { create?: boolean }) => {
+              if (opts?.create) {
+                throw new DOMException(
+                  'An attempt was made to write to a file or directory which could not be modified due to the state of the underlying filesystem.',
+                  'NoModificationAllowedError',
+                );
+              }
+              throw new DOMException('Not found', 'NotFoundError');
+            },
+          };
+          return readonlyDir as unknown as FileSystemDirectoryHandle;
+        }
+
+        const root = await navigator.storage.getDirectory();
+        return root.getDirectoryHandle('CollectVault', { create: true });
+      };
+    });
+
+    await libraryPage.goto(extensionUrl('library.html'));
+    await libraryPage
+      .getByRole('button', { name: '选择 / 初始化 CollectVault 目录' })
+      .click();
+
+    await expect(
+      libraryPage.getByText(/所选目录“LockedVault”当前无法写入/),
+    ).toBeVisible();
+
+    const helpLink = libraryPage.getByRole('link', {
+      name: '查看权限问题解决办法',
+    });
+    await expect(helpLink).toBeVisible();
+    expect(await helpLink.getAttribute('href')).toMatch(/^https?:\/\//);
+    expect(await helpLink.getAttribute('target')).toBe('_blank');
+
+    const pickerCalls = await libraryPage.evaluate(() => {
+      const win = window as unknown as {
+        __pickerCalls?: Array<{ startIn?: unknown; mode?: string }>;
+      };
+      return win.__pickerCalls ?? [];
+    });
+    expect(pickerCalls[0]?.startIn).toBe('documents');
+    expect(pickerCalls[0]?.mode).toBe('readwrite');
+
+    // 点击错误条中的「重新选择目录」切换至可写目录后应成功绑定并清除报错
+    await libraryPage.getByRole('button', { name: '重新选择目录' }).click();
+    await expect(libraryPage.getByText('CollectVault 已就绪')).toBeVisible();
+    await expect(helpLink).toBeHidden();
+
+    expect(pageErrors).toEqual([]);
   });
 });

@@ -82,6 +82,7 @@ pnpm zip
     │   ├── vault.ts                       # CollectVault 绑定、README.txt 守护、VaultFlusher、重建索引
     │   └── search.ts                      # MiniSearch 中英文混合分词（ASCII 整词 + CJK 单字/2-gram）
     ├── download/
+    │   ├── action-icon.ts                 # 扩展图标 OffscreenCanvas 环形下载进度与多任务计数渲染
     │   ├── dnr.ts                         # Session DNR 防盗链规则原子同步（仅限扩展自身 initiator）
     │   ├── offscreen-manager.ts           # Offscreen Document 并发锁创建与 PING 握手保活
     │   └── pipeline.ts                    # 方案 A 流式下载（direct / dash_mux / hls_mux）与 WebP 缩略图
@@ -91,7 +92,7 @@ pnpm zip
     │       ├── parser.ts                  # 抖音 aweme 归一化（H.264 优先无水印视频、图集原图）
     │       └── main-hook.ts               # Main World fetch/XHR 旁路拦截、200 条 LRU、React Fiber 兜底
     ├── components/
-    │   ├── CaptureOverlay.tsx             # Shadow DOM 悬浮按钮与快捷分类/标签/进度 Toast
+    │   ├── CaptureOverlay.tsx             # Shadow DOM 轻悬浮采集按钮（静默采集无弹窗）
     │   └── capture-overlay.css            # 独立 px 隔离样式（:host { all: initial }）
     ├── styles/globals.css                 # Tailwind CSS v4 全局样式
     ├── public/icon/                       # 扩展图标（16/32/48/128.png）
@@ -147,7 +148,7 @@ pnpm zip
 
 后续 Phase 2 / Phase 3 接入 **B 站（DASH）**、**小红书**、**X/Twitter（HLS）** 或 **Instagram** 时，按以下标准流程扩展，**禁止破坏现有存储与 UI 契约**：
 
-1. **平台标识与 DNR 段位**：确认 `src/types/schema.ts` 的 `PLATFORM_IDS` 与 `src/download/dnr.ts` 的 `PLATFORM_DNR_RULE_BASE` 已包含目标平台（已预留 `bilibili: 2000`、`xiaohongshu: 3000`、`twitter: 4000`、`instagram: 5000`）。
+1. **平台标识与 DNR 段位**：确认 `src/types/schema.ts` 的 `PLATFORM_IDS` 与 `src/download/dnr.ts` 的 `PLATFORM_DNR_RULE_BASE` 已包含目标平台（已预留 `bilibili: 2000`、`xiaohongshu: 3000`、`twitter: 4000`、`instagram: 5000`、`zhihu: 6000`、`youtube: 7000`）。
 2. **权限声明**：在 `wxt.config.ts` 的 `manifest.host_permissions` 中补充目标站点及媒体 CDN 域名。
 3. **实现适配器目录 `src/adapters/<platform>/`**：
    - `parser.ts`：实现 `PlatformAdapter` 接口（`matchesUrl`、`getDnrRules`、`normalizeRawData`），将平台原始数据归一化为标准 `CapturedPayload`。
@@ -181,7 +182,7 @@ pnpm zip
    - 测试媒体下载链路时，**必须**参照 `tests/e2e/fixtures/douyin-mock.ts` 中的 `attachBrowserCdpCdnMock`，通过 `context.browser().newBrowserCDPSession()` 启用浏览器级 CDP `Fetch.enable` + `Fetch.fulfillRequest` 拦截 Offscreen 发出的媒体 CDN 请求，返回合法 PNG/MP4 二进制负载，从而 100% 离线验证：流式下载 → OPFS 落盘 → `createImageBitmap` 生成离线 WebP 缩略图 → 管理台 `blob:` 离线播放。
    - 用例结束后务必调用 `tracker.dispose()` 释放 CDP Session。
 4. **Shadow DOM 交互与状态断言**：
-   - Playwright CSS Locator 默认穿透开放 Shadow DOM（如 `page.locator('button.cp-fab-btn')`、`.cp-toast-card`），无需手写 `shadowRoot` 查找。
+   - Playwright CSS Locator 默认穿透开放 Shadow DOM（如 `page.locator('button.cp-fab-btn')`），无需手写 `shadowRoot` 查找。
    - File System Access API（`showDirectoryPicker`）受操作系统原生弹窗限制，若需单测 Vault 落盘逻辑应在页面上下文注入内存 Mock `FileSystemDirectoryHandle`，不要尝试自动化 OS 文件选择器弹窗。
 5. **真实站点有头联调（按需手工验证）**：
    - 默认 E2E 全程走确定性 Mock，免登录、零风控、数秒完成回归。

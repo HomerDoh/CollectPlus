@@ -1,8 +1,7 @@
-import { useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
-  DatabaseBackup,
+  ExternalLink,
   FolderCheck,
   FolderKey,
   FolderOpen,
@@ -11,7 +10,6 @@ import {
   Loader2,
   RefreshCw,
   ShieldCheck,
-  Trash2,
   X,
 } from 'lucide-react';
 import type {
@@ -23,6 +21,13 @@ import type {
 import { formatDateTime, formatRelativeTime } from '../utils/format.ts';
 
 export type VaultPermissionStatus = PermissionState | 'unbound';
+
+export interface VaultBannerError {
+  message: string;
+  helpUrl?: string;
+  helpLabel?: string;
+  canRebind?: boolean;
+}
 
 export interface VaultBannerProps {
   vaultHandle: FileSystemDirectoryHandle | null;
@@ -37,12 +42,11 @@ export interface VaultBannerProps {
   rebuildProgress: RebuildProgress | null;
   lastRebuildSummary: RebuildSummary | null;
   showRebuildSuggestion: boolean;
-  bannerError: string | null;
+  bannerError: string | VaultBannerError | null;
   onBindVault: () => Promise<void>;
   onRequestPermissionAndSync: () => Promise<void>;
   onFlushToVault: () => Promise<void>;
   onRebuildIndex: () => Promise<void>;
-  onClearBrowserCache: () => Promise<void>;
   onDismissSuggestion: () => void;
   onDismissFeedback: () => void;
 }
@@ -79,17 +83,11 @@ export function VaultBanner({
   onRequestPermissionAndSync,
   onFlushToVault,
   onRebuildIndex,
-  onClearBrowserCache,
   onDismissSuggestion,
   onDismissFeedback,
 }: VaultBannerProps) {
-  const [confirmModal, setConfirmModal] = useState<
-    'rebuild' | 'clear_cache' | null
-  >(null);
-  const [isClearingCache, setIsClearingCache] = useState(false);
-
   const pendingSyncCount = stagedCount + metaDirtyCount;
-  const isBusy = isFlushing || isRebuilding || isClearingCache;
+  const isBusy = isFlushing || isRebuilding;
 
   const flushPercent =
     flushProgress && flushProgress.total > 0
@@ -97,21 +95,6 @@ export function VaultBanner({
       : flushProgress?.phase === 'done'
         ? 100
         : 12;
-
-  const handleConfirmRebuild = async () => {
-    setConfirmModal(null);
-    await onRebuildIndex();
-  };
-
-  const handleConfirmClearCache = async () => {
-    setIsClearingCache(true);
-    try {
-      await onClearBrowserCache();
-      setConfirmModal(null);
-    } finally {
-      setIsClearingCache(false);
-    }
-  };
 
   return (
     <div className="flex flex-col gap-2.5 border-b border-slate-200 bg-white px-6 py-3.5">
@@ -259,41 +242,6 @@ export function VaultBanner({
                     ? `同步到 CollectVault (${pendingSyncCount})`
                     : '同步到 CollectVault'}
               </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setConfirmModal('rebuild')}
-              disabled={isBusy}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60"
-            >
-              {isRebuilding ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <DatabaseBackup className="h-3.5 w-3.5 text-slate-500" />
-              )}
-              <span>重建索引</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => void onBindVault()}
-              disabled={isBusy}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60"
-            >
-              <FolderOpen className="h-3.5 w-3.5 text-slate-500" />
-              <span>切换目录</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setConfirmModal('clear_cache')}
-              disabled={isBusy}
-              title="仅清空浏览器 IndexedDB 缓存索引，不删除本地硬盘文件"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 disabled:opacity-60"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              <span>清空浏览器缓存索引</span>
             </button>
           </div>
         </div>
@@ -450,10 +398,45 @@ export function VaultBanner({
 
       {/* 错误提示 */}
       {bannerError && (
-        <div className="flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-800">
           <div className="flex items-start gap-2">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
-            <span>{bannerError}</span>
+            <div className="flex flex-col gap-1.5">
+              <span>
+                {typeof bannerError === 'string'
+                  ? bannerError
+                  : bannerError.message}
+              </span>
+              {typeof bannerError !== 'string' &&
+                (bannerError.helpUrl || bannerError.canRebind) && (
+                  <div className="flex flex-wrap items-center gap-3 pt-0.5">
+                    {bannerError.canRebind && (
+                      <button
+                        type="button"
+                        onClick={() => void onBindVault()}
+                        disabled={isBusy}
+                        className="inline-flex items-center gap-1 rounded-md bg-rose-600 px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-rose-700 disabled:opacity-60"
+                      >
+                        <FolderOpen className="h-3 w-3" />
+                        <span>重新选择目录</span>
+                      </button>
+                    )}
+                    {bannerError.helpUrl && (
+                      <a
+                        href={bannerError.helpUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-medium text-rose-700 underline decoration-rose-400 underline-offset-2 hover:text-rose-900"
+                      >
+                        <span>
+                          {bannerError.helpLabel ?? '查看权限问题解决办法'}
+                        </span>
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                  </div>
+                )}
+            </div>
           </div>
           <button
             type="button"
@@ -463,108 +446,6 @@ export function VaultBanner({
           >
             <X className="h-3.5 w-3.5" />
           </button>
-        </div>
-      )}
-
-      {/* 二次确认模态框：重建索引 / 清空浏览器缓存索引 */}
-      {confirmModal !== null && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[1px]"
-          onClick={() => !isClearingCache && setConfirmModal(null)}
-        >
-          <div
-            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {confirmModal === 'rebuild' ? (
-              <>
-                <div className="flex items-start gap-3">
-                  <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
-                    <DatabaseBackup className="h-5 w-5" />
-                  </span>
-                  <div>
-                    <h3 className="text-base font-semibold text-slate-900">
-                      确认从本地 CollectVault 重建索引？
-                    </h3>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                      系统将递归扫描本地目录{' '}
-                      <code className="rounded bg-slate-100 px-1 py-0.5 font-semibold text-slate-800">
-                        {vaultHandle?.name}
-                      </code>{' '}
-                      中的全部 <code>meta.json</code> 与{' '}
-                      <code>taxonomy.json</code>
-                      ，重新生成缩略图并覆盖浏览器 IndexedDB 索引。
-                    </p>
-                    {pendingSyncCount > 0 && (
-                      <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-2 text-xs font-medium text-amber-800">
-                        提示：当前有 {pendingSyncCount}{' '}
-                        条尚未同步到硬盘的暂存或修改内容，建议先点击「同步到 CollectVault」后再重建索引。
-                      </p>
-                    )}
-                  </div>
-                </div>
-                <div className="mt-5 flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setConfirmModal(null)}
-                    className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleConfirmRebuild()}
-                    className="rounded-lg bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
-                  >
-                    确认重建索引
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex items-start gap-3">
-                  <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-600">
-                    <AlertTriangle className="h-5 w-5" />
-                  </span>
-                  <div>
-                    <h3 className="text-base font-semibold text-slate-900">
-                      确认清空浏览器缓存索引？
-                    </h3>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                      此操作仅清空浏览器 IndexedDB 中的{' '}
-                      <code>items</code>、<code>folders</code>、<code>tags</code>、
-                      <code>tasks</code> 索引缓存（用于容灾恢复测试或故障排查），
-                      并保留本地目录绑定。
-                    </p>
-                    <p className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-medium text-emerald-800">
-                      安全承诺：绝不会删除您硬盘 CollectVault 目录中的任何视频、图片或元数据文件，随时可点击「重建索引」瞬间恢复全部数据。
-                    </p>
-                  </div>
-                </div>
-                <div className="mt-5 flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setConfirmModal(null)}
-                    disabled={isClearingCache}
-                    className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleConfirmClearCache()}
-                    disabled={isClearingCache}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-60"
-                  >
-                    {isClearingCache && (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    )}
-                    <span>确认清空浏览器索引</span>
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
         </div>
       )}
     </div>

@@ -295,3 +295,58 @@ export async function getOpfsItemUsageBytes(itemId: string): Promise<number> {
     throw error;
   }
 }
+
+/** 计算整个 OPFS 暂存根目录 `collect-plus-stage/` 占用的总字节数 */
+export async function getOpfsTotalUsageBytes(): Promise<number> {
+  try {
+    const stageRoot = await getOpfsStageRoot();
+    return await computeDirectoryBytes(stageRoot);
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return 0;
+    }
+    return 0;
+  }
+}
+
+/** 浏览器侧存储空间占用统计 */
+export interface BrowserStorageEstimate {
+  /** 浏览器为当前扩展源估算的总占用（IndexedDB + OPFS 等，字节） */
+  totalUsageBytes: number;
+  /** 浏览器为当前扩展源分配的总配额（字节，不可用时为 0） */
+  quotaBytes: number;
+  /** OPFS 暂存区媒体文件精确占用（字节） */
+  opfsBytes: number;
+  /** 扣除 OPFS 后估算的 IndexedDB 索引与缩略图缓存占用（字节） */
+  indexCacheBytes: number;
+}
+
+/** 获取浏览器侧总存储占用、OPFS 暂存体积与估算索引缓存大小 */
+export async function getBrowserStorageEstimate(): Promise<BrowserStorageEstimate> {
+  const [estimate, opfsBytes] = await Promise.all([
+    typeof navigator !== 'undefined' &&
+    navigator.storage &&
+    typeof navigator.storage.estimate === 'function'
+      ? navigator.storage.estimate().catch(() => ({ usage: 0, quota: 0 }))
+      : Promise.resolve({ usage: 0, quota: 0 }),
+    getOpfsTotalUsageBytes(),
+  ]);
+
+  const rawUsage =
+    typeof estimate.usage === 'number' && Number.isFinite(estimate.usage)
+      ? Math.max(0, estimate.usage)
+      : 0;
+  const quotaBytes =
+    typeof estimate.quota === 'number' && Number.isFinite(estimate.quota)
+      ? Math.max(0, estimate.quota)
+      : 0;
+  const totalUsageBytes = Math.max(rawUsage, opfsBytes);
+  const indexCacheBytes = Math.max(0, totalUsageBytes - opfsBytes);
+
+  return {
+    totalUsageBytes,
+    quotaBytes,
+    opfsBytes,
+    indexCacheBytes,
+  };
+}

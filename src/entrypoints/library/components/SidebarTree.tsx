@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  FileText,
   Film,
   Folder,
   FolderOpen,
@@ -15,6 +16,7 @@ import {
   Layers,
   Pencil,
   Plus,
+  Settings,
   Tag,
   Trash2,
   X,
@@ -22,7 +24,14 @@ import {
 import type { CollectionItemRecord, FolderNode, TagMeta } from '@/types/schema.ts';
 
 export type QuickNavView = 'all' | 'uncategorized' | 'pending_sync' | 'trash';
-export type MediaKindFilter = 'all' | 'video' | 'gallery';
+export type MediaKindFilter = 'all' | 'video' | 'gallery' | 'article';
+export type PlatformFilter =
+  | 'all'
+  | 'douyin'
+  | 'bilibili'
+  | 'zhihu'
+  | 'youtube'
+  | 'twitter';
 
 export interface SidebarTreeProps {
   items: readonly CollectionItemRecord[];
@@ -31,11 +40,15 @@ export interface SidebarTreeProps {
   activeView: QuickNavView;
   selectedFolderId: string | null;
   mediaKindFilter: MediaKindFilter;
+  platformFilter: PlatformFilter;
   selectedTag: string | null;
+  isSettingsOpen: boolean;
   onSelectView: (view: QuickNavView) => void;
   onSelectFolder: (folderId: string) => void;
   onSelectMediaKind: (kind: MediaKindFilter) => void;
+  onSelectPlatform: (platform: PlatformFilter) => void;
   onSelectTag: (tagName: string | null) => void;
+  onOpenSettings: () => void;
   onCreateFolder: (name: string, parentId: string | null) => Promise<void>;
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;
@@ -80,11 +93,15 @@ export function SidebarTree({
   activeView,
   selectedFolderId,
   mediaKindFilter,
+  platformFilter,
   selectedTag,
+  isSettingsOpen,
   onSelectView,
   onSelectFolder,
   onSelectMediaKind,
+  onSelectPlatform,
   onSelectTag,
+  onOpenSettings,
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder,
@@ -299,7 +316,7 @@ export function SidebarTree({
   const renderFolderNode = (node: FolderTreeNode, depth: number) => {
     const { folder, children } = node;
     const isExpanded = expandedIds.has(folder.id);
-    const isSelected = selectedFolderId === folder.id;
+    const isSelected = !isSettingsOpen && selectedFolderId === folder.id;
     const isRenaming = renamingFolderId === folder.id;
     const isCreatingChild = creatingParentId === folder.id;
     const hasChildren = children.length > 0;
@@ -488,7 +505,9 @@ export function SidebarTree({
           {navItems.map((nav) => {
             const Icon = nav.icon;
             const isActive =
-              selectedFolderId === null && activeView === nav.key;
+              !isSettingsOpen &&
+              selectedFolderId === null &&
+              activeView === nav.key;
             return (
               <button
                 key={nav.key}
@@ -528,17 +547,22 @@ export function SidebarTree({
           })}
         </nav>
 
-        {/* 媒体类型筛选 */}
+        {/* 媒体类型与平台筛选 */}
         <section>
           <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
             媒体类型
           </p>
-          <div className="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1">
+          <div
+            className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1"
+            role="group"
+            aria-label="媒体类型筛选"
+          >
             {(
               [
                 { value: 'all', label: '全部', icon: null },
                 { value: 'video', label: '视频', icon: Film },
                 { value: 'gallery', label: '图集', icon: Images },
+                { value: 'article', label: '文章', icon: FileText },
               ] as const
             ).map((opt) => {
               const Icon = opt.icon;
@@ -559,6 +583,53 @@ export function SidebarTree({
                 </button>
               );
             })}
+          </div>
+
+          <div className="mt-2.5">
+            <div className="mb-1.5 flex items-center justify-between px-2">
+              <p className="text-[11px] font-medium text-slate-400">来源平台</p>
+              {platformFilter !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => onSelectPlatform('all')}
+                  className="text-[11px] font-medium text-indigo-600 hover:underline"
+                >
+                  重置
+                </button>
+              )}
+            </div>
+            <div
+              className="flex flex-wrap gap-1 px-1"
+              role="group"
+              aria-label="来源平台筛选"
+            >
+              {(
+                [
+                  { value: 'all', label: '全部' },
+                  { value: 'douyin', label: '抖音' },
+                  { value: 'bilibili', label: 'B站' },
+                  { value: 'zhihu', label: '知乎' },
+                  { value: 'youtube', label: 'YouTube' },
+                  { value: 'twitter', label: 'X' },
+                ] as const
+              ).map((opt) => {
+                const active = platformFilter === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => onSelectPlatform(opt.value)}
+                    className={`rounded-md border px-2 py-1 text-[11px] font-medium transition ${
+                      active
+                        ? 'border-indigo-500 bg-indigo-50 text-indigo-700 shadow-2xs'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </section>
 
@@ -642,6 +713,26 @@ export function SidebarTree({
             </div>
           )}
         </section>
+      </div>
+
+      {/* 底部固定设置入口 */}
+      <div className="border-t border-slate-200 p-3">
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-medium transition ${
+            isSettingsOpen
+              ? 'bg-indigo-50 text-indigo-700'
+              : 'text-slate-700 hover:bg-slate-100/80'
+          }`}
+        >
+          <Settings
+            className={`h-4 w-4 ${
+              isSettingsOpen ? 'text-indigo-600' : 'text-slate-400'
+            }`}
+          />
+          <span>设置</span>
+        </button>
       </div>
 
       {/* 删除文件夹二次确认框 */}

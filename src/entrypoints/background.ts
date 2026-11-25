@@ -6,7 +6,7 @@
  * 2. SW 重启后残留下载任务异常恢复；
  * 3. 受控并发下载调度器（连接 Dexie 任务队列与 Offscreen 流式下载引擎）；
  * 4. 快捷键命令与全量 `BackgroundMessage` 强类型路由分发；
- * 5. 任务来源标签页追踪与实时采集/下载进度推送。
+ * 5. 浏览器扩展图标（`chrome.action`）环形下载进度与多任务计数实时渲染。
  */
 
 import { ulid } from 'ulid';
@@ -14,18 +14,16 @@ import {
   collectAllPlatformDnrSpecs,
   matchAdapterByUrl,
 } from '../adapters/registry.ts';
+import {
+  scheduleActionIconSync,
+  startActionIconLiveSync,
+} from '../download/action-icon.ts';
 import { syncSessionDnrRules } from '../download/dnr.ts';
 import {
   ensureOffscreenDocument,
   hasOffscreenDocument,
 } from '../download/offscreen-manager.ts';
-import {
-  createFolder,
-  db,
-  getUserPreferences,
-  updateItemClassification,
-  upsertTags,
-} from '../storage/db.ts';
+import { db, getUserPreferences, upsertTags } from '../storage/db.ts';
 import {
   buildItemRelativeDir,
   buildMediaAssetsFromPayload,
@@ -36,7 +34,6 @@ import {
   sendToTab,
   type BackgroundMessage,
   type BackgroundResponseMap,
-  type ContentCaptureStatusState,
 } from '../types/messages.ts';
 import {
   SCHEMA_VERSION,
@@ -53,9 +50,6 @@ const MAX_STARTUP_RECOVERY_RETRIES = 3;
 const MAX_CONCURRENCY_CEILING = 6;
 /** 管理台页面相对路径 */
 const LIBRARY_PAGE_PATH = '/library.html';
-
-/** 任务来源标签页追踪表：taskId -> tabId */
-const taskOriginTabs = new Map<string, number>();
 
 /** DNR 规则同步状态与并发去重锁 */
 let dnrReady = false;
@@ -109,63 +103,6 @@ async function ensureDnrReady(force = false): Promise<void> {
       dnrSyncPromise = null;
     }
   }
-}
-
-/**
- * 安全向指定标签页推送采集/下载状态更新；若标签页已关闭或未注入脚本则静默吞掉异常。
- */
-async function pushCaptureStatusToTab(
-  tabId: number | undefined,
-  payload: {
-    itemId: string;
-    taskId?: string;
-    status: ContentCaptureStatusState;
-    progress?: number;
-    title?: string;
-    error?: string;
-  },
-): Promise<void> {
-  if (tabId === undefined) {
-    return;
-  }
-
-  try {
-    await sendToTab(tabId, {
-      target: 'content',
-      type: 'CONTENT_CAPTURE_STATUS',
-      itemId: payload.itemId,
-      status: payload.status,
-      ...(payload.taskId !== undefined ? { taskId: payload.taskId } : {}),
-      ...(payload.progress !== undefined ? { progress: payload.progress } : {}),
-      ...(payload.title !== undefined ? { title: payload.title } : {}),
-      ...(payload.error !== undefined ? { error: payload.error } : {}),
-    });
-  } catch {
-    // 标签页可能已关闭、导航离开或尚未就绪，静默忽略
-  }
-}
-
-/**
- * 按 taskId 查找来源标签页并推送状态更新。
- */
-async function pushTaskStatusToOriginTab(
-  taskId: string,
-  payload: {
-    itemId: string;
-    status: ContentCaptureStatusState;
-    progress?: number;
-    title?: string;
-    error?: string;
-  },
-): Promise<void> {
-  const tabId = taskOriginTabs.get(taskId);
-  if (tabId === undefined) {
-    return;
-  }
-  await pushCaptureStatusToTab(tabId, {
-    ...payload,
-    taskId,
-  });
 }
 
 /**
@@ -270,6 +207,8 @@ async function recoverStaleTasksOnStartup(): Promise<void> {
       });
     }
 
+    void scheduleActionIconSync();
+
     const queuedCount = await db.tasks.where('status').equals('queued').count();
     if (queuedCount > 0) {
       void pumpDownloadQueue();
@@ -286,7 +225,7 @@ async function recoverStaleTasksOnStartup(): Promise<void> {
 }
 
 /**
- * 标记派发失败的任务与关联条目状态，并通知来源标签页。
+ * 标记派发失败的任务与关联条目状态，并刷新扩展图标。
  */
 async function markDispatchFailure(
   task: DownloadTask,
@@ -317,13 +256,7 @@ async function markDispatchFailure(
     }
   });
 
-  await pushTaskStatusToOriginTab(task.id, {
-    itemId: item.id,
-    status: 'failed',
-    title: item.title,
-    error: errorMessage,
-  });
-  taskOriginTabs.delete(task.id);
+  void scheduleActionIconSync();
 }
 
 /**
@@ -384,7 +317,7 @@ async function pumpDownloadQueue(): Promise<void> {
             errorMessage: '关联收藏条目不存在或已移入回收站。',
             updatedAt: Date.now(),
           });
-          taskOriginTabs.delete(task.id);
+          void scheduleActionIconSync();
           continue;
         }
 
@@ -405,6 +338,7 @@ async function pumpDownloadQueue(): Promise<void> {
             errorMessage: undefined,
             updatedAt: now,
           });
+          void scheduleActionIconSync();
 
           const response = await sendToOffscreen({
             target: 'offscreen',
@@ -425,13 +359,6 @@ async function pumpDownloadQueue(): Promise<void> {
           }
 
           availableSlots -= 1;
-
-          await pushTaskStatusToOriginTab(latestTask.id, {
-            itemId: item.id,
-            status: 'downloading',
-            progress: latestTask.progress,
-            title: item.title,
-          });
         } catch (error) {
           await markDispatchFailure(task, item, error);
         }
@@ -441,6 +368,7 @@ async function pumpDownloadQueue(): Promise<void> {
     console.error('[Collect+] Download queue pump failed:', error);
   } finally {
     isPumpingQueue = false;
+    void scheduleActionIconSync();
   }
 }
 
@@ -450,11 +378,9 @@ async function pumpDownloadQueue(): Promise<void> {
 
 async function handleCaptureItem(
   message: Extract<BackgroundMessage, { type: 'CAPTURE_ITEM' }>,
-  sender: chrome.runtime.MessageSender,
 ): Promise<BackgroundResponseMap['CAPTURE_ITEM']> {
   const { payload } = message;
   const dedupeKey = `${payload.platform}:${payload.sourceId}`;
-  const originTabId = sender.tab?.id;
 
   const existing = await db.items.where('dedupeKey').equals(dedupeKey).first();
   if (
@@ -462,11 +388,6 @@ async function handleCaptureItem(
     existing.deletedAt == null &&
     existing.syncStatus !== 'failed'
   ) {
-    await pushCaptureStatusToTab(originTabId, {
-      itemId: existing.id,
-      status: 'deduplicated',
-      title: existing.title,
-    });
     return {
       ok: true,
       itemId: existing.id,
@@ -555,10 +476,8 @@ async function handleCaptureItem(
     await db.tasks.add(taskRecord);
   });
 
-  if (originTabId !== undefined) {
-    taskOriginTabs.set(taskId, originTabId);
-  }
-
+  // 入队后立即同步图标状态，使快速连续收藏时扩展图标计数与进度环即时更新
+  void scheduleActionIconSync();
   void pumpDownloadQueue();
 
   return {
@@ -568,51 +487,6 @@ async function handleCaptureItem(
     deduplicated: false,
     item: itemRecord,
   };
-}
-
-async function handleUpdateItemClassification(
-  message: Extract<BackgroundMessage, { type: 'UPDATE_ITEM_CLASSIFICATION' }>,
-): Promise<BackgroundResponseMap['UPDATE_ITEM_CLASSIFICATION']> {
-  const patch: {
-    folderId?: string | null;
-    tags?: string[];
-    note?: string;
-  } = {};
-
-  if (message.folderId !== undefined) {
-    patch.folderId = message.folderId;
-  }
-  if (message.tags !== undefined) {
-    patch.tags = message.tags;
-  }
-  if (message.note !== undefined) {
-    patch.note = message.note;
-  }
-
-  const updated = await updateItemClassification(message.itemId, patch);
-  if (!updated) {
-    return { ok: false, error: '未找到对应的收藏条目。' };
-  }
-
-  return { ok: true, item: updated };
-}
-
-async function handleGetTaxonomy(): Promise<
-  BackgroundResponseMap['GET_TAXONOMY']
-> {
-  const [folders, tags] = await Promise.all([
-    db.folders.orderBy('sortOrder').toArray(),
-    db.tags.orderBy('createdAt').toArray(),
-  ]);
-
-  return { ok: true, folders, tags };
-}
-
-async function handleCreateFolderQuick(
-  message: Extract<BackgroundMessage, { type: 'CREATE_FOLDER_QUICK' }>,
-): Promise<BackgroundResponseMap['CREATE_FOLDER_QUICK']> {
-  const folder = await createFolder(message.name, message.parentId ?? null);
-  return { ok: true, folder };
 }
 
 async function handleGetStatusSummary(
@@ -699,7 +573,6 @@ async function handleTriggerActiveTabCapture(
 
 async function handleRetryDownloadTask(
   message: Extract<BackgroundMessage, { type: 'RETRY_DOWNLOAD_TASK' }>,
-  sender: chrome.runtime.MessageSender,
 ): Promise<BackgroundResponseMap['RETRY_DOWNLOAD_TASK']> {
   const task = await db.tasks.get(message.taskId);
   if (!task) {
@@ -735,17 +608,7 @@ async function handleRetryDownloadTask(
     });
   });
 
-  if (sender.tab?.id !== undefined) {
-    taskOriginTabs.set(task.id, sender.tab.id);
-  }
-
-  await pushTaskStatusToOriginTab(task.id, {
-    itemId: item.id,
-    status: 'queued',
-    progress: 0,
-    title: item.title,
-  });
-
+  void scheduleActionIconSync();
   void pumpDownloadQueue();
 
   return { ok: true };
@@ -778,7 +641,7 @@ async function handleCancelDownloadTask(
     }).catch(() => undefined);
   }
 
-  taskOriginTabs.delete(task.id);
+  void scheduleActionIconSync();
   void pumpDownloadQueue();
 
   return { ok: true };
@@ -816,13 +679,49 @@ async function handleOpenLibraryPage(
   return { ok: true };
 }
 
+async function handleGetUserPreferences(): Promise<
+  BackgroundResponseMap['GET_USER_PREFERENCES']
+> {
+  const preferences = await getUserPreferences();
+  return { ok: true, preferences };
+}
+
+async function handleNotifyPreferencesUpdated(): Promise<
+  BackgroundResponseMap['NOTIFY_PREFERENCES_UPDATED']
+> {
+  const preferences = await getUserPreferences();
+
+  try {
+    const tabs = await chrome.tabs.query({});
+    await Promise.all(
+      tabs.map(async (tab) => {
+        if (tab.id === undefined || !tab.url || !matchAdapterByUrl(tab.url)) {
+          return;
+        }
+        await sendToTab(tab.id, {
+          target: 'content',
+          type: 'CONTENT_PREFERENCES_UPDATED',
+          floatingButtonEnabled: preferences.floatingButtonEnabled,
+        }).catch(() => undefined);
+      }),
+    );
+  } catch {
+    // 忽略标签页广播异常
+  }
+
+  void pumpDownloadQueue();
+  return { ok: true };
+}
+
 async function handleOffscreenProgress(
   message: Extract<BackgroundMessage, { type: 'OFFSCREEN_PROGRESS' }>,
 ): Promise<BackgroundResponseMap['OFFSCREEN_PROGRESS']> {
   try {
-    const clampedProgress = Math.max(0, Math.min(100, Math.round(message.progress)));
-    let taskTitle: string | undefined;
-    let shouldPush = false;
+    const clampedProgress = Math.max(
+      0,
+      Math.min(100, Math.round(message.progress)),
+    );
+    let updated = false;
 
     await db.transaction('rw', db.tasks, async () => {
       const task = await db.tasks.get(message.taskId);
@@ -835,8 +734,7 @@ async function handleOffscreenProgress(
         return;
       }
 
-      taskTitle = task.title;
-      shouldPush = true;
+      updated = true;
       await db.tasks.put({
         ...task,
         status: 'downloading',
@@ -849,13 +747,8 @@ async function handleOffscreenProgress(
       });
     });
 
-    if (shouldPush && taskTitle !== undefined) {
-      await pushTaskStatusToOriginTab(message.taskId, {
-        itemId: message.itemId,
-        status: 'downloading',
-        progress: clampedProgress,
-        title: taskTitle,
-      });
+    if (updated) {
+      void scheduleActionIconSync();
     }
   } catch (error) {
     console.warn('[Collect+] Failed to handle OFFSCREEN_PROGRESS:', error);
@@ -869,7 +762,6 @@ async function handleOffscreenComplete(
 ): Promise<BackgroundResponseMap['OFFSCREEN_COMPLETE']> {
   try {
     const now = Date.now();
-    let itemTitle: string | undefined;
 
     await db.transaction('rw', db.items, db.tasks, async () => {
       const existingItem = await db.items.get(message.itemId);
@@ -880,7 +772,6 @@ async function handleOffscreenComplete(
         : message.assets;
 
       if (existingItem) {
-        itemTitle = existingItem.title;
         await db.items.put({
           ...existingItem,
           assets: mergedAssets,
@@ -894,7 +785,6 @@ async function handleOffscreenComplete(
       }
 
       if (existingTask) {
-        itemTitle = itemTitle ?? existingTask.title;
         const completedCount = mergedAssets.filter(
           (asset) => asset.downloaded,
         ).length;
@@ -911,17 +801,10 @@ async function handleOffscreenComplete(
         });
       }
     });
-
-    await pushTaskStatusToOriginTab(message.taskId, {
-      itemId: message.itemId,
-      status: 'staged',
-      progress: 100,
-      ...(itemTitle !== undefined ? { title: itemTitle } : {}),
-    });
   } catch (error) {
     console.error('[Collect+] Failed to handle OFFSCREEN_COMPLETE:', error);
   } finally {
-    taskOriginTabs.delete(message.taskId);
+    void scheduleActionIconSync();
     void pumpDownloadQueue();
   }
 
@@ -933,15 +816,12 @@ async function handleOffscreenError(
 ): Promise<BackgroundResponseMap['OFFSCREEN_ERROR']> {
   try {
     const now = Date.now();
-    let itemTitle: string | undefined;
-    let isCancelled = false;
 
     await db.transaction('rw', db.items, db.tasks, async () => {
       const existingTask = await db.tasks.get(message.taskId);
       const existingItem = await db.items.get(message.itemId);
 
-      itemTitle = existingItem?.title ?? existingTask?.title;
-      isCancelled =
+      const isCancelled =
         existingTask?.status === 'cancelled' || !message.retryable;
 
       if (existingTask) {
@@ -965,19 +845,10 @@ async function handleOffscreenError(
         });
       }
     });
-
-    if (!isCancelled) {
-      await pushTaskStatusToOriginTab(message.taskId, {
-        itemId: message.itemId,
-        status: 'failed',
-        ...(itemTitle !== undefined ? { title: itemTitle } : {}),
-        error: message.error,
-      });
-    }
   } catch (error) {
     console.error('[Collect+] Failed to handle OFFSCREEN_ERROR:', error);
   } finally {
-    taskOriginTabs.delete(message.taskId);
+    void scheduleActionIconSync();
     void pumpDownloadQueue();
   }
 
@@ -986,27 +857,24 @@ async function handleOffscreenError(
 
 async function routeBackgroundMessage(
   message: BackgroundMessage,
-  sender: chrome.runtime.MessageSender,
 ): Promise<BackgroundResponseMap[BackgroundMessage['type']]> {
   switch (message.type) {
     case 'CAPTURE_ITEM':
-      return handleCaptureItem(message, sender);
-    case 'UPDATE_ITEM_CLASSIFICATION':
-      return handleUpdateItemClassification(message);
-    case 'GET_TAXONOMY':
-      return handleGetTaxonomy();
-    case 'CREATE_FOLDER_QUICK':
-      return handleCreateFolderQuick(message);
+      return handleCaptureItem(message);
     case 'GET_STATUS_SUMMARY':
       return handleGetStatusSummary(message);
     case 'TRIGGER_ACTIVE_TAB_CAPTURE':
       return handleTriggerActiveTabCapture(message);
     case 'RETRY_DOWNLOAD_TASK':
-      return handleRetryDownloadTask(message, sender);
+      return handleRetryDownloadTask(message);
     case 'CANCEL_DOWNLOAD_TASK':
       return handleCancelDownloadTask(message);
     case 'OPEN_LIBRARY_PAGE':
       return handleOpenLibraryPage(message);
+    case 'GET_USER_PREFERENCES':
+      return handleGetUserPreferences();
+    case 'NOTIFY_PREFERENCES_UPDATED':
+      return handleNotifyPreferencesUpdated();
     case 'OFFSCREEN_PROGRESS':
       return handleOffscreenProgress(message);
     case 'OFFSCREEN_COMPLETE':
@@ -1017,8 +885,11 @@ async function routeBackgroundMessage(
 }
 
 export default defineBackground(() => {
+  startActionIconLiveSync();
+
   // 1. 扩展安装/更新与浏览器启动生命周期钩子
   chrome.runtime.onInstalled.addListener(() => {
+    void scheduleActionIconSync();
     void ensureDnrReady(true).catch((error) => {
       console.error('[Collect+] Failed to sync DNR rules onInstalled:', error);
     });
@@ -1032,16 +903,7 @@ export default defineBackground(() => {
       });
   });
 
-  // 2. 标签页关闭时清理来源追踪映射
-  chrome.tabs.onRemoved.addListener((closedTabId) => {
-    for (const [taskId, tabId] of taskOriginTabs.entries()) {
-      if (tabId === closedTabId) {
-        taskOriginTabs.delete(taskId);
-      }
-    }
-  });
-
-  // 3. 全局快捷键命令监听（Alt+S -> capture-current-item）
+  // 2. 全局快捷键命令监听（Alt+S -> capture-current-item）
   chrome.commands.onCommand.addListener((command) => {
     if (command !== CAPTURE_COMMAND_ID) {
       return;
@@ -1064,14 +926,14 @@ export default defineBackground(() => {
     })();
   });
 
-  // 4. 统一监听发往 Background 的强类型消息
+  // 3. 统一监听发往 Background 的强类型消息
   chrome.runtime.onMessage.addListener(
-    (message: unknown, sender, sendResponse) => {
+    (message: unknown, _sender, sendResponse) => {
       if (!isBackgroundMessage(message)) {
         return false;
       }
 
-      void routeBackgroundMessage(message, sender)
+      void routeBackgroundMessage(message)
         .then((result) => {
           sendResponse(result);
         })
@@ -1090,7 +952,7 @@ export default defineBackground(() => {
     },
   );
 
-  // 5. Service Worker 启动初始化：同步 DNR 规则并恢复残留下载任务
+  // 4. Service Worker 启动初始化：同步 DNR 规则并恢复残留下载任务与图标状态
   void ensureDnrReady()
     .then(() => recoverStaleTasksOnStartup())
     .catch((error) => {

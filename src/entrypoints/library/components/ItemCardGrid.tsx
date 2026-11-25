@@ -1,5 +1,6 @@
 import {
   ArrowDownWideNarrow,
+  FileText,
   Film,
   HardDrive,
   Images,
@@ -12,7 +13,12 @@ import {
   User,
   X,
 } from 'lucide-react';
-import type { CollectionItemRecord, TagMeta } from '@/types/schema.ts';
+import type {
+  CollectionItemRecord,
+  LibrarySortOption,
+  LibraryViewMode,
+  TagMeta,
+} from '@/types/schema.ts';
 import {
   formatBytes,
   formatDuration,
@@ -21,8 +27,8 @@ import {
   syncStatusMeta,
 } from '../utils/format.ts';
 
-export type SortOption = 'collectedAt' | 'publishedAt' | 'totalSizeBytes';
-export type ViewMode = 'grid' | 'list';
+export type SortOption = LibrarySortOption;
+export type ViewMode = LibraryViewMode;
 
 export interface ItemCardGridProps {
   items: readonly CollectionItemRecord[];
@@ -49,6 +55,9 @@ function getMediaBadgeText(item: CollectionItemRecord): string {
       return formatDuration(videoAsset.durationSec);
     }
     return '视频';
+  }
+  if (item.kind === 'article') {
+    return '文章';
   }
 
   const imageCount = item.assets.filter((asset) => asset.kind === 'image').length;
@@ -227,6 +236,8 @@ export function ItemCardGrid({
                       <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200/70 text-slate-300">
                         {item.kind === 'video' ? (
                           <Film className="h-10 w-10" />
+                        ) : item.kind === 'article' ? (
+                          <FileText className="h-10 w-10" />
                         ) : (
                           <Images className="h-10 w-10" />
                         )}
@@ -251,10 +262,12 @@ export function ItemCardGrid({
                       <span>{syncInfo.shortLabel}</span>
                     </span>
 
-                    {/* 左下角媒体时长 / 图集数 */}
+                    {/* 左下角媒体时长 / 图集数 / 文章 */}
                     <span className="absolute bottom-2.5 left-2.5 inline-flex items-center gap-1 rounded-md bg-slate-950/75 px-2 py-0.5 text-[11px] font-medium tabular-nums text-white backdrop-blur-xs">
                       {item.kind === 'video' ? (
                         <Film className="h-3 w-3" />
+                      ) : item.kind === 'article' ? (
+                        <FileText className="h-3 w-3" />
                       ) : (
                         <Images className="h-3 w-3" />
                       )}
@@ -371,6 +384,8 @@ export function ItemCardGrid({
                       <div className="flex h-full w-full items-center justify-center text-slate-300">
                         {item.kind === 'video' ? (
                           <Film className="h-5 w-5" />
+                        ) : item.kind === 'article' ? (
+                          <FileText className="h-5 w-5" />
                         ) : (
                           <Images className="h-5 w-5" />
                         )}

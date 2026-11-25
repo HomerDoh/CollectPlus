@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Clock,
   ExternalLink,
+  FileText,
   Film,
   Folder,
   FolderKey,
@@ -320,7 +321,7 @@ export function ItemDetailDrawer({
             setActiveSlideIndex((prev) =>
               prev >= slides.length ? 0 : prev,
             );
-          } else {
+          } else if (currentItem.kind !== 'article') {
             const authBlocked =
               permissionState !== 'granted' &&
               (vaultHandle !== null ||
@@ -512,6 +513,11 @@ export function ItemDetailDrawer({
                     <Film className="h-3.5 w-3.5 text-indigo-400" />
                     <span>离线视频播放</span>
                   </>
+                ) : item.kind === 'article' ? (
+                  <>
+                    <FileText className="h-3.5 w-3.5 text-indigo-400" />
+                    <span>离线文章阅读</span>
+                  </>
                 ) : (
                   <>
                     <Images className="h-3.5 w-3.5 text-indigo-400" />
@@ -597,6 +603,30 @@ export function ItemDetailDrawer({
                 playsInline
                 className="max-h-full max-w-full rounded-lg bg-black shadow-lg"
               />
+            ) : item.kind === 'article' ? (
+              <article className="flex h-full w-full flex-col overflow-y-auto rounded-xl bg-white p-6 text-slate-800 shadow-lg">
+                {(currentSlide?.url ?? item.thumbnailDataUrl) && (
+                  <img
+                    src={currentSlide?.url ?? item.thumbnailDataUrl}
+                    alt={item.title}
+                    className="mb-4 max-h-56 w-full rounded-lg object-cover"
+                  />
+                )}
+                <h3 className="text-lg font-bold leading-snug text-slate-900">
+                  {item.title}
+                </h3>
+                <p className="mt-1.5 text-xs text-slate-500">
+                  作者：{item.author.name}
+                  {item.publishedAt
+                    ? ` · 发布于 ${formatDateTime(item.publishedAt)}`
+                    : ''}
+                </p>
+                <div className="mt-4 border-t border-slate-100 pt-4 text-sm leading-relaxed whitespace-pre-wrap text-slate-700">
+                  {item.description.trim()
+                    ? item.description
+                    : '该文章暂无正文快照内容，可点击右侧「打开原链接」查看原文。'}
+                </div>
+              </article>
             ) : currentSlide ? (
               <div className="relative flex h-full w-full items-center justify-center">
                 <img

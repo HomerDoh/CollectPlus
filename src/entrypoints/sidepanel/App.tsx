@@ -7,6 +7,7 @@ import {
   Clock,
   Download,
   ExternalLink,
+  FileText,
   Film,
   FolderSync,
   Images,
@@ -392,6 +393,8 @@ export default function App() {
                         <div className="flex h-full w-full items-center justify-center text-slate-300">
                           {item.kind === 'video' ? (
                             <Film className="h-5 w-5" />
+                          ) : item.kind === 'article' ? (
+                            <FileText className="h-5 w-5" />
                           ) : (
                             <Images className="h-5 w-5" />
                           )}
