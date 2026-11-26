@@ -99,6 +99,10 @@ function parseItemIdFromHash(hash: string): string | null {
   }
 }
 
+function isVaultSettingsHash(hash: string): boolean {
+  return hash === '#settings=vault';
+}
+
 function collectDescendantFolderIds(
   rootId: string,
   folders: readonly FolderNode[],
@@ -194,10 +198,12 @@ export default function App() {
   const prefsHydratedRef = useRef(false);
 
   // 3. 视图筛选、设置页与详情抽屉状态
-  const [activePage, setActivePage] = useState<'library' | 'settings'>(
-    'library',
+  const [activePage, setActivePage] = useState<'library' | 'settings'>(() =>
+    isVaultSettingsHash(window.location.hash) ? 'settings' : 'library',
   );
-  const [vaultSectionFocusTick, setVaultSectionFocusTick] = useState(0);
+  const [vaultSectionFocusTick, setVaultSectionFocusTick] = useState(() =>
+    isVaultSettingsHash(window.location.hash) ? 1 : 0,
+  );
   const [activeView, setActiveView] = useState<QuickNavView>('all');
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [mediaKindFilter, setMediaKindFilter] =
@@ -249,9 +255,27 @@ export default function App() {
     setSearchIndexVersion((v) => v + 1);
   }, [items]);
 
-  // 5. 监听 URL hash (#item=<id>) 变化
+  // 5. 监听 URL hash (#item=<id> 或 #settings=vault) 变化
   useEffect(() => {
+    const clearHash = () => {
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${window.location.search}`,
+      );
+    };
+
+    if (isVaultSettingsHash(window.location.hash)) {
+      clearHash();
+    }
+
     const handleHashChange = () => {
+      if (isVaultSettingsHash(window.location.hash)) {
+        setActivePage('settings');
+        setVaultSectionFocusTick((n) => n + 1);
+        clearHash();
+        return;
+      }
       setSelectedItemId(parseItemIdFromHash(window.location.hash));
     };
     window.addEventListener('hashchange', handleHashChange);

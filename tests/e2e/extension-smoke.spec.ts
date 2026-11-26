@@ -72,4 +72,72 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
 
     expect(pageErrors).toEqual([]);
   });
+
+  test('Popup 首次安装固定提示与未选定本地同步目录提示闭环验证', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const popupPage = await context.newPage();
+    await popupPage.goto(extensionUrl('popup.html'));
+
+    // 1. 首次安装且未固定到工具栏时，展示固定提示与未选定目录提示
+    const pinHint = popupPage.getByTestId('popup-pin-hint');
+    await expect(pinHint).toBeVisible();
+    await expect(pinHint).toContainText('固定到浏览器插件栏');
+
+    const vaultHint = popupPage.getByTestId('popup-vault-hint');
+    await expect(vaultHint).toBeVisible();
+    await expect(vaultHint).toContainText('尚未选定本地同步目录');
+
+    // 2. 点击「知道了」关闭固定提示并验证刷新后不再出现
+    await pinHint.getByRole('button', { name: '关闭固定提示' }).click();
+    await expect(pinHint).toBeHidden();
+    await popupPage.reload();
+    await expect(popupPage.getByTestId('popup-pin-hint')).toHaveCount(0);
+    await expect(popupPage.getByTestId('popup-vault-hint')).toBeVisible();
+
+    // 3. 点击「选择目录」直达管理台设置页的本地同步目录区块
+    const newPagePromise = context.waitForEvent('page');
+    await popupPage
+      .getByTestId('popup-vault-hint')
+      .getByRole('button', { name: '选择目录' })
+      .click();
+    const libraryPage = await newPagePromise;
+    await libraryPage.waitForLoadState('domcontentloaded');
+
+    const vaultSection = libraryPage.getByTestId('settings-vault-section');
+    await expect(vaultSection).toBeVisible();
+    await expect(
+      vaultSection.getByRole('button', { name: '选择本地同步目录' }),
+    ).toBeVisible();
+
+    // 4. 在设置页绑定 Mock CollectVault 目录后，重新打开 Popup 确认目录提示消失
+    await libraryPage.evaluate(() => {
+      const win = window as unknown as {
+        showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle>;
+      };
+      win.showDirectoryPicker = async () => {
+        const root = await navigator.storage.getDirectory();
+        return root.getDirectoryHandle('CollectVault', { create: true });
+      };
+    });
+    await vaultSection
+      .getByRole('button', { name: '选择本地同步目录' })
+      .click();
+    await expect(vaultSection.getByText('已授权就绪')).toBeVisible();
+
+    const reopenedPopup = await context.newPage();
+    await reopenedPopup.goto(extensionUrl('popup.html'));
+    await expect(
+      reopenedPopup.getByRole('heading', { name: 'Collect+' }),
+    ).toBeVisible();
+    await expect(
+      reopenedPopup.getByText('当前页面暂不支持采集'),
+    ).toBeVisible();
+    await expect(reopenedPopup.getByTestId('popup-vault-hint')).toHaveCount(0);
+    await expect(reopenedPopup.getByTestId('popup-pin-hint')).toHaveCount(0);
+
+    expect(pageErrors).toEqual([]);
+  });
 });

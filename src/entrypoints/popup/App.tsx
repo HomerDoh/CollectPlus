@@ -5,13 +5,15 @@ import {
   CheckCircle2,
   Download,
   ExternalLink,
+  FolderOpen,
   FolderSync,
   Layers,
   Loader2,
+  Pin,
   Sparkles,
 } from 'lucide-react';
 import { sendToBackground } from '@/types/messages.ts';
-import type { PlatformId } from '@/types/schema.ts';
+import { PIN_HINT_PENDING_KEY, type PlatformId } from '@/types/schema.ts';
 import { getErrorMessage } from '../library/utils/format.ts';
 
 interface PopupSummary {
@@ -20,6 +22,7 @@ interface PopupSummary {
   stagedCount: number;
   metaDirtyCount: number;
   activeTaskCount: number;
+  hasVaultDirectory: boolean;
 }
 
 type CaptureFeedback =
@@ -43,6 +46,7 @@ export default function App() {
   const [summary, setSummary] = useState<PopupSummary | null>(null);
   const [loadingSummary, setLoadingSummary] = useState<boolean>(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [showPinHint, setShowPinHint] = useState<boolean>(false);
   const [captureFeedback, setCaptureFeedback] = useState<CaptureFeedback>({
     state: 'idle',
   });
@@ -75,6 +79,7 @@ export default function App() {
         stagedCount: response.stagedCount,
         metaDirtyCount: response.metaDirtyCount,
         activeTaskCount: response.activeTaskCount,
+        hasVaultDirectory: response.hasVaultDirectory,
       });
     } catch (error) {
       setSummaryError(getErrorMessage(error));
@@ -86,6 +91,74 @@ export default function App() {
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const checkPinHint = async () => {
+      try {
+        const stored = await chrome.storage.local.get(PIN_HINT_PENDING_KEY);
+        if (disposed || stored[PIN_HINT_PENDING_KEY] !== true) {
+          return;
+        }
+
+        const settings =
+          typeof chrome.action?.getUserSettings === 'function'
+            ? await chrome.action.getUserSettings()
+            : { isOnToolbar: false };
+
+        if (disposed) {
+          return;
+        }
+
+        if (settings.isOnToolbar) {
+          await chrome.storage.local
+            .set({ [PIN_HINT_PENDING_KEY]: false })
+            .catch(() => undefined);
+          return;
+        }
+
+        setShowPinHint(true);
+      } catch {
+        // 忽略扩展存储或工具栏状态读取异常
+      }
+    };
+
+    void checkPinHint();
+
+    const handleUserSettingsChanged = (
+      change: chrome.action.UserSettingsChange,
+    ) => {
+      if (change.isOnToolbar) {
+        setShowPinHint(false);
+        void chrome.storage.local
+          .set({ [PIN_HINT_PENDING_KEY]: false })
+          .catch(() => undefined);
+      }
+    };
+
+    if (chrome.action?.onUserSettingsChanged) {
+      chrome.action.onUserSettingsChanged.addListener(
+        handleUserSettingsChanged,
+      );
+    }
+
+    return () => {
+      disposed = true;
+      if (chrome.action?.onUserSettingsChanged) {
+        chrome.action.onUserSettingsChanged.removeListener(
+          handleUserSettingsChanged,
+        );
+      }
+    };
+  }, []);
+
+  const handleDismissPinHint = () => {
+    setShowPinHint(false);
+    void chrome.storage.local
+      .set({ [PIN_HINT_PENDING_KEY]: false })
+      .catch(() => undefined);
+  };
 
   const handleTriggerCapture = async () => {
     setCaptureFeedback({ state: 'loading' });
@@ -117,11 +190,12 @@ export default function App() {
     }
   };
 
-  const handleOpenLibrary = async () => {
+  const handleOpenLibrary = async (section?: 'vault') => {
     try {
       await sendToBackground({
         target: 'background',
         type: 'OPEN_LIBRARY_PAGE',
+        ...(section ? { section } : {}),
       });
       window.close();
     } catch (error) {
@@ -152,6 +226,59 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* 首次安装：固定到插件栏提示 */}
+      {showPinHint && (
+        <section
+          data-testid="popup-pin-hint"
+          className="flex items-start gap-2 rounded-xl border border-indigo-200 bg-indigo-50/80 p-2.5 text-xs text-indigo-900"
+        >
+          <Pin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-600" />
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold leading-snug">
+              将 Collect+ 固定到浏览器插件栏
+            </p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-indigo-700/90">
+              点击右上角拼图图标，点亮 Collect+ 右侧图钉，随时查看下载进度与快捷收藏。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleDismissPinHint}
+            aria-label="关闭固定提示"
+            className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100"
+          >
+            知道了
+          </button>
+        </section>
+      )}
+
+      {/* 未选定本地同步目录提示 */}
+      {summary !== null && !summary.hasVaultDirectory && (
+        <section
+          data-testid="popup-vault-hint"
+          className="flex items-center justify-between gap-2.5 rounded-xl border border-amber-200 bg-amber-50/80 p-2.5 text-xs text-amber-950"
+        >
+          <div className="flex min-w-0 items-start gap-2">
+            <FolderOpen className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+            <div className="min-w-0">
+              <p className="font-semibold leading-snug">
+                尚未选定本地同步目录
+              </p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-amber-800/90">
+                选择目录后，收藏作品将自动落盘备份。
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleOpenLibrary('vault')}
+            className="shrink-0 rounded-lg bg-amber-600 px-2.5 py-1.5 text-[11px] font-semibold text-white shadow-2xs transition hover:bg-amber-700"
+          >
+            选择目录
+          </button>
+        </section>
+      )}
 
       {/* 当前标签页状态卡 */}
       <section className="rounded-xl border border-slate-200 bg-white p-3 shadow-2xs">

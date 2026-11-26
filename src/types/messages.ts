@@ -69,6 +69,7 @@ export interface OpenLibraryPageMessage {
   target: 'background';
   type: 'OPEN_LIBRARY_PAGE';
   itemId?: string;
+  section?: 'vault';
 }
 
 export interface GetUserPreferencesMessage {
@@ -148,6 +149,7 @@ export interface BackgroundResponseMap {
         stagedCount: number;
         metaDirtyCount: number;
         activeTaskCount: number;
+        hasVaultDirectory: boolean;
       }
     | ErrorResult;
   TRIGGER_ACTIVE_TAB_CAPTURE: { ok: true } | ErrorResult;

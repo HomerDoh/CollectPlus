@@ -331,3 +331,6 @@ export type SettingKey = SettingRecord['key'];
 export type SettingValueMap = {
   [R in SettingRecord as R['key']]: R['value'];
 };
+
+/** `chrome.storage.local` 首次安装固定工具栏提示待展示标记键 */
+export const PIN_HINT_PENDING_KEY = 'collect_plus_pin_hint_pending' as const;

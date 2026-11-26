@@ -36,6 +36,7 @@ import {
   type BackgroundResponseMap,
 } from '../types/messages.ts';
 import {
+  PIN_HINT_PENDING_KEY,
   SCHEMA_VERSION,
   type CollectionItemRecord,
   type DownloadTask,
@@ -496,12 +497,13 @@ async function handleGetStatusSummary(
     ? (matchAdapterByUrl(message.tabUrl)?.id ?? null)
     : null;
 
-  const [allItems, activeTaskCount] = await Promise.all([
+  const [allItems, activeTaskCount, vaultHandleCount] = await Promise.all([
     db.items.toArray(),
     db.tasks
       .where('status')
       .anyOf(['queued', 'downloading', 'processing'])
       .count(),
+    db.settings.where('key').equals('vault_directory_handle').count(),
   ]);
 
   let totalItems = 0;
@@ -527,6 +529,7 @@ async function handleGetStatusSummary(
     stagedCount,
     metaDirtyCount,
     activeTaskCount,
+    hasVaultDirectory: vaultHandleCount > 0,
   };
 }
 
@@ -653,7 +656,11 @@ async function handleOpenLibraryPage(
   const baseUrl = chrome.runtime.getURL(LIBRARY_PAGE_PATH);
   const targetUrl = message.itemId
     ? `${baseUrl}#item=${encodeURIComponent(message.itemId)}`
-    : baseUrl;
+    : message.section === 'vault'
+      ? `${baseUrl}#settings=vault`
+      : baseUrl;
+  const shouldUpdateUrl =
+    message.itemId !== undefined || message.section !== undefined;
 
   try {
     const existingTabs = await chrome.tabs.query({ url: `${baseUrl}*` });
@@ -662,7 +669,7 @@ async function handleOpenLibraryPage(
     if (matchedTab && matchedTab.id !== undefined) {
       await chrome.tabs.update(matchedTab.id, {
         active: true,
-        ...(message.itemId ? { url: targetUrl } : {}),
+        ...(shouldUpdateUrl ? { url: targetUrl } : {}),
       });
       if (matchedTab.windowId !== undefined) {
         await chrome.windows
@@ -888,7 +895,12 @@ export default defineBackground(() => {
   startActionIconLiveSync();
 
   // 1. 扩展安装/更新与浏览器启动生命周期钩子
-  chrome.runtime.onInstalled.addListener(() => {
+  chrome.runtime.onInstalled.addListener((details) => {
+    if (details.reason === 'install') {
+      void chrome.storage.local
+        .set({ [PIN_HINT_PENDING_KEY]: true })
+        .catch(() => undefined);
+    }
     void scheduleActionIconSync();
     void ensureDnrReady(true).catch((error) => {
       console.error('[Collect+] Failed to sync DNR rules onInstalled:', error);
