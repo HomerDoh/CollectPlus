@@ -502,6 +502,10 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
             name: 'LockedVault',
             queryPermission: async () => 'granted',
             requestPermission: async () => 'granted',
+            isSameEntry: async () => false,
+            entries: async function* () {
+              // 空只读目录：触发写入时抛出 NoModificationAllowedError
+            },
             getFileHandle: async (_name: string, opts?: { create?: boolean }) => {
               if (opts?.create) {
                 throw new DOMException(

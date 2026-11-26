@@ -38,7 +38,94 @@ export const TAXONOMY_FILENAME = 'taxonomy.json';
 export const ITEMS_DIRNAME = 'items';
 export const TRASH_DIRNAME = '.trash';
 
+export const VAULT_MANAGED_ENTRIES = [
+  VAULT_README_FILENAME,
+  VAULT_CONFIG_FILENAME,
+  TAXONOMY_FILENAME,
+  ITEMS_DIRNAME,
+  TRASH_DIRNAME,
+] as const;
+
+const VAULT_MANAGED_ENTRY_SET: ReadonlySet<string> = new Set(
+  VAULT_MANAGED_ENTRIES,
+);
+
+const DISK_ROOT_SYSTEM_ENTRIES: ReadonlySet<string> = new Set([
+  '$recycle.bin',
+  'system volume information',
+]);
+
 export type VaultPermissionStatus = PermissionState | 'unbound';
+
+export type VaultDirectoryValidationReason =
+  | 'disk_root'
+  | 'non_empty'
+  | 'same_directory'
+  | 'nested_directory';
+
+export class VaultDirectoryValidationError extends Error {
+  readonly reason: VaultDirectoryValidationReason;
+  readonly directoryName: string;
+
+  constructor(
+    reason: VaultDirectoryValidationReason,
+    directoryName: string,
+    cause?: unknown,
+  ) {
+    const label = directoryName || '所选目录';
+    const messageByReason: Record<VaultDirectoryValidationReason, string> = {
+      disk_root:
+        '不允许选择磁盘根目录或系统受保护目录作为本地同步目录，请在磁盘下新建或选择一个专用的空子文件夹。',
+      non_empty: `所选文件夹“${label}”不为空且未被 Collect+ 初始化，请选择一个空文件夹或已初始化的 CollectVault 目录。`,
+      same_directory: `所选目录“${label}”与当前本地同步目录相同，无需切换。`,
+      nested_directory: `所选目录“${label}”与当前本地同步目录存在父子包含关系，请选择其他独立目录。`,
+    };
+    super(messageByReason[reason], { cause });
+    this.name = 'VaultDirectoryValidationError';
+    this.reason = reason;
+    this.directoryName = directoryName;
+  }
+}
+
+export type VaultDirectoryInspection =
+  | { kind: 'disk_root' }
+  | { kind: 'empty' }
+  | { kind: 'non_empty'; entryCount: number }
+  | { kind: 'initialized_vault'; config: VaultConfig | null };
+
+export type ValidVaultDirectoryInspection = Extract<
+  VaultDirectoryInspection,
+  { kind: 'empty' | 'initialized_vault' }
+>;
+
+export type VaultMigrationMode = 'empty_target' | 'overwrite' | 'merge';
+
+export interface MigrationProgress {
+  phase:
+    | 'preparing'
+    | 'clearing_target'
+    | 'copying'
+    | 'finalizing'
+    | 'cleaning_source'
+    | 'done';
+  current: number;
+  total: number;
+  currentPath?: string;
+}
+
+export interface MigrationSummary {
+  mode: VaultMigrationMode;
+  sourceName: string;
+  targetName: string;
+  copiedFiles: number;
+  skippedFiles: number;
+  sourceCleanupFailedCount: number;
+  sourceCleanupError?: string;
+}
+
+export interface RebuildOptions {
+  preserveOpfsStaged?: boolean;
+}
 
 // shortcut: 帮助页暂未创建，后续替换为正式文档链接
 export const VAULT_PERMISSION_HELP_URL =
@@ -305,11 +392,183 @@ export async function ensureVaultStructure(
   return { config, isExistingVault };
 }
 
-/** 弹出系统目录选择器绑定新的 CollectVault，并持久化句柄与配置到 IndexedDB */
-export async function bindNewVaultDirectory(): Promise<{
+/** 判断目录名是否表示磁盘根目录（Windows 盘符根、POSIX `/` 或 UNC 共享根） */
+export function isDiskRootDirectoryName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === '/' || trimmed === '\\') {
+    return true;
+  }
+  if (/^[a-zA-Z]:[\\/]?$/.test(trimmed)) {
+    return true;
+  }
+  if (/^\\\\[^\\]+\\[^\\]+[\\/]?$/.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+async function isSameDirectoryHandle(
+  a: FileSystemDirectoryHandle,
+  b: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  if (a === b) {
+    return true;
+  }
+  try {
+    if (typeof a.isSameEntry === 'function') {
+      return await a.isSameEntry(b);
+    }
+  } catch {
+    // 忽略非标准句柄异常
+  }
+  return false;
+}
+
+async function isNestedDirectoryHandle(
+  a: FileSystemDirectoryHandle,
+  b: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  try {
+    if (typeof a.resolve === 'function') {
+      const resolved = await a.resolve(b);
+      if (resolved !== null && resolved.length > 0) {
+        return true;
+      }
+    }
+  } catch {
+    // 忽略
+  }
+  try {
+    if (typeof b.resolve === 'function') {
+      const resolved = await b.resolve(a);
+      if (resolved !== null && resolved.length > 0) {
+        return true;
+      }
+    }
+  } catch {
+    // 忽略
+  }
+  return false;
+}
+
+/** 检测已绑定目录在磁盘上是否仍然存在 */
+export async function checkVaultDirectoryExists(
+  handle: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  try {
+    for await (const _entry of handle.entries()) {
+      void _entry;
+      break;
+    }
+    return true;
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * 只读检测目标目录状态（绝不写入任何文件或子目录）：
+ * - `disk_root`: 磁盘根目录或包含卷根系统文件夹
+ * - `empty`: 空文件夹
+ * - `initialized_vault`: 已被 Collect+ 初始化的本地同步目录
+ * - `non_empty`: 非空且未初始化的普通文件夹
+ */
+export async function inspectVaultDirectory(
+  handle: FileSystemDirectoryHandle,
+): Promise<VaultDirectoryInspection> {
+  if (isDiskRootDirectoryName(handle.name)) {
+    return { kind: 'disk_root' };
+  }
+
+  let entryCount = 0;
+  let hasConfigFile = false;
+  let hasTaxonomyFile = false;
+  let hasItemsDir = false;
+  let hasReadmeFile = false;
+
+  for await (const [name, entry] of handle.entries()) {
+    entryCount += 1;
+    if (DISK_ROOT_SYSTEM_ENTRIES.has(name.toLowerCase())) {
+      return { kind: 'disk_root' };
+    }
+    if (entry.kind === 'file') {
+      if (name === VAULT_CONFIG_FILENAME) {
+        hasConfigFile = true;
+      } else if (name === TAXONOMY_FILENAME) {
+        hasTaxonomyFile = true;
+      } else if (name === VAULT_README_FILENAME) {
+        hasReadmeFile = true;
+      }
+    } else if (entry.kind === 'directory' && name === ITEMS_DIRNAME) {
+      hasItemsDir = true;
+    }
+  }
+
+  if (entryCount === 0) {
+    return { kind: 'empty' };
+  }
+
+  if (hasConfigFile) {
+    const configFile = await readVaultFile(handle, VAULT_CONFIG_FILENAME);
+    if (configFile) {
+      try {
+        const parsed: unknown = JSON.parse(await configFile.text());
+        const config = parseVaultConfig(parsed);
+        if (config) {
+          return { kind: 'initialized_vault', config };
+        }
+      } catch {
+        // .collect-vault.json 损坏时继续检查 taxonomy.json 兜底特征
+      }
+    }
+  }
+
+  if (hasTaxonomyFile) {
+    const taxonomyFile = await readVaultFile(handle, TAXONOMY_FILENAME);
+    if (taxonomyFile) {
+      try {
+        const parsed: unknown = JSON.parse(await taxonomyFile.text());
+        const isCollectTaxonomy =
+          isRecord(parsed) &&
+          parsed.schemaVersion === SCHEMA_VERSION &&
+          Array.isArray(parsed.folders) &&
+          Array.isArray(parsed.tags);
+        if (isCollectTaxonomy) {
+          let hasCollectReadme = false;
+          if (!hasItemsDir && hasReadmeFile) {
+            const readmeFile = await readVaultFile(
+              handle,
+              VAULT_README_FILENAME,
+            );
+            if (readmeFile) {
+              hasCollectReadme = (await readmeFile.text()).includes('Collect+');
+            }
+          }
+          if (hasItemsDir || hasCollectReadme) {
+            return { kind: 'initialized_vault', config: null };
+          }
+        }
+      } catch {
+        // 忽略无效 JSON
+      }
+    }
+  }
+
+  return { kind: 'non_empty', entryCount };
+}
+
+/**
+ * 弹出系统目录选择器并只读校验目标目录合法性：
+ * 拦截磁盘根目录、非空未初始化文件夹，以及与当前目录相同或父子嵌套的目录。
+ */
+export async function pickAndValidateVaultDirectory(
+  currentHandle?: FileSystemDirectoryHandle | null,
+): Promise<{
   handle: FileSystemDirectoryHandle;
-  config: VaultConfig;
-  isExistingVault: boolean;
+  inspection: ValidVaultDirectoryInspection;
 }> {
   if (
     typeof window === 'undefined' ||
@@ -320,17 +579,55 @@ export async function bindNewVaultDirectory(): Promise<{
     );
   }
 
-  const handle = await window.showDirectoryPicker({
-    id: 'collect-plus-vault',
-    mode: 'readwrite',
-    startIn: 'documents',
-  });
+  let handle: FileSystemDirectoryHandle;
+  try {
+    handle = await window.showDirectoryPicker({
+      id: 'collect-plus-vault',
+      mode: 'readwrite',
+      startIn: 'documents',
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'SecurityError') {
+      throw new VaultDirectoryValidationError('disk_root', '', error);
+    }
+    throw error;
+  }
 
   const granted = await requestVaultPermission(handle, 'readwrite');
   if (!granted) {
-    throw new Error('Read/write permission for the selected Vault directory was denied.');
+    throw new Error(
+      'Read/write permission for the selected Vault directory was denied.',
+    );
   }
 
+  if (currentHandle) {
+    if (await isSameDirectoryHandle(currentHandle, handle)) {
+      throw new VaultDirectoryValidationError('same_directory', handle.name);
+    }
+    if (await isNestedDirectoryHandle(currentHandle, handle)) {
+      throw new VaultDirectoryValidationError('nested_directory', handle.name);
+    }
+  }
+
+  const inspection = await inspectVaultDirectory(handle);
+  if (inspection.kind === 'disk_root') {
+    throw new VaultDirectoryValidationError('disk_root', handle.name);
+  }
+  if (inspection.kind === 'non_empty') {
+    throw new VaultDirectoryValidationError('non_empty', handle.name);
+  }
+
+  return { handle, inspection };
+}
+
+/** 初始化并持久化已校验通过的 CollectVault 目录句柄与配置到 IndexedDB */
+export async function finalizeVaultBinding(
+  handle: FileSystemDirectoryHandle,
+): Promise<{
+  handle: FileSystemDirectoryHandle;
+  config: VaultConfig;
+  isExistingVault: boolean;
+}> {
   let config: VaultConfig;
   let isExistingVault: boolean;
   try {
@@ -346,10 +643,21 @@ export async function bindNewVaultDirectory(): Promise<{
     }
     throw error;
   }
+
   await setSetting('vault_directory_handle', handle);
   await setSetting('vault_config', config);
 
   return { handle, config, isExistingVault };
+}
+
+/** 弹出系统目录选择器校验并绑定新的 CollectVault（不含旧目录迁移） */
+export async function bindNewVaultDirectory(): Promise<{
+  handle: FileSystemDirectoryHandle;
+  config: VaultConfig;
+  isExistingVault: boolean;
+}> {
+  const { handle } = await pickAndValidateVaultDirectory(null);
+  return finalizeVaultBinding(handle);
 }
 
 // ============================================================================
@@ -1204,6 +1512,7 @@ async function scanMetaFilesRecursively(
 export async function rebuildIndexFromVault(
   root: FileSystemDirectoryHandle,
   onProgress?: (p: RebuildProgress) => void,
+  options?: RebuildOptions,
 ): Promise<RebuildSummary> {
   await ensureVaultReadme(root);
 
@@ -1346,9 +1655,32 @@ export async function rebuildIndexFromVault(
 
   const restoredRecords = [...recordsById.values()];
 
+  // 自动重建索引时保留浏览器尚未落盘的 opfs_staged 条目，避免未同步视频丢失
+  const preservedStagedRecords: CollectionItemRecord[] = [];
+  if (options?.preserveOpfsStaged) {
+    const currentStaged = await db.items
+      .where('syncStatus')
+      .equals('opfs_staged')
+      .toArray();
+    for (const staged of currentStaged) {
+      if (recordsById.has(staged.id) || idByDedupeKey.has(staged.dedupeKey)) {
+        continue;
+      }
+      preservedStagedRecords.push({
+        ...staged,
+        folderId:
+          staged.folderId !== null && folderMap.has(staged.folderId)
+            ? staged.folderId
+            : null,
+      });
+    }
+  }
+
+  const allRecordsToPersist = [...restoredRecords, ...preservedStagedRecords];
+
   // 补齐条目引用到但 taxonomy.json 遗漏的标签
   const now = Date.now();
-  for (const record of restoredRecords) {
+  for (const record of allRecordsToPersist) {
     for (const tagName of record.tags) {
       if (!tagMap.has(tagName)) {
         tagMap.set(tagName, {
@@ -1384,8 +1716,8 @@ export async function rebuildIndexFromVault(
     if (normalizedTags.length > 0) {
       await db.tags.bulkPut(normalizedTags);
     }
-    if (restoredRecords.length > 0) {
-      await db.items.bulkPut(restoredRecords);
+    if (allRecordsToPersist.length > 0) {
+      await db.items.bulkPut(allRecordsToPersist);
     }
   });
 
@@ -1401,5 +1733,498 @@ export async function rebuildIndexFromVault(
     restoredFolders: normalizedFolders.length,
     restoredTags: normalizedTags.length,
     skippedFiles,
+  };
+}
+
+// ============================================================================
+// 5. Vault 目录迁移与合并（空目标迁移 / 覆盖 / 合并）
+// ============================================================================
+
+interface PendingCopyEntry {
+  relativePath: string;
+  fileHandle: FileSystemFileHandle;
+}
+
+async function collectFilesRecursively(
+  dir: FileSystemDirectoryHandle,
+  prefix: string,
+  results: PendingCopyEntry[],
+): Promise<void> {
+  for await (const [name, entry] of dir.entries()) {
+    const nextPath = prefix ? `${prefix}/${name}` : name;
+    if (entry.kind === 'file') {
+      results.push({ relativePath: nextPath, fileHandle: entry });
+    } else if (entry.kind === 'directory') {
+      await collectFilesRecursively(entry, nextPath, results);
+    }
+  }
+}
+
+async function collectManagedVaultFiles(
+  root: FileSystemDirectoryHandle,
+): Promise<PendingCopyEntry[]> {
+  const files: PendingCopyEntry[] = [];
+  for await (const [name, entry] of root.entries()) {
+    if (!VAULT_MANAGED_ENTRY_SET.has(name)) {
+      continue;
+    }
+    if (entry.kind === 'file') {
+      files.push({ relativePath: name, fileHandle: entry });
+    } else if (entry.kind === 'directory') {
+      await collectFilesRecursively(entry, name, files);
+    }
+  }
+  return files;
+}
+
+async function removeVaultManagedEntries(
+  root: FileSystemDirectoryHandle,
+  options?: { ignoreErrors?: boolean },
+): Promise<{ failedCount: number; firstError?: string }> {
+  const entriesToRemove: Array<{ name: string; kind: 'file' | 'directory' }> =
+    [];
+  for await (const [name, entry] of root.entries()) {
+    if (VAULT_MANAGED_ENTRY_SET.has(name)) {
+      entriesToRemove.push({ name, kind: entry.kind });
+    }
+  }
+
+  let failedCount = 0;
+  let firstError: string | undefined;
+
+  for (const entry of entriesToRemove) {
+    try {
+      await root.removeEntry(entry.name, {
+        recursive: entry.kind === 'directory',
+      });
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        continue;
+      }
+      if (!options?.ignoreErrors) {
+        throw error;
+      }
+      failedCount += 1;
+      if (firstError === undefined) {
+        firstError = getErrorMessage(error);
+      }
+    }
+  }
+
+  return {
+    failedCount,
+    ...(firstError !== undefined ? { firstError } : {}),
+  };
+}
+
+async function removeRelativeDirectory(
+  root: FileSystemDirectoryHandle,
+  relativeDir: string,
+): Promise<void> {
+  const segments = splitRelativePath(relativeDir);
+  if (segments.length === 0) {
+    return;
+  }
+  const leafName = segments[segments.length - 1];
+  if (!leafName) {
+    return;
+  }
+
+  let parentDir = root;
+  try {
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      const seg = segments[i];
+      if (!seg) {
+        continue;
+      }
+      parentDir = await parentDir.getDirectoryHandle(seg, { create: false });
+    }
+    await parentDir.removeEntry(leafName, { recursive: true });
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw error;
+    }
+  }
+}
+
+async function readParsedTaxonomyFromVault(
+  root: FileSystemDirectoryHandle,
+): Promise<{ folders: FolderNode[]; tags: TagMeta[] }> {
+  const taxonomyFile = await readVaultFile(root, TAXONOMY_FILENAME);
+  if (!taxonomyFile) {
+    return { folders: [], tags: [] };
+  }
+  try {
+    const raw: unknown = JSON.parse(await taxonomyFile.text());
+    return parseTaxonomyFile(raw);
+  } catch {
+    return { folders: [], tags: [] };
+  }
+}
+
+function mergeTaxonomies(
+  source: { folders: FolderNode[]; tags: TagMeta[] },
+  target: { folders: FolderNode[]; tags: TagMeta[] },
+): TaxonomyFile {
+  const folderMap = new Map<string, FolderNode>();
+  for (const folder of target.folders) {
+    folderMap.set(folder.id, folder);
+  }
+  for (const folder of source.folders) {
+    const existing = folderMap.get(folder.id);
+    if (!existing || folder.updatedAt > existing.updatedAt) {
+      folderMap.set(folder.id, folder);
+    }
+  }
+  const folders = [...folderMap.values()].sort(
+    (a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt,
+  );
+
+  const tagMap = new Map<string, TagMeta>();
+  for (const tag of target.tags) {
+    tagMap.set(tag.name, tag);
+  }
+  for (const tag of source.tags) {
+    const existing = tagMap.get(tag.name);
+    if (!existing) {
+      tagMap.set(tag.name, tag);
+    } else if (tag.createdAt < existing.createdAt) {
+      tagMap.set(tag.name, { ...existing, createdAt: tag.createdAt });
+    }
+  }
+  const tags = [...tagMap.values()].sort(
+    (a, b) => a.createdAt - b.createdAt || a.name.localeCompare(b.name),
+  );
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    updatedAt: Date.now(),
+    folders,
+    tags,
+  };
+}
+
+interface IndexedVaultItemInfo {
+  id: string;
+  dedupeKey: string;
+  updatedAt: number;
+  relativeDir: string;
+}
+
+async function scanItemsIndex(
+  root: FileSystemDirectoryHandle,
+): Promise<{
+  entries: ScannedMetaFile[];
+  parsedByDir: Map<string, CollectionItemMeta>;
+}> {
+  const entries: ScannedMetaFile[] = [];
+  const parsedByDir = new Map<string, CollectionItemMeta>();
+  try {
+    const itemsDir = await root.getDirectoryHandle(ITEMS_DIRNAME, {
+      create: false,
+    });
+    await scanMetaFilesRecursively(itemsDir, ITEMS_DIRNAME, entries);
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw error;
+    }
+  }
+
+  for (const entry of entries) {
+    try {
+      const file = await entry.fileHandle.getFile();
+      const raw: unknown = JSON.parse(await file.text());
+      const meta = parseCollectionItemMeta(raw, entry.relativeDir);
+      if (meta) {
+        parsedByDir.set(entry.relativeDir, meta);
+      }
+    } catch {
+      // 忽略损坏 meta.json
+    }
+  }
+
+  return { entries, parsedByDir };
+}
+
+/**
+ * 将 CollectVault 从 `sourceRoot` 迁移至 `targetRoot`：
+ * - `empty_target`: 目标目录为空，流式全量拷贝 CollectVault 文件。
+ * - `overwrite`: 目标目录已有 CollectVault，先清理目标目录旧 Vault 数据再全量迁移。
+ * - `merge`: 目标目录已有 CollectVault，合并 taxonomy.json、items/（冲突按 updatedAt 较新保留）与 .trash/。
+ *
+ * 崩溃安全顺序：全部文件写入目标目录并持久化新句柄绑定后，再删除原目录中的 CollectVault 文件。
+ */
+export async function migrateVaultDirectory(
+  sourceRoot: FileSystemDirectoryHandle,
+  targetRoot: FileSystemDirectoryHandle,
+  mode: VaultMigrationMode,
+  onProgress?: (p: MigrationProgress) => void,
+): Promise<MigrationSummary> {
+  if (await isSameDirectoryHandle(sourceRoot, targetRoot)) {
+    throw new VaultDirectoryValidationError('same_directory', targetRoot.name);
+  }
+  if (await isNestedDirectoryHandle(sourceRoot, targetRoot)) {
+    throw new VaultDirectoryValidationError(
+      'nested_directory',
+      targetRoot.name,
+    );
+  }
+
+  const [sourceGranted, targetGranted] = await Promise.all([
+    requestVaultPermission(sourceRoot, 'readwrite'),
+    requestVaultPermission(targetRoot, 'readwrite'),
+  ]);
+  if (!sourceGranted) {
+    throw new Error(
+      `缺少原目录“${sourceRoot.name}”的读写权限，无法迁移旧文件。`,
+    );
+  }
+  if (!targetGranted) {
+    throw new Error(
+      `缺少目标目录“${targetRoot.name}”的读写权限，无法写入迁移文件。`,
+    );
+  }
+
+  onProgress?.({ phase: 'preparing', current: 0, total: 0 });
+
+  // 若本地索引存在已落盘条目的未写回编辑（meta_dirty），迁移前先刷新轻量 JSON 至原目录
+  const dirtyItems = await db.items
+    .where('syncStatus')
+    .equals('meta_dirty')
+    .toArray();
+  if (dirtyItems.length > 0) {
+    for (const item of dirtyItems) {
+      await writeItemMetaToVault(sourceRoot, {
+        ...item,
+        syncStatus: 'vault_synced',
+      }).catch(() => undefined);
+    }
+    await writeTaxonomyToVault(sourceRoot).catch(() => undefined);
+  }
+
+  let copiedFiles = 0;
+  let skippedFiles = 0;
+
+  try {
+    if (mode === 'overwrite') {
+      onProgress?.({ phase: 'clearing_target', current: 0, total: 1 });
+      await removeVaultManagedEntries(targetRoot, { ignoreErrors: false });
+    }
+
+    if (mode === 'empty_target' || mode === 'overwrite') {
+      const filesToCopy = await collectManagedVaultFiles(sourceRoot);
+      const total = filesToCopy.length;
+
+      for (let i = 0; i < filesToCopy.length; i += 1) {
+        const item = filesToCopy[i];
+        if (!item) {
+          continue;
+        }
+        onProgress?.({
+          phase: 'copying',
+          current: i + 1,
+          total,
+          currentPath: item.relativePath,
+        });
+        const sourceFile = await item.fileHandle.getFile();
+        await copyFileToVault(targetRoot, item.relativePath, sourceFile);
+        copiedFiles += 1;
+      }
+    } else {
+      // mode === 'merge'
+      const [sourceTaxonomy, targetTaxonomy, sourceScan, targetScan] =
+        await Promise.all([
+          readParsedTaxonomyFromVault(sourceRoot),
+          readParsedTaxonomyFromVault(targetRoot),
+          scanItemsIndex(sourceRoot),
+          scanItemsIndex(targetRoot),
+        ]);
+
+      const targetById = new Map<string, IndexedVaultItemInfo>();
+      const targetByDedupeKey = new Map<string, IndexedVaultItemInfo>();
+      const targetByRelativeDir = new Map<string, IndexedVaultItemInfo>();
+
+      for (const meta of targetScan.parsedByDir.values()) {
+        const info: IndexedVaultItemInfo = {
+          id: meta.id,
+          dedupeKey: meta.dedupeKey,
+          updatedAt: meta.updatedAt,
+          relativeDir: meta.relativeDir,
+        };
+        targetById.set(meta.id, info);
+        targetByDedupeKey.set(meta.dedupeKey, info);
+        targetByRelativeDir.set(meta.relativeDir, info);
+      }
+
+      const dirsToReplaceInTarget = new Set<string>();
+      const filesToCopy: PendingCopyEntry[] = [];
+
+      for (const entry of sourceScan.entries) {
+        const dirFiles: PendingCopyEntry[] = [];
+        await collectFilesRecursively(
+          entry.dirHandle,
+          entry.relativeDir,
+          dirFiles,
+        );
+
+        const sourceMeta = sourceScan.parsedByDir.get(entry.relativeDir);
+        if (!sourceMeta) {
+          skippedFiles += dirFiles.length;
+          continue;
+        }
+
+        const conflictingTargets = new Map<string, IndexedVaultItemInfo>();
+        for (const candidate of [
+          targetById.get(sourceMeta.id),
+          targetByDedupeKey.get(sourceMeta.dedupeKey),
+          targetByRelativeDir.get(sourceMeta.relativeDir),
+        ]) {
+          if (candidate) {
+            conflictingTargets.set(candidate.relativeDir, candidate);
+          }
+        }
+
+        let targetIsNewerOrEqual = false;
+        for (const existing of conflictingTargets.values()) {
+          if (existing.updatedAt >= sourceMeta.updatedAt) {
+            targetIsNewerOrEqual = true;
+            break;
+          }
+        }
+
+        if (targetIsNewerOrEqual) {
+          skippedFiles += dirFiles.length;
+          continue;
+        }
+
+        for (const obsolete of conflictingTargets.values()) {
+          dirsToReplaceInTarget.add(obsolete.relativeDir);
+          targetById.delete(obsolete.id);
+          targetByDedupeKey.delete(obsolete.dedupeKey);
+          targetByRelativeDir.delete(obsolete.relativeDir);
+        }
+
+        const nextInfo: IndexedVaultItemInfo = {
+          id: sourceMeta.id,
+          dedupeKey: sourceMeta.dedupeKey,
+          updatedAt: sourceMeta.updatedAt,
+          relativeDir: sourceMeta.relativeDir,
+        };
+        targetById.set(nextInfo.id, nextInfo);
+        targetByDedupeKey.set(nextInfo.dedupeKey, nextInfo);
+        targetByRelativeDir.set(nextInfo.relativeDir, nextInfo);
+
+        filesToCopy.push(...dirFiles);
+      }
+
+      // 合并 .trash/ 中目标目录尚未存在的文件
+      try {
+        const sourceTrash = await sourceRoot.getDirectoryHandle(TRASH_DIRNAME, {
+          create: false,
+        });
+        const trashFiles: PendingCopyEntry[] = [];
+        await collectFilesRecursively(sourceTrash, TRASH_DIRNAME, trashFiles);
+        for (const trashFile of trashFiles) {
+          if (await hasVaultFile(targetRoot, trashFile.relativePath)) {
+            skippedFiles += 1;
+          } else {
+            filesToCopy.push(trashFile);
+          }
+        }
+      } catch (error) {
+        if (!isNotFoundError(error)) {
+          throw error;
+        }
+      }
+
+      for (const obsoleteDir of dirsToReplaceInTarget) {
+        await removeRelativeDirectory(targetRoot, obsoleteDir);
+      }
+
+      const total = filesToCopy.length;
+      for (let i = 0; i < filesToCopy.length; i += 1) {
+        const item = filesToCopy[i];
+        if (!item) {
+          continue;
+        }
+        onProgress?.({
+          phase: 'copying',
+          current: i + 1,
+          total,
+          currentPath: item.relativePath,
+        });
+        const sourceFile = await item.fileHandle.getFile();
+        await copyFileToVault(targetRoot, item.relativePath, sourceFile);
+        copiedFiles += 1;
+      }
+
+      const mergedTaxonomy = mergeTaxonomies(sourceTaxonomy, targetTaxonomy);
+      await writeVaultTextFile(
+        targetRoot,
+        TAXONOMY_FILENAME,
+        JSON.stringify(mergedTaxonomy, null, 2),
+      );
+    }
+
+    onProgress?.({ phase: 'finalizing', current: 1, total: 1 });
+    const ensured = await ensureVaultStructure(targetRoot);
+    const updatedConfig: VaultConfig = {
+      ...ensured.config,
+      name: targetRoot.name || ensured.config.name,
+      updatedAt: Date.now(),
+    };
+    await writeVaultTextFile(
+      targetRoot,
+      VAULT_CONFIG_FILENAME,
+      JSON.stringify(updatedConfig, null, 2),
+    );
+
+    // 先切换句柄绑定再清理原目录，防止中途异常导致丢失有效绑定
+    await setSetting('vault_directory_handle', targetRoot);
+    await setSetting('vault_config', updatedConfig);
+    await setSetting('last_sync_at', Date.now());
+  } catch (error) {
+    if (isFilesystemWriteDeniedError(error)) {
+      throw new VaultFilesystemPermissionError(
+        targetRoot.name || 'CollectVault',
+        error,
+      );
+    }
+    throw error;
+  }
+
+  // 将迁移前已同步落盘的 meta_dirty 条目标记为 vault_synced
+  if (dirtyItems.length > 0) {
+    await db.transaction('rw', db.items, async () => {
+      for (const dirty of dirtyItems) {
+        const latest = await db.items.get(dirty.id);
+        if (latest && latest.syncStatus === 'meta_dirty' && latest.updatedAt <= dirty.updatedAt) {
+          await db.items.put({ ...latest, syncStatus: 'vault_synced' });
+        }
+      }
+    });
+  }
+
+  onProgress?.({ phase: 'cleaning_source', current: 0, total: 1 });
+  const cleanup = await removeVaultManagedEntries(sourceRoot, {
+    ignoreErrors: true,
+  });
+
+  onProgress?.({
+    phase: 'done',
+    current: copiedFiles,
+    total: copiedFiles,
+  });
+
+  return {
+    mode,
+    sourceName: sourceRoot.name || '原目录',
+    targetName: targetRoot.name || '新目录',
+    copiedFiles,
+    skippedFiles,
+    sourceCleanupFailedCount: cleanup.failedCount,
+    ...(cleanup.firstError !== undefined
+      ? { sourceCleanupError: cleanup.firstError }
+      : {}),
   };
 }

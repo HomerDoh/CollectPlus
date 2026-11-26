@@ -18,21 +18,29 @@ import {
 import { sendToBackground } from '@/types/messages.ts';
 import { CollectionSearchEngine } from '@/storage/search.ts';
 import {
-  bindNewVaultDirectory,
+  checkVaultDirectoryExists,
+  finalizeVaultBinding,
   flushToVault,
   getSavedVaultHandle,
   isFilesystemWriteDeniedError,
+  migrateVaultDirectory,
+  pickAndValidateVaultDirectory,
   queryVaultPermission,
   rebuildIndexFromVault,
   requestVaultPermission,
   VAULT_PERMISSION_HELP_URL,
+  VaultDirectoryValidationError,
   VaultFilesystemPermissionError,
   writeItemMetaToVault,
   writeTaxonomyToVault,
   type FlushProgress,
   type FlushSummary,
+  type MigrationProgress,
+  type MigrationSummary,
+  type RebuildOptions,
   type RebuildProgress,
   type RebuildSummary,
+  type VaultMigrationMode,
   type VaultPermissionStatus,
 } from '@/storage/vault.ts';
 import type {
@@ -69,6 +77,12 @@ function toVaultActionError(
   error: unknown,
   fallbackDirName?: string,
 ): string | VaultActionError {
+  if (error instanceof VaultDirectoryValidationError) {
+    return {
+      message: error.message,
+      canRebind: true,
+    };
+  }
   if (isFilesystemWriteDeniedError(error)) {
     const message =
       error instanceof VaultFilesystemPermissionError
@@ -188,6 +202,15 @@ export default function App() {
     useState<RebuildProgress | null>(null);
   const [lastRebuildSummary, setLastRebuildSummary] =
     useState<RebuildSummary | null>(null);
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationProgress, setMigrationProgress] =
+    useState<MigrationProgress | null>(null);
+  const [lastMigrationSummary, setLastMigrationSummary] =
+    useState<MigrationSummary | null>(null);
+  const [pendingMigrationConflict, setPendingMigrationConflict] = useState<{
+    sourceHandle: FileSystemDirectoryHandle;
+    targetHandle: FileSystemDirectoryHandle;
+  } | null>(null);
   const [showRebuildSuggestion, setShowRebuildSuggestion] = useState(false);
   const [vaultError, setVaultError] = useState<
     string | VaultActionError | null
@@ -309,7 +332,7 @@ export default function App() {
   const runFlushToVault = useCallback(
     async (
       handle: FileSystemDirectoryHandle,
-      options?: { silentEmpty?: boolean },
+      options?: { silentEmpty?: boolean; preserveOtherFeedback?: boolean },
     ) => {
       if (vaultBusyRef.current) {
         return;
@@ -317,7 +340,10 @@ export default function App() {
       vaultBusyRef.current = true;
       setIsFlushing(true);
       setVaultError(null);
-      setLastRebuildSummary(null);
+      if (!options?.preserveOtherFeedback) {
+        setLastRebuildSummary(null);
+        setLastMigrationSummary(null);
+      }
       setFlushProgress({ phase: 'preparing', current: 0, total: 0 });
 
       try {
@@ -343,6 +369,125 @@ export default function App() {
       }
     },
     [],
+  );
+
+  // 6b. 从本地 CollectVault 重建索引（供手动触发与首次绑定已初始化目录复用）
+  const runRebuildIndex = useCallback(
+    async (
+      handle: FileSystemDirectoryHandle,
+      options?: RebuildOptions & { preserveMigrationSummary?: boolean },
+    ): Promise<boolean> => {
+      if (vaultBusyRef.current) {
+        return false;
+      }
+      vaultBusyRef.current = true;
+      setIsRebuilding(true);
+      setShowRebuildSuggestion(false);
+      setVaultError(null);
+      setLastFlushSummary(null);
+      if (!options?.preserveMigrationSummary) {
+        setLastMigrationSummary(null);
+      }
+      setRebuildProgress({ phase: 'scanning', scannedItems: 0 });
+
+      try {
+        const summary = await rebuildIndexFromVault(
+          handle,
+          (progress) => {
+            setRebuildProgress(progress);
+          },
+          options?.preserveOpfsStaged !== undefined
+            ? { preserveOpfsStaged: options.preserveOpfsStaged }
+            : undefined,
+        );
+        setLastRebuildSummary(summary);
+        return true;
+      } catch (error) {
+        setVaultError(`重建索引失败：${getErrorMessage(error)}`);
+        return false;
+      } finally {
+        setIsRebuilding(false);
+        setRebuildProgress(null);
+        vaultBusyRef.current = false;
+      }
+    },
+    [],
+  );
+
+  // 6c. 执行已绑定目录到新目录的文件迁移与索引对齐
+  const executeVaultMigration = useCallback(
+    async (
+      sourceHandle: FileSystemDirectoryHandle,
+      targetHandle: FileSystemDirectoryHandle,
+      mode: VaultMigrationMode,
+    ) => {
+      if (vaultBusyRef.current) {
+        return;
+      }
+      vaultBusyRef.current = true;
+      setIsMigrating(true);
+      setVaultError(null);
+      setLastFlushSummary(null);
+      setLastRebuildSummary(null);
+      setLastMigrationSummary(null);
+      setShowRebuildSuggestion(false);
+      setMigrationProgress({ phase: 'preparing', current: 0, total: 0 });
+
+      let migrationSucceeded = false;
+      try {
+        const summary = await migrateVaultDirectory(
+          sourceHandle,
+          targetHandle,
+          mode,
+          (progress) => {
+            setMigrationProgress(progress);
+          },
+        );
+        setVaultHandle(targetHandle);
+        setPermissionState('granted');
+        setLastMigrationSummary(summary);
+        migrationSucceeded = true;
+      } catch (error) {
+        setVaultError(
+          toVaultActionError('迁移本地同步目录失败', error, targetHandle.name),
+        );
+      } finally {
+        setIsMigrating(false);
+        setMigrationProgress(null);
+        vaultBusyRef.current = false;
+      }
+
+      if (!migrationSucceeded) {
+        return;
+      }
+
+      const [totalInDb, pendingCounts] = await Promise.all([
+        db.items.count(),
+        getVaultSyncPendingCounts(),
+      ]);
+
+      if (mode === 'merge' || totalInDb === 0) {
+        await runRebuildIndex(targetHandle, {
+          preserveOpfsStaged: true,
+          preserveMigrationSummary: true,
+        });
+      }
+
+      const afterRebuildPending =
+        mode === 'merge' || totalInDb === 0
+          ? await getVaultSyncPendingCounts()
+          : pendingCounts;
+      if (
+        afterRebuildPending.stagedCount + afterRebuildPending.metaDirtyCount >
+        0
+      ) {
+        await runFlushToVault(targetHandle, {
+          silentEmpty: true,
+          preserveOtherFeedback: true,
+        });
+      }
+    },
+    [runFlushToVault, runRebuildIndex],
   );
 
   // 7. 页面初始化读取 Vault 句柄、权限并按偏好自动静默同步
@@ -398,7 +543,7 @@ export default function App() {
     };
   }, [runFlushToVault]);
 
-  // 8. 绑定/切换本地 CollectVault 目录
+  // 8. 绑定/切换本地 CollectVault 目录（含磁盘根与非空校验、已初始化自动建索引及目录迁移）
   const handleBindVault = useCallback(async () => {
     if (vaultBusyRef.current) {
       return;
@@ -406,32 +551,93 @@ export default function App() {
     setVaultError(null);
     setLastFlushSummary(null);
     setLastRebuildSummary(null);
+    setLastMigrationSummary(null);
+    setPendingMigrationConflict(null);
 
     try {
-      const { handle, isExistingVault } = await bindNewVaultDirectory();
-      setVaultHandle(handle);
-      setPermissionState('granted');
-
-      const [totalInDb, pendingCounts] = await Promise.all([
-        db.items.count(),
-        getVaultSyncPendingCounts(),
-      ]);
-
-      if (isExistingVault && totalInDb === 0) {
-        setShowRebuildSuggestion(true);
-      } else {
-        setShowRebuildSuggestion(false);
-        if (pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0) {
-          await runFlushToVault(handle);
+      // 若当前已有绑定目录，切换前先确认原目录读写权限与存在性
+      let sourceHandle: FileSystemDirectoryHandle | null = null;
+      if (vaultHandle) {
+        const granted = await requestVaultPermission(vaultHandle, 'readwrite');
+        if (!granted) {
+          setPermissionState(
+            await queryVaultPermission(vaultHandle, 'readwrite'),
+          );
+          setVaultError(
+            `切换目录前需要先授予原目录“${vaultHandle.name}”的读写权限以迁移旧文件，请授权后重试。`,
+          );
+          return;
         }
+        setPermissionState('granted');
+        const exists = await checkVaultDirectoryExists(vaultHandle);
+        sourceHandle = exists ? vaultHandle : null;
       }
+
+      const { handle: targetHandle, inspection } =
+        await pickAndValidateVaultDirectory(sourceHandle);
+
+      // 分支 A：首次绑定（或原目录已在外部被删除）
+      if (!sourceHandle) {
+        await finalizeVaultBinding(targetHandle);
+        setVaultHandle(targetHandle);
+        setPermissionState('granted');
+        setShowRebuildSuggestion(false);
+
+        if (inspection.kind === 'initialized_vault') {
+          const rebuilt = await runRebuildIndex(targetHandle, {
+            preserveOpfsStaged: true,
+          });
+          if (rebuilt) {
+            const pendingCounts = await getVaultSyncPendingCounts();
+            if (pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0) {
+              await runFlushToVault(targetHandle, {
+                silentEmpty: true,
+                preserveOtherFeedback: true,
+              });
+            }
+          }
+        } else {
+          const pendingCounts = await getVaultSyncPendingCounts();
+          if (pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0) {
+            await runFlushToVault(targetHandle);
+          }
+        }
+        return;
+      }
+
+      // 分支 B：从已绑定目录切换到新目录
+      if (inspection.kind === 'initialized_vault') {
+        setPendingMigrationConflict({
+          sourceHandle,
+          targetHandle,
+        });
+        return;
+      }
+
+      await executeVaultMigration(sourceHandle, targetHandle, 'empty_target');
     } catch (error) {
       if (isAbortError(error)) {
         return;
       }
       setVaultError(toVaultActionError('绑定本地目录失败', error));
     }
-  }, [runFlushToVault]);
+  }, [vaultHandle, executeVaultMigration, runFlushToVault, runRebuildIndex]);
+
+  const handleResolveMigrationConflict = useCallback(
+    async (mode: 'overwrite' | 'merge') => {
+      if (!pendingMigrationConflict) {
+        return;
+      }
+      const { sourceHandle, targetHandle } = pendingMigrationConflict;
+      setPendingMigrationConflict(null);
+      await executeVaultMigration(sourceHandle, targetHandle, mode);
+    },
+    [pendingMigrationConflict, executeVaultMigration],
+  );
+
+  const handleCancelMigrationConflict = useCallback(() => {
+    setPendingMigrationConflict(null);
+  }, []);
 
   // 9. 请求已有目录权限并在授权后同步待落盘条目
   const handleRequestPermissionAndSync = useCallback(async (): Promise<boolean> => {
@@ -499,27 +705,8 @@ export default function App() {
       return;
     }
     setPermissionState('granted');
-
-    vaultBusyRef.current = true;
-    setIsRebuilding(true);
-    setShowRebuildSuggestion(false);
-    setVaultError(null);
-    setLastFlushSummary(null);
-    setRebuildProgress({ phase: 'scanning', scannedItems: 0 });
-
-    try {
-      const summary = await rebuildIndexFromVault(vaultHandle, (progress) => {
-        setRebuildProgress(progress);
-      });
-      setLastRebuildSummary(summary);
-    } catch (error) {
-      setVaultError(`重建索引失败：${getErrorMessage(error)}`);
-    } finally {
-      setIsRebuilding(false);
-      setRebuildProgress(null);
-      vaultBusyRef.current = false;
-    }
-  }, [vaultHandle]);
+    await runRebuildIndex(vaultHandle);
+  }, [vaultHandle, runRebuildIndex]);
 
   // 12. 清空浏览器缓存索引（绝不删除硬盘文件与目录句柄）
   const handleClearBrowserCache = useCallback(async () => {
@@ -982,11 +1169,26 @@ export default function App() {
             isRebuilding={isRebuilding}
             rebuildProgress={rebuildProgress}
             lastRebuildSummary={lastRebuildSummary}
+            isMigrating={isMigrating}
+            migrationProgress={migrationProgress}
+            lastMigrationSummary={lastMigrationSummary}
+            pendingMigrationConflict={
+              pendingMigrationConflict
+                ? {
+                    sourceName:
+                      pendingMigrationConflict.sourceHandle.name || '原目录',
+                    targetName:
+                      pendingMigrationConflict.targetHandle.name || '新目录',
+                  }
+                : null
+            }
             showRebuildSuggestion={showRebuildSuggestion}
             vaultError={vaultError}
             focusVaultSectionTick={vaultSectionFocusTick}
             onUpdatePreferences={handleUpdatePreferences}
             onBindVault={handleBindVault}
+            onResolveMigrationConflict={handleResolveMigrationConflict}
+            onCancelMigrationConflict={handleCancelMigrationConflict}
             onRequestPermissionAndSync={async () => {
               await handleRequestPermissionAndSync();
             }}
@@ -997,6 +1199,7 @@ export default function App() {
             onDismissFeedback={() => {
               setLastFlushSummary(null);
               setLastRebuildSummary(null);
+              setLastMigrationSummary(null);
               setVaultError(null);
             }}
           />
