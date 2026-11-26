@@ -93,7 +93,7 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
     }
   });
 
-  test('管理台多维筛选、视图切换、软删除回收站恢复与 SidePanel 直达详情抽屉', async ({
+  test('管理台多维筛选、视图切换、软删除回收站恢复与离线详情抽屉', async ({
     context,
     extensionUrl,
     pageErrors,
@@ -137,24 +137,21 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       await galleryPage.click('#mock-native-collect');
       await expect(galleryPage.locator('.cp-toast-card')).toHaveCount(0);
 
-      // 2. 在 SidePanel 验证 2 条最近收藏全部暂存完成，并点击图集直达 Library 详情抽屉
-      const sidePanelPage = await context.newPage();
-      await sidePanelPage.goto(extensionUrl('sidepanel.html'));
+      // 2. 在 Library 验证 2 条收藏全部暂存完成，并打开图集离线详情抽屉
+      const libraryPage = await context.newPage();
+      await libraryPage.goto(extensionUrl('library.html'));
       await expect(
-        sidePanelPage.getByText('2 条内容待同步至 CollectVault'),
-      ).toBeVisible({ timeout: 20_000 });
-      await expect(sidePanelPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
-      await expect(sidePanelPage.getByText(MOCK_GALLERY_TITLE)).toBeVisible();
+        libraryPage.locator('article').getByText('待同步'),
+      ).toHaveCount(2, { timeout: 20_000 });
+      await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
+      await expect(libraryPage.getByText(MOCK_GALLERY_TITLE)).toBeVisible();
 
-      const libraryPagePromise = context.waitForEvent('page');
-      await sidePanelPage
-        .getByRole('button', { name: new RegExp(MOCK_GALLERY_TITLE) })
+      await libraryPage
+        .locator('article')
+        .filter({ hasText: MOCK_GALLERY_TITLE })
         .click();
-      const libraryPage = await libraryPagePromise;
-      await libraryPage.waitForLoadState('domcontentloaded');
-      expect(libraryPage.url()).toContain('/library.html#item=');
 
-      // 验证自动弹出该图集的离线详情抽屉
+      // 验证弹出该图集的离线详情抽屉
       const autoDialog = libraryPage.getByRole('dialog');
       await expect(autoDialog).toBeVisible();
       await expect(autoDialog.getByText('离线图集画廊 (1 / 2)')).toBeVisible();

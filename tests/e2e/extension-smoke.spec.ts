@@ -46,7 +46,7 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
     }
   });
 
-  test('Popup / SidePanel / Library 三个扩展页面正常渲染且无未捕获运行时异常', async ({
+  test('Popup / Library 扩展页面正常渲染且无未捕获运行时异常', async ({
     context,
     extensionUrl,
     pageErrors,
@@ -57,16 +57,11 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
       popupPage.getByRole('heading', { name: 'Collect+' }),
     ).toBeVisible();
     await expect(
+      popupPage.getByRole('button', { name: /侧边栏/ }),
+    ).toHaveCount(0);
+    await expect(
       popupPage.getByRole('button', { name: /打开 Collect\+ 全屏管理台/ }),
     ).toBeVisible();
-
-    const sidePanelPage = await context.newPage();
-    await sidePanelPage.goto(extensionUrl('sidepanel.html'));
-    await expect(
-      sidePanelPage.getByRole('heading', { name: 'Collect+ 侧边栏' }),
-    ).toBeVisible();
-    await expect(sidePanelPage.getByText('下载任务队列')).toBeVisible();
-    await expect(sidePanelPage.getByText('暂无收藏内容')).toBeVisible();
 
     const libraryPage = await context.newPage();
     await libraryPage.goto(extensionUrl('library.html'));

@@ -22,7 +22,7 @@ function createGate(): DeferredGate {
 }
 
 test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离线播放验证', () => {
-  test('悬浮按钮采集视频 -> 无页面弹窗 -> 侧边栏与管理台离线播放及状态机不变量校验', async ({
+  test('悬浮按钮采集视频 -> 无页面弹窗 -> 管理台离线播放及状态机不变量校验', async ({
     context,
     extensionUrl,
     pageErrors,
@@ -55,13 +55,15 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
       await fabButton.click();
       await expect(douyinPage.locator('.cp-toast-card')).toHaveCount(0);
 
-      // 打开 SidePanel 验证后台已完成 Offscreen 下载并暂存至 OPFS
-      const sidePanelPage = await context.newPage();
-      await sidePanelPage.goto(extensionUrl('sidepanel.html'));
+      // 打开 Library 全屏管理台验证后台已完成 Offscreen 下载并暂存至 OPFS
+      const libraryPage = await context.newPage();
+      await libraryPage.goto(extensionUrl('library.html'));
+      await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible({
+        timeout: 20_000,
+      });
       await expect(
-        sidePanelPage.getByText('1 条内容待同步至 CollectVault'),
+        libraryPage.locator('article').getByText('待同步'),
       ).toBeVisible({ timeout: 20_000 });
-      await expect(sidePanelPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
       await expect(douyinPage.locator('.cp-toast-card')).toHaveCount(0);
 
       // 验证 H.264 优先与 /playwm/ -> /play/ 去水印策略生效，且避开了 HEIC 封面
@@ -77,11 +79,6 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
           url.includes('mock-cover-video.png'),
         ),
       ).toBe(true);
-
-      // 打开 Library 全屏管理台验证卡片、全文检索与 100% 离线播放
-      const libraryPage = await context.newPage();
-      await libraryPage.goto(extensionUrl('library.html'));
-      await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
 
       // MiniSearch 中文检索验证
       const searchInput = libraryPage.getByPlaceholder(

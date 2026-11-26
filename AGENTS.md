@@ -67,7 +67,7 @@ pnpm zip
 │       ├── fixtures/
 │       │   ├── extension.ts               # MV3 扩展测试 Fixture（launchPersistentContext、extensionId、SW、pageErrors）
 │       │   └── douyin-mock.ts             # 抖音页面/API Mock + 浏览器级 CDP Fetch 拦截 Offscreen CDN 请求
-│       ├── extension-smoke.spec.ts        # 启动冒烟：SW 初始化、DNR initiator 安全红线、Popup/SidePanel/Library 渲染
+│       ├── extension-smoke.spec.ts        # 启动冒烟：SW 初始化、DNR initiator 安全红线、Popup/Library 渲染
 │       └── douyin-capture.spec.ts         # 抖音全链路 E2E：悬浮按钮/原生收藏、OPFS 暂存、快捷分类、检索、离线播放与画廊
 └── src/
     ├── types/
@@ -102,7 +102,6 @@ pnpm zip
         ├── douyin-main.content.ts         # world: 'MAIN', runAt: 'document_start'
         ├── douyin.content.tsx             # Isolated World 桥接 + Shadow DOM 浮层挂载
         ├── popup/App.tsx                  # 扩展快捷弹窗（状态检测、一键触发采集、统计速览）
-        ├── sidepanel/App.tsx              # 实时下载队列 + 最近收藏侧边栏（useLiveQuery）
         └── library/                       # 全屏管理台（SidebarTree、SettingsPanel、ItemCardGrid、ItemDetailDrawer）
 ```
 
@@ -175,7 +174,7 @@ pnpm zip
    - 每个用例自动分配独立的临时 `userDataDir` 并在结束时清理，保证 IndexedDB、OPFS 与 DNR 会话状态 100% 隔离。
    - 直接解构使用 `{ context, serviceWorker, extensionId, extensionUrl, pageErrors }`：
      - `serviceWorker.evaluate(...)` 可直接验证后台 `chrome.declarativeNetRequest.getSessionRules()` 等扩展内部状态；
-     - `extensionUrl('library.html' | 'sidepanel.html' | 'popup.html')` 自动拼接动态 `extensionId`；
+     - `extensionUrl('library.html' | 'popup.html')` 自动拼接动态 `extensionId`；
      - 用例结尾应断言 `expect(pageErrors).toEqual([])` 确保无未捕获运行时异常。
 3. **MV3 Offscreen Document 网络拦截关键机制**：
    - Playwright 的 `page.route()` / `context.route()` **无法拦截** Chrome MV3 Offscreen Document 发出的 `fetch()` 请求。

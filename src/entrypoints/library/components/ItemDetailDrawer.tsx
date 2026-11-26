@@ -278,7 +278,7 @@ export function ItemDetailDrawer({
                 currentItem.syncStatus === 'pending_download'
                   ? '该视频正在后台下载中，请稍候片刻再试。'
                   : currentItem.syncStatus === 'failed'
-                    ? '视频下载失败，请在侧边栏重试下载任务。'
+                    ? '视频下载失败，请重新收藏该视频。'
                     : '未在本地 CollectVault 或浏览器 OPFS 中找到视频文件。',
               );
             }
@@ -334,7 +334,7 @@ export function ItemDetailDrawer({
                 currentItem.syncStatus === 'pending_download'
                   ? '图集正在后台下载中，请稍候片刻再试。'
                   : currentItem.syncStatus === 'failed'
-                    ? '图集下载失败，请在侧边栏重试下载任务。'
+                    ? '图集下载失败，请重新收藏该图集。'
                     : '未在本地 CollectVault 或浏览器 OPFS 中找到图片文件。',
               );
             }

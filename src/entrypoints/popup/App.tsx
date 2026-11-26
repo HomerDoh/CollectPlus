@@ -8,7 +8,6 @@ import {
   FolderSync,
   Layers,
   Loader2,
-  PanelRightOpen,
   Sparkles,
 } from 'lucide-react';
 import { sendToBackground } from '@/types/messages.ts';
@@ -47,7 +46,6 @@ export default function App() {
   const [captureFeedback, setCaptureFeedback] = useState<CaptureFeedback>({
     state: 'idle',
   });
-  const [openingSidePanel, setOpeningSidePanel] = useState<boolean>(false);
 
   const loadStatus = useCallback(async () => {
     setLoadingSummary(true);
@@ -88,33 +86,6 @@ export default function App() {
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
-
-  const handleOpenSidePanel = async () => {
-    setOpeningSidePanel(true);
-    try {
-      const tabs = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      });
-      const windowId = tabs[0]?.windowId;
-      if (windowId === undefined) {
-        setCaptureFeedback({
-          state: 'error',
-          message: '未获取到当前浏览器窗口，无法打开侧边栏。',
-        });
-        return;
-      }
-      await chrome.sidePanel.open({ windowId });
-      window.close();
-    } catch (error) {
-      setCaptureFeedback({
-        state: 'error',
-        message: `打开侧边栏失败：${getErrorMessage(error)}`,
-      });
-    } finally {
-      setOpeningSidePanel(false);
-    }
-  };
 
   const handleTriggerCapture = async () => {
     setCaptureFeedback({ state: 'loading' });
@@ -180,21 +151,6 @@ export default function App() {
             <p className="text-[11px] text-slate-500">本地优先防失效收藏</p>
           </div>
         </div>
-
-        <button
-          type="button"
-          onClick={() => void handleOpenSidePanel()}
-          disabled={openingSidePanel}
-          title="打开侧边栏队列与最近收藏"
-          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-2xs transition hover:border-indigo-200 hover:bg-indigo-50/60 hover:text-indigo-700 disabled:opacity-60"
-        >
-          {openingSidePanel ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <PanelRightOpen className="h-3.5 w-3.5" />
-          )}
-          <span>侧边栏</span>
-        </button>
       </header>
 
       {/* 当前标签页状态卡 */}

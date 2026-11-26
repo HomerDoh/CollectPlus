@@ -18,7 +18,6 @@ export default defineConfig({
       'offscreen',
       'declarativeNetRequest',
       'tabs',
-      'sidePanel',
       'activeTab',
     ],
     host_permissions: [
