@@ -7,12 +7,24 @@
 import type { CapturedAssetInput, CapturedPayload } from '../types/adapter.ts';
 import type { MediaAsset, PlatformId } from '../types/schema.ts';
 
-/** Windows 与 macOS 文件名非法字符及 ASCII 控制字符 */
-const ILLEGAL_FILENAME_CHARS_RE = /[<>:"/\\|?*\u0000-\u001f\u007f]/g;
+/**
+ * Windows / macOS 与 Chromium File System Access API（IsSafePathComponent / IsFilenameLegal）
+ * 禁止或不安全的目录名字符：
+ * - OS 非法字符：< > : " / \ | ? *
+ * - Chromium 禁止字符：~（ASCII 波浪号，Chromium Issue #40228805）
+ * - 点号 .：避免目录名触发 Chromium 危险后缀/Shell 集成后缀拦截（.local/.lnk/.crswap/.js/.exe 等）及隐藏目录
+ * - Unicode 控制字符 (\p{Cc})、格式/零宽/Bidi 控制字符 (\p{Cf})、孤立代理项 (\p{Surrogate})
+ */
+const ILLEGAL_SEGMENT_CHAR_RE =
+  /[<>:"/\\|?*~.]|\p{Cc}|\p{Cf}|\p{Surrogate}/u;
+const ILLEGAL_SEGMENT_CHARS_GLOBAL_RE = new RegExp(
+  ILLEGAL_SEGMENT_CHAR_RE.source,
+  'gu',
+);
 
-/** Windows 保留设备名（不区分大小写，含附带扩展名形式） */
+/** Windows 保留设备名（不区分大小写，含 COM0~9/LPT0~9、上标数字及附带扩展名形式） */
 const WINDOWS_RESERVED_NAME_RE =
-  /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+  /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$/i;
 
 /** MIME 类型到标准扩展名映射表 */
 const MIME_TO_EXT_MAP: Readonly<Record<string, string>> = {
@@ -91,13 +103,13 @@ function trimSpacesAndDots(text: string): string {
 }
 
 /**
- * 清洗单个文件名或目录名段，确保跨 Windows / macOS 安全合法。
+ * 清洗单个文件名或目录名段，确保跨 Windows / macOS 及 Chromium File System Access API 安全合法。
  *
- * - 替换非法字符与控制字符
- * - 折叠连续空白为单空格
+ * - 替换 OS 非法字符、ASCII 波浪号 `~`、点号 `.`、Unicode 控制/格式字符与孤立代理项
+ * - 将所有空白（含全角空格、NBSP、Unicode 行分隔符）折叠为单 ASCII 空格
  * - 去除首尾空格与点号
  * - 按 Unicode 码点安全截断
- * - 规避 Windows 保留设备名（CON, PRN, AUX, NUL, COM1~9, LPT1~9）
+ * - 规避 Windows 保留设备名（CON, PRN, AUX, NUL, COM0~9, LPT0~9）
  */
 export function sanitizeFilenameSegment(
   input: string,
@@ -110,7 +122,7 @@ export function sanitizeFilenameSegment(
       : 64;
 
   let cleaned = input
-    .replace(ILLEGAL_FILENAME_CHARS_RE, ' ')
+    .replace(ILLEGAL_SEGMENT_CHARS_GLOBAL_RE, ' ')
     .replace(/\s+/g, ' ');
   cleaned = trimSpacesAndDots(cleaned);
   cleaned = sliceByCodePoints(cleaned, safeLimit);
@@ -118,7 +130,9 @@ export function sanitizeFilenameSegment(
 
   if (!cleaned) {
     const cleanFallback = trimSpacesAndDots(
-      fallback.replace(ILLEGAL_FILENAME_CHARS_RE, ' ').replace(/\s+/g, ' '),
+      fallback
+        .replace(ILLEGAL_SEGMENT_CHARS_GLOBAL_RE, ' ')
+        .replace(/\s+/g, ' '),
     );
     cleaned = sliceByCodePoints(cleanFallback || 'untitled', safeLimit);
     cleaned = trimSpacesAndDots(cleaned) || 'untitled';
@@ -179,6 +193,51 @@ export function buildItemRelativeDir(
   const safeSourceId = sanitizeFilenameSegment(sourceId, 40, 'item');
   const safeTitle = sanitizeTitle(title, 36);
   return `items/${platform}/${yearMonth}/${yearMonthDay}_${safeSourceId}_${safeTitle}`;
+}
+
+/**
+ * 构建不含标题的纯 ASCII 兜底目录路径（仅含 `[a-zA-Z0-9_-]`），
+ * 当未来浏览器对目录名施加未预见限制导致 `Name is not allowed` 时使用。
+ */
+export function buildFallbackItemRelativeDir(
+  platform: PlatformId,
+  sourceId: string,
+  collectedAt: number,
+  itemId: string,
+): string {
+  const yearMonth = formatYearMonth(collectedAt);
+  const yearMonthDay = formatYearMonthDay(collectedAt);
+  const asciiSourceId = sourceId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+  const asciiItemId = itemId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+  const safeId = asciiSourceId || asciiItemId || 'item';
+  return `items/${platform}/${yearMonth}/${yearMonthDay}_${safeId}`;
+}
+
+function isSafeVaultDirSegment(segment: string): boolean {
+  if (!segment || segment !== segment.replace(/\s+/g, ' ').trim()) {
+    return false;
+  }
+  if (ILLEGAL_SEGMENT_CHAR_RE.test(segment)) {
+    return false;
+  }
+  if (WINDOWS_RESERVED_NAME_RE.test(segment)) {
+    return false;
+  }
+  return true;
+}
+
+/** 校验条目相对目录路径的每一段是否都满足 Chromium 本地 File System Access API 命名安全约束 */
+export function isSafeVaultRelativeDir(relativeDir: string): boolean {
+  let segments: string[];
+  try {
+    segments = splitRelativePath(relativeDir);
+  } catch {
+    return false;
+  }
+  if (segments.length === 0) {
+    return false;
+  }
+  return segments.every((seg) => isSafeVaultDirSegment(seg));
 }
 
 function normalizeExtension(ext: string): string {

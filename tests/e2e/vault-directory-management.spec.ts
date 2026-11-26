@@ -838,4 +838,310 @@ test.describe('Collect+ 本地同步目录校验与迁移管理 E2E 验证', () 
 
     expect(pageErrors).toEqual([]);
   });
+
+  test('存量含波浪号(~)的暂存目录自动自愈，及 Name is not allowed 自动降级纯 ASCII 目录', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const libraryPage = await context.newPage();
+    await libraryPage.goto(extensionUrl('library.html'));
+
+    const now = Date.now();
+    const tildeItemId = '01JTILDELEGACY000000000001';
+    const tildeTitle = '教程 | 超简单的文字追踪效果来了！手机就能做~';
+    const fallbackItemId = '01JFALLBACKASCII0000000001';
+    const fallbackTitle = '强制触发降级标题示例';
+
+    // 1. 预置两条 opfs_staged 条目：
+    //    - 条目 A：模拟旧版本入库的脏 relativeDir（末尾含 ~）
+    //    - 条目 B：模拟未来浏览器对标题目录名抛出 Name is not allowed 的兜底降级场景
+    await libraryPage.evaluate(
+      async ({
+        timestamp,
+        aId,
+        aTitle,
+        bId,
+        bTitle,
+      }: {
+        timestamp: number;
+        aId: string;
+        aTitle: string;
+        bId: string;
+        bTitle: string;
+      }) => {
+        const opfsRoot = await navigator.storage.getDirectory();
+        const stageRoot = await opfsRoot.getDirectoryHandle(
+          'collect-plus-stage',
+          { create: true },
+        );
+
+        const seedOpfsVideo = async (itemId: string, content: string) => {
+          const itemStage = await stageRoot.getDirectoryHandle(itemId, {
+            create: true,
+          });
+          const fh = await itemStage.getFileHandle('video.mp4', {
+            create: true,
+          });
+          const writable = await fh.createWritable();
+          await writable.write(content);
+          await writable.close();
+        };
+
+        await seedOpfsVideo(aId, 'tilde-video-payload');
+        await seedOpfsVideo(bId, 'fallback-video-payload');
+
+        await new Promise<void>((resolve, reject) => {
+          const req = indexedDB.open('CollectPlusDB');
+          req.onerror = () => reject(req.error);
+          req.onsuccess = () => {
+            const idb = req.result;
+            const tx = idb.transaction('items', 'readwrite');
+            const store = tx.objectStore('items');
+
+            store.put({
+              schemaVersion: 1,
+              id: aId,
+              dedupeKey: 'douyin:74009990001',
+              platform: 'douyin',
+              sourceId: '74009990001',
+              sourceUrl: 'https://www.douyin.com/video/74009990001',
+              kind: 'video',
+              title: aTitle,
+              description: '含波浪号历史暂存测试',
+              author: { id: 'author-tilde', name: '测试作者' },
+              collectedAt: timestamp,
+              updatedAt: timestamp,
+              folderId: null,
+              tags: [],
+              note: '',
+              // 故意写入旧版清洗遗留的 ~ 目录名，复现用户报错现场
+              relativeDir:
+                'items/douyin/2026-11/20261126_74009990001_教程 超简单的文字追踪效果来了！手机就能做~',
+              assets: [
+                {
+                  id: 'video',
+                  kind: 'video',
+                  strategy: 'direct',
+                  sourceUrl: 'https://example.com/tilde.mp4',
+                  relativePath: 'video.mp4',
+                  mimeType: 'video/mp4',
+                  downloaded: true,
+                  sizeBytes: 19,
+                },
+              ],
+              syncStatus: 'opfs_staged',
+              totalSizeBytes: 19,
+              deletedAt: null,
+            });
+
+            store.put({
+              schemaVersion: 1,
+              id: bId,
+              dedupeKey: 'douyin:74009990002',
+              platform: 'douyin',
+              sourceId: '74009990002',
+              sourceUrl: 'https://www.douyin.com/video/74009990002',
+              kind: 'video',
+              title: bTitle,
+              description: '兜底降级测试',
+              author: { id: 'author-fb', name: '测试作者' },
+              collectedAt: timestamp,
+              updatedAt: timestamp,
+              folderId: null,
+              tags: [],
+              note: '',
+              relativeDir:
+                'items/douyin/2026-11/20261126_74009990002_强制触发降级标题示例',
+              assets: [
+                {
+                  id: 'video',
+                  kind: 'video',
+                  strategy: 'direct',
+                  sourceUrl: 'https://example.com/fallback.mp4',
+                  relativePath: 'video.mp4',
+                  mimeType: 'video/mp4',
+                  downloaded: true,
+                  sizeBytes: 22,
+                },
+              ],
+              syncStatus: 'opfs_staged',
+              totalSizeBytes: 22,
+              deletedAt: null,
+            });
+
+            tx.oncomplete = () => {
+              idb.close();
+              resolve();
+            };
+            tx.onerror = () => {
+              idb.close();
+              reject(tx.error);
+            };
+          };
+        });
+      },
+      {
+        timestamp: now,
+        aId: tildeItemId,
+        aTitle: tildeTitle,
+        bId: fallbackItemId,
+        bTitle: fallbackTitle,
+      },
+    );
+
+    await libraryPage.reload();
+
+    // 2. 在当前页面原型上注入严格 Chromium 本地目录名守卫（遇 ~、控制/格式字符或测试触发词时抛出与真机一致的 TypeError）
+    await libraryPage.evaluate(() => {
+      const proto = FileSystemDirectoryHandle.prototype;
+      const original = proto.getDirectoryHandle;
+      proto.getDirectoryHandle = function (
+        this: FileSystemDirectoryHandle,
+        name: string,
+        options?: FileSystemGetDirectoryOptions,
+      ): Promise<FileSystemDirectoryHandle> {
+        if (
+          name.includes('~') ||
+          /[<>:"/\\|?*]|\p{Cc}|\p{Cf}/u.test(name) ||
+          name.includes('强制触发降级标题示例')
+        ) {
+          return Promise.reject(
+            new TypeError(
+              "Failed to execute 'getDirectoryHandle' on 'FileSystemDirectoryHandle': Name is not allowed.",
+            ),
+          );
+        }
+        return original.call(this, name, options);
+      };
+    });
+
+    await libraryPage.getByRole('button', { name: '设置', exact: true }).click();
+    const vaultSection = libraryPage.getByTestId('settings-vault-section');
+
+    await installPickerQueue(libraryPage, [
+      { kind: 'opfs', dirName: 'StrictNameVault', create: true },
+    ]);
+
+    await vaultSection
+      .getByRole('button', { name: '选择本地同步目录' })
+      .click();
+
+    await expect(
+      vaultSection.getByText(/同步完成：落盘媒体条目\s*2\s*条/),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // 3. 验证两条记录在 IndexedDB、磁盘 meta.json、媒体文件及 OPFS 清理状态完全一致
+    const verifyResult = await libraryPage.evaluate(
+      async ({ aId, bId }: { aId: string; bId: string }) => {
+        const readDbItem = (
+          id: string,
+        ): Promise<{ relativeDir: string; syncStatus: string } | null> =>
+          new Promise((resolve, reject) => {
+            const req = indexedDB.open('CollectPlusDB');
+            req.onerror = () => reject(req.error);
+            req.onsuccess = () => {
+              const idb = req.result;
+              const tx = idb.transaction('items', 'readonly');
+              const getReq = tx.objectStore('items').get(id);
+              getReq.onsuccess = () => {
+                const rec = getReq.result as
+                  | { relativeDir: string; syncStatus: string }
+                  | undefined;
+                idb.close();
+                resolve(rec ?? null);
+              };
+              getReq.onerror = () => {
+                idb.close();
+                reject(getReq.error);
+              };
+            };
+          });
+
+        const readVaultMetaAndVideo = async (relativeDir: string) => {
+          const opfsRoot = await navigator.storage.getDirectory();
+          let dir = await opfsRoot.getDirectoryHandle('StrictNameVault', {
+            create: false,
+          });
+          for (const seg of relativeDir.split('/').filter(Boolean)) {
+            dir = await dir.getDirectoryHandle(seg, { create: false });
+          }
+          const metaFile = await (
+            await dir.getFileHandle('meta.json', { create: false })
+          ).getFile();
+          const videoFile = await (
+            await dir.getFileHandle('video.mp4', { create: false })
+          ).getFile();
+          const meta = JSON.parse(await metaFile.text()) as {
+            relativeDir: string;
+            title: string;
+          };
+          return {
+            metaRelativeDir: meta.relativeDir,
+            metaTitle: meta.title,
+            videoSize: videoFile.size,
+          };
+        };
+
+        const opfsHasItem = async (id: string): Promise<boolean> => {
+          try {
+            const opfsRoot = await navigator.storage.getDirectory();
+            const stageRoot = await opfsRoot.getDirectoryHandle(
+              'collect-plus-stage',
+              { create: false },
+            );
+            await stageRoot.getDirectoryHandle(id, { create: false });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
+        const itemA = await readDbItem(aId);
+        const itemB = await readDbItem(bId);
+        const diskA = itemA
+          ? await readVaultMetaAndVideo(itemA.relativeDir)
+          : null;
+        const diskB = itemB
+          ? await readVaultMetaAndVideo(itemB.relativeDir)
+          : null;
+
+        return {
+          itemA,
+          itemB,
+          diskA,
+          diskB,
+          stageAExists: await opfsHasItem(aId),
+          stageBExists: await opfsHasItem(bId),
+        };
+      },
+      { aId: tildeItemId, bId: fallbackItemId },
+    );
+
+    expect(verifyResult.itemA?.syncStatus).toBe('vault_synced');
+    expect(verifyResult.itemA?.relativeDir).not.toContain('~');
+    expect(verifyResult.itemA?.relativeDir).not.toContain('|');
+    expect(verifyResult.itemA?.relativeDir).toContain(
+      '74009990001_教程 超简单的文字追踪效果来了！手机就能做',
+    );
+    expect(verifyResult.diskA?.metaRelativeDir).toBe(
+      verifyResult.itemA?.relativeDir,
+    );
+    expect(verifyResult.diskA?.metaTitle).toBe(tildeTitle);
+    expect(verifyResult.diskA?.videoSize).toBe(19);
+    expect(verifyResult.stageAExists).toBe(false);
+
+    expect(verifyResult.itemB?.syncStatus).toBe('vault_synced');
+    expect(verifyResult.itemB?.relativeDir).toMatch(
+      /^items\/douyin\/\d{4}-\d{2}\/\d{8}_74009990002$/,
+    );
+    expect(verifyResult.diskB?.metaRelativeDir).toBe(
+      verifyResult.itemB?.relativeDir,
+    );
+    expect(verifyResult.diskB?.metaTitle).toBe(fallbackTitle);
+    expect(verifyResult.diskB?.videoSize).toBe(22);
+    expect(verifyResult.stageBExists).toBe(false);
+
+    expect(pageErrors).toEqual([]);
+  });
 });

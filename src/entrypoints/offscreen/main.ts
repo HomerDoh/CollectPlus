@@ -6,6 +6,7 @@
  */
 
 import { executeDownloadJob, isAbortError } from '../../download/pipeline.ts';
+import { tryAutoFlushToVault } from '../../storage/vault.ts';
 import {
   isOffscreenMessage,
   sendToBackground,
@@ -14,6 +15,33 @@ import {
 
 /** 当前正在执行的下载任务中止控制器映射（key = taskId） */
 const activeControllers = new Map<string, AbortController>();
+
+/** 下载完成后静默落盘合批锁：连续多条视频下载完成时合并批次写入 CollectVault */
+let isAutoFlushing = false;
+let pendingAutoFlush = false;
+
+function scheduleAutoFlushToVault(): void {
+  if (isAutoFlushing) {
+    pendingAutoFlush = true;
+    return;
+  }
+
+  isAutoFlushing = true;
+  void (async () => {
+    try {
+      do {
+        pendingAutoFlush = false;
+        try {
+          await tryAutoFlushToVault();
+        } catch (error) {
+          console.warn('[Collect+] Auto flush to CollectVault skipped:', error);
+        }
+      } while (pendingAutoFlush);
+    } finally {
+      isAutoFlushing = false;
+    }
+  })();
+}
 
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
@@ -48,7 +76,7 @@ async function runDownloadTask(
       },
     });
 
-    await sendToBackground({
+    const completeRes = await sendToBackground({
       target: 'background',
       type: 'OFFSCREEN_COMPLETE',
       taskId,
@@ -59,6 +87,10 @@ async function runDownloadTask(
         ? { thumbnailDataUrl: result.thumbnailDataUrl }
         : {}),
     }).catch(() => undefined);
+
+    if (completeRes?.ok) {
+      scheduleAutoFlushToVault();
+    }
   } catch (error) {
     const aborted = controller.signal.aborted || isAbortError(error);
     await sendToBackground({

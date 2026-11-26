@@ -568,4 +568,182 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
 
     expect(pageErrors).toEqual([]);
   });
+
+  test('已绑定且已授权本地目录时：收藏视频下载完成后无需打开管理台即自动静默落盘至 CollectVault', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const tracker = await installDouyinMockRoutes(context);
+    try {
+      // 1. 先在设置页绑定一个已授权的 CollectVault 目录，然后彻底关闭管理台标签页
+      const setupLibraryPage = await context.newPage();
+      await setupLibraryPage.addInitScript(() => {
+        const win = window as unknown as {
+          showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle>;
+        };
+        win.showDirectoryPicker = async () => {
+          const root = await navigator.storage.getDirectory();
+          return root.getDirectoryHandle('CollectVault', { create: true });
+        };
+      });
+      await setupLibraryPage.goto(extensionUrl('library.html#settings=vault'));
+      const vaultSection = setupLibraryPage.getByTestId('settings-vault-section');
+      await expect(vaultSection).toBeVisible();
+      await vaultSection
+        .getByRole('button', { name: '选择本地同步目录' })
+        .click();
+      await expect(vaultSection.getByText('已授权就绪')).toBeVisible();
+      await setupLibraryPage.close();
+
+      // 2. 在抖音页面采集视频（此时管理台处于关闭状态）
+      const douyinPage = await context.newPage();
+      await douyinPage.goto(
+        `https://www.douyin.com/video/${MOCK_VIDEO_AWEME_ID}`,
+        { waitUntil: 'domcontentloaded' },
+      );
+      await expect(douyinPage.locator('button.cp-fab-btn')).toBeVisible();
+      await douyinPage.click('#mock-load-detail');
+      await expect
+        .poll(async () =>
+          douyinPage.evaluate(() => {
+            const win = window as unknown as { __mockDetailLoaded?: boolean };
+            return Boolean(win.__mockDetailLoaded);
+          }),
+        )
+        .toBe(true);
+
+      await douyinPage.locator('button.cp-fab-btn').click();
+      await expect(douyinPage.locator('.cp-toast-card')).toHaveCount(0);
+
+      // 3. 不打开管理台，通过 Popup 轮询确认自动落盘完成（总收藏 1 / 待同步 0 / 下载中 0）
+      const popupPage = await context.newPage();
+      await expect
+        .poll(
+          async () => {
+            await popupPage.goto(extensionUrl('popup.html'));
+            const statValues = popupPage.locator('section.grid span.text-lg');
+            const total = await statValues.nth(0).textContent();
+            const pending = await statValues.nth(1).textContent();
+            const active = await statValues.nth(2).textContent();
+            return `${total}:${pending}:${active}`;
+          },
+          { timeout: 20_000 },
+        )
+        .toBe('1:0:0');
+
+      // 4. 在未打开管理台的情况下直接检查 CollectVault 文件已落盘且 OPFS 暂存已释放
+      const inspection = await popupPage.evaluate(
+        async (): Promise<VaultInspectionResult> => {
+          const root = await navigator.storage.getDirectory();
+          const vaultDir = await root.getDirectoryHandle('CollectVault');
+
+          let hasReadme = false;
+          let readmeHasWarning = false;
+          try {
+            const readmeHandle = await vaultDir.getFileHandle('README.txt');
+            const readmeText = await (await readmeHandle.getFile()).text();
+            hasReadme = readmeText.length > 0;
+            readmeHasWarning = readmeText.includes('请勿手动重命名');
+          } catch {
+            hasReadme = false;
+          }
+
+          let hasVaultConfig = false;
+          try {
+            await vaultDir.getFileHandle('.collect-vault.json');
+            hasVaultConfig = true;
+          } catch {
+            hasVaultConfig = false;
+          }
+
+          let hasTaxonomy = false;
+          try {
+            await vaultDir.getFileHandle('taxonomy.json');
+            hasTaxonomy = true;
+          } catch {
+            hasTaxonomy = false;
+          }
+
+          let metaFilesCount = 0;
+          let metaHasThumbnailDataUrl = false;
+          let videoFileSize = 0;
+
+          const scanDir = async (
+            dir: FileSystemDirectoryHandle,
+          ): Promise<void> => {
+            for await (const [name, handle] of dir.entries()) {
+              if (handle.kind === 'directory') {
+                await scanDir(handle);
+              } else if (handle.kind === 'file') {
+                if (name === 'meta.json') {
+                  metaFilesCount += 1;
+                  const metaText = await (await handle.getFile()).text();
+                  if (metaText.includes('thumbnailDataUrl')) {
+                    metaHasThumbnailDataUrl = true;
+                  }
+                } else if (name === 'video.mp4') {
+                  videoFileSize = (await handle.getFile()).size;
+                }
+              }
+            }
+          };
+
+          const itemsDir = await vaultDir.getDirectoryHandle('items');
+          await scanDir(itemsDir);
+
+          let stageStillExists = false;
+          try {
+            const stageRoot = await root.getDirectoryHandle('collect-plus-stage');
+            for await (const _entry of stageRoot.entries()) {
+              void _entry;
+              stageStillExists = true;
+              break;
+            }
+          } catch {
+            stageStillExists = false;
+          }
+
+          return {
+            hasReadme,
+            readmeHasWarning,
+            hasVaultConfig,
+            hasTaxonomy,
+            metaFilesCount,
+            metaHasThumbnailDataUrl,
+            videoFileSize,
+            stageStillExists,
+          };
+        },
+      );
+
+      expect(inspection.hasReadme).toBe(true);
+      expect(inspection.readmeHasWarning).toBe(true);
+      expect(inspection.hasVaultConfig).toBe(true);
+      expect(inspection.hasTaxonomy).toBe(true);
+      expect(inspection.metaFilesCount).toBe(1);
+      expect(inspection.metaHasThumbnailDataUrl).toBe(false);
+      expect(inspection.videoFileSize).toBeGreaterThan(0);
+      expect(inspection.stageStillExists).toBe(false);
+
+      // 5. 事后打开管理台，确认无「待同步」标记且可从 CollectVault 直接离线播放
+      const verifyLibraryPage = await context.newPage();
+      await verifyLibraryPage.goto(extensionUrl('library.html'));
+      await expect(verifyLibraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
+      await expect(
+        verifyLibraryPage.locator('article').getByText('待同步'),
+      ).toHaveCount(0);
+      await verifyLibraryPage.locator('article').first().click();
+      const dialog = verifyLibraryPage.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator('video')).toHaveAttribute(
+        'src',
+        /^blob:chrome-extension:\/\//,
+      );
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await tracker.dispose();
+    }
+  });
 });

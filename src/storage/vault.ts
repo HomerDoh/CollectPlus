@@ -30,7 +30,12 @@ import {
   setSetting,
 } from './db.ts';
 import { readFileFromOpfs, removeItemFromOpfs } from './opfs.ts';
-import { splitRelativePath } from './path.ts';
+import {
+  buildFallbackItemRelativeDir,
+  buildItemRelativeDir,
+  isSafeVaultRelativeDir,
+  splitRelativePath,
+} from './path.ts';
 
 export const VAULT_README_FILENAME = 'README.txt';
 export const VAULT_CONFIG_FILENAME = '.collect-vault.json';
@@ -221,6 +226,12 @@ export interface RebuildSummary {
 
 function isNotFoundError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'NotFoundError';
+}
+
+function isNameNotAllowedError(error: unknown): boolean {
+  return (
+    error instanceof TypeError && /Name is not allowed/i.test(error.message)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -845,8 +856,25 @@ export async function readItemAssetFile(
 // 3. 业务落盘与同步（VaultFlusher）
 // ============================================================================
 
-/** 将 IndexedDB 中最新的文件夹树与标签表全量回写到 `CollectVault/taxonomy.json` */
-export async function writeTaxonomyToVault(
+const VAULT_IO_LOCK_NAME = 'collect-plus-vault-io';
+
+/** 跨上下文互斥锁：串行化 Offscreen 自动落盘与管理台手动同步/迁移/重建对 CollectVault 的写入 */
+async function withVaultIoLock<T>(task: () => Promise<T>): Promise<T> {
+  if (
+    typeof navigator !== 'undefined' &&
+    navigator.locks &&
+    typeof navigator.locks.request === 'function'
+  ) {
+    return navigator.locks.request(
+      VAULT_IO_LOCK_NAME,
+      { mode: 'exclusive' },
+      async () => task(),
+    );
+  }
+  return task();
+}
+
+async function writeTaxonomyToVaultUnlocked(
   root: FileSystemDirectoryHandle,
 ): Promise<void> {
   const [folders, tags] = await Promise.all([
@@ -871,11 +899,14 @@ export async function writeTaxonomyToVault(
   );
 }
 
-/**
- * 将单个条目的纯净元数据写入 `CollectVault/{item.relativeDir}/meta.json`。
- * 强制通过 `stripRecordToMeta` 剥离 `thumbnailDataUrl`。
- */
-export async function writeItemMetaToVault(
+/** 将 IndexedDB 中最新的文件夹树与标签表全量回写到 `CollectVault/taxonomy.json` */
+export async function writeTaxonomyToVault(
+  root: FileSystemDirectoryHandle,
+): Promise<void> {
+  return withVaultIoLock(() => writeTaxonomyToVaultUnlocked(root));
+}
+
+async function writeItemMetaToVaultUnlocked(
   root: FileSystemDirectoryHandle,
   item: CollectionItemRecord,
 ): Promise<void> {
@@ -888,13 +919,46 @@ export async function writeItemMetaToVault(
 }
 
 /**
- * 执行 OPFS -> CollectVault 同步落盘：
- * 1. 守护目录结构与 `README.txt`；
- * 2. 将 `opfs_staged` 条目的已下载媒体流式拷贝到 Vault，写入 `meta.json`，更新 DB 状态并释放 OPFS；
- * 3. 将 `meta_dirty` 条目的残余 OPFS 文件（如有）补齐落盘并回写最新 `meta.json`；
- * 4. 回写 `taxonomy.json` 并更新 `last_sync_at`。
+ * 将单个条目的纯净元数据写入 `CollectVault/{item.relativeDir}/meta.json`。
+ * 强制通过 `stripRecordToMeta` 剥离 `thumbnailDataUrl`。
  */
-export async function flushToVault(
+export async function writeItemMetaToVault(
+  root: FileSystemDirectoryHandle,
+  item: CollectionItemRecord,
+): Promise<void> {
+  return withVaultIoLock(() => writeItemMetaToVaultUnlocked(root, item));
+}
+
+async function syncStagedItemToDir(
+  root: FileSystemDirectoryHandle,
+  item: CollectionItemRecord,
+  targetRelativeDir: string,
+): Promise<void> {
+  for (const asset of item.assets) {
+    const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
+    const vaultAssetPath = `${targetRelativeDir}/${asset.relativePath}`;
+
+    if (opfsFile) {
+      await copyFileToVault(root, vaultAssetPath, opfsFile);
+    } else if (asset.downloaded) {
+      const alreadyInVault = await hasVaultFile(root, vaultAssetPath);
+      if (!alreadyInVault) {
+        throw new Error(
+          `Missing staged asset "${asset.relativePath}" in both OPFS and Vault.`,
+        );
+      }
+    }
+  }
+
+  const syncedSnapshot: CollectionItemRecord = {
+    ...item,
+    relativeDir: targetRelativeDir,
+    syncStatus: 'vault_synced',
+  };
+  await writeItemMetaToVaultUnlocked(root, syncedSnapshot);
+}
+
+async function flushToVaultUnlocked(
   root: FileSystemDirectoryHandle,
   onProgress?: (p: FlushProgress) => void,
 ): Promise<FlushSummary> {
@@ -928,27 +992,35 @@ export async function flushToVault(
     });
 
     try {
-      for (const asset of item.assets) {
-        const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
-        const vaultAssetPath = `${item.relativeDir}/${asset.relativePath}`;
+      // 存量自愈：对尚未落盘但含非法目录段（如旧版保留的 ~ / . / 零宽字符）的暂存条目按最新规则重算路径
+      let effectiveRelativeDir = isSafeVaultRelativeDir(item.relativeDir)
+        ? item.relativeDir
+        : buildItemRelativeDir(
+            item.platform,
+            item.sourceId,
+            item.title,
+            item.collectedAt,
+          );
 
-        if (opfsFile) {
-          await copyFileToVault(root, vaultAssetPath, opfsFile);
-        } else if (asset.downloaded) {
-          const alreadyInVault = await hasVaultFile(root, vaultAssetPath);
-          if (!alreadyInVault) {
-            throw new Error(
-              `Missing staged asset "${asset.relativePath}" in both OPFS and Vault.`,
-            );
-          }
+      try {
+        await syncStagedItemToDir(root, item, effectiveRelativeDir);
+      } catch (error) {
+        if (!isNameNotAllowedError(error)) {
+          throw error;
         }
+        // 运行时兜底：若未来浏览器新增未预见的目录名限制，降级为纯 ASCII 安全路径（不含标题）重试一次
+        const fallbackDir = buildFallbackItemRelativeDir(
+          item.platform,
+          item.sourceId,
+          item.collectedAt,
+          item.id,
+        );
+        if (fallbackDir === effectiveRelativeDir) {
+          throw error;
+        }
+        effectiveRelativeDir = fallbackDir;
+        await syncStagedItemToDir(root, item, effectiveRelativeDir);
       }
-
-      const syncedSnapshot: CollectionItemRecord = {
-        ...item,
-        syncStatus: 'vault_synced',
-      };
-      await writeItemMetaToVault(root, syncedSnapshot);
 
       await db.transaction('rw', db.items, async () => {
         const latest = await db.items.get(item.id);
@@ -960,6 +1032,7 @@ export async function flushToVault(
           latest.updatedAt > item.updatedAt ? 'meta_dirty' : 'vault_synced';
         await db.items.put({
           ...latest,
+          relativeDir: effectiveRelativeDir,
           syncStatus: nextStatus,
         });
       });
@@ -1007,7 +1080,7 @@ export async function flushToVault(
         ...item,
         syncStatus: 'vault_synced',
       };
-      await writeItemMetaToVault(root, syncedSnapshot);
+      await writeItemMetaToVaultUnlocked(root, syncedSnapshot);
 
       await db.transaction('rw', db.items, async () => {
         const latest = await db.items.get(item.id);
@@ -1042,7 +1115,7 @@ export async function flushToVault(
     current: 1,
     total: 1,
   });
-  await writeTaxonomyToVault(root);
+  await writeTaxonomyToVaultUnlocked(root);
   await setSetting('last_sync_at', Date.now());
 
   const totalProcessed = stagedItems.length + dirtyItems.length;
@@ -1053,6 +1126,45 @@ export async function flushToVault(
   });
 
   return summary;
+}
+
+/**
+ * 执行 OPFS -> CollectVault 同步落盘：
+ * 1. 守护目录结构与 `README.txt`；
+ * 2. 将 `opfs_staged` 条目的已下载媒体流式拷贝到 Vault，写入 `meta.json`，更新 DB 状态并释放 OPFS；
+ * 3. 将 `meta_dirty` 条目的残余 OPFS 文件（如有）补齐落盘并回写最新 `meta.json`；
+ * 4. 回写 `taxonomy.json` 并更新 `last_sync_at`。
+ */
+export async function flushToVault(
+  root: FileSystemDirectoryHandle,
+  onProgress?: (p: FlushProgress) => void,
+): Promise<FlushSummary> {
+  return withVaultIoLock(() => flushToVaultUnlocked(root, onProgress));
+}
+
+/**
+ * 后台静默自动落盘：在已绑定目录且已持有 `readwrite` 权限（不触发需要用户手势的弹窗）时，
+ * 立即将待同步条目从 OPFS 落盘至 `CollectVault`；未绑定、无权限或无待同步条目时返回 `null`。
+ */
+export async function tryAutoFlushToVault(): Promise<FlushSummary | null> {
+  return withVaultIoLock(async () => {
+    const handle = await getSavedVaultHandle();
+    if (!handle) {
+      return null;
+    }
+    const permission = await queryVaultPermission(handle, 'readwrite');
+    if (permission !== 'granted') {
+      return null;
+    }
+    const [stagedCount, dirtyCount] = await Promise.all([
+      db.items.where('syncStatus').equals('opfs_staged').count(),
+      db.items.where('syncStatus').equals('meta_dirty').count(),
+    ]);
+    if (stagedCount + dirtyCount === 0) {
+      return null;
+    }
+    return flushToVaultUnlocked(handle);
+  });
 }
 
 // ============================================================================
@@ -1514,7 +1626,8 @@ export async function rebuildIndexFromVault(
   onProgress?: (p: RebuildProgress) => void,
   options?: RebuildOptions,
 ): Promise<RebuildSummary> {
-  await ensureVaultReadme(root);
+  return withVaultIoLock(async () => {
+    await ensureVaultReadme(root);
 
   // 读取并同步 .collect-vault.json（如果合法）
   const configFile = await readVaultFile(root, VAULT_CONFIG_FILENAME);
@@ -1728,12 +1841,13 @@ export async function rebuildIndexFromVault(
     scannedItems: restoredRecords.length,
   });
 
-  return {
-    restoredItems: restoredRecords.length,
-    restoredFolders: normalizedFolders.length,
-    restoredTags: normalizedTags.length,
-    skippedFiles,
-  };
+    return {
+      restoredItems: restoredRecords.length,
+      restoredFolders: normalizedFolders.length,
+      restoredTags: normalizedTags.length,
+      skippedFiles,
+    };
+  });
 }
 
 // ============================================================================
@@ -1987,20 +2101,21 @@ export async function migrateVaultDirectory(
 
   onProgress?.({ phase: 'preparing', current: 0, total: 0 });
 
-  // 若本地索引存在已落盘条目的未写回编辑（meta_dirty），迁移前先刷新轻量 JSON 至原目录
-  const dirtyItems = await db.items
-    .where('syncStatus')
-    .equals('meta_dirty')
-    .toArray();
-  if (dirtyItems.length > 0) {
-    for (const item of dirtyItems) {
-      await writeItemMetaToVault(sourceRoot, {
-        ...item,
-        syncStatus: 'vault_synced',
-      }).catch(() => undefined);
+  return withVaultIoLock(async () => {
+    // 若本地索引存在已落盘条目的未写回编辑（meta_dirty），迁移前先刷新轻量 JSON 至原目录
+    const dirtyItems = await db.items
+      .where('syncStatus')
+      .equals('meta_dirty')
+      .toArray();
+    if (dirtyItems.length > 0) {
+      for (const item of dirtyItems) {
+        await writeItemMetaToVaultUnlocked(sourceRoot, {
+          ...item,
+          syncStatus: 'vault_synced',
+        }).catch(() => undefined);
+      }
+      await writeTaxonomyToVaultUnlocked(sourceRoot).catch(() => undefined);
     }
-    await writeTaxonomyToVault(sourceRoot).catch(() => undefined);
-  }
 
   let copiedFiles = 0;
   let skippedFiles = 0;
@@ -2216,15 +2331,16 @@ export async function migrateVaultDirectory(
     total: copiedFiles,
   });
 
-  return {
-    mode,
-    sourceName: sourceRoot.name || '原目录',
-    targetName: targetRoot.name || '新目录',
-    copiedFiles,
-    skippedFiles,
-    sourceCleanupFailedCount: cleanup.failedCount,
-    ...(cleanup.firstError !== undefined
-      ? { sourceCleanupError: cleanup.firstError }
-      : {}),
-  };
+    return {
+      mode,
+      sourceName: sourceRoot.name || '原目录',
+      targetName: targetRoot.name || '新目录',
+      copiedFiles,
+      skippedFiles,
+      sourceCleanupFailedCount: cleanup.failedCount,
+      ...(cleanup.firstError !== undefined
+        ? { sourceCleanupError: cleanup.firstError }
+        : {}),
+    };
+  });
 }
