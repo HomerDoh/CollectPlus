@@ -10,6 +10,8 @@ import type {
   CollectionItemRecord,
   DownloadTask,
   FolderNode,
+  PlatformAccountSyncEntry,
+  PlatformId,
   SettingKey,
   SettingRecord,
   SettingValueMap,
@@ -46,6 +48,8 @@ export const db = new CollectPlusDB();
 export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   autoSyncOnLibraryOpen: true,
   floatingButtonEnabled: true,
+  autoSyncAllCollections: false,
+  syncUncollectToPlugin: false,
   defaultFolderId: null,
   maxConcurrentDownloads: 2,
   defaultViewMode: 'grid',
@@ -161,6 +165,38 @@ export async function updateUserPreferences(
     };
     await setSetting('user_preferences', next);
     return next;
+  });
+}
+
+/** 构造按平台 + 非敏感账号 ID 区分的稳定存储键 */
+export function buildPlatformAccountKey(
+  platform: PlatformId,
+  accountId: string,
+): string {
+  return `${platform}:${accountId.trim()}`;
+}
+
+/** 读取指定平台账号的全量收藏同步状态 */
+export async function getPlatformAccountSyncState(
+  platform: PlatformId,
+  accountId: string,
+): Promise<PlatformAccountSyncEntry | null> {
+  const key = buildPlatformAccountKey(platform, accountId);
+  const allStates = await getSetting('platform_account_sync_states');
+  return allStates?.[key] ?? null;
+}
+
+/** 持久化指定平台账号的全量收藏同步状态 */
+export async function setPlatformAccountSyncState(
+  entry: PlatformAccountSyncEntry,
+): Promise<void> {
+  const key = buildPlatformAccountKey(entry.platform, entry.accountId);
+  await db.transaction('rw', db.settings, async () => {
+    const existing = (await getSetting('platform_account_sync_states')) ?? {};
+    await setSetting('platform_account_sync_states', {
+      ...existing,
+      [key]: entry,
+    });
   });
 }
 

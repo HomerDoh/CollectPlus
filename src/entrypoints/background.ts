@@ -23,7 +23,14 @@ import {
   ensureOffscreenDocument,
   hasOffscreenDocument,
 } from '../download/offscreen-manager.ts';
-import { db, getUserPreferences, upsertTags } from '../storage/db.ts';
+import {
+  buildPlatformAccountKey,
+  db,
+  getPlatformAccountSyncState,
+  getUserPreferences,
+  setPlatformAccountSyncState,
+  upsertTags,
+} from '../storage/db.ts';
 import {
   buildItemRelativeDir,
   buildMediaAssetsFromPayload,
@@ -62,6 +69,11 @@ let startupRecoveryPromise: Promise<void> | null = null;
 /** 受控并发下载队列调度锁（防止并发重入重复派发同一任务） */
 let isPumpingQueue = false;
 let pendingQueuePump = false;
+
+/** 正在执行全量收藏同步的账号集合（`${platform}:${accountId}`），防止多标签页重复触发 */
+const inFlightAccountSyncs = new Set<string>();
+/** 已触发风控进入被动旁路采集兜底的账号集合（`${platform}:${accountId}`） */
+const passiveFallbackAccounts = new Set<string>();
 
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
@@ -398,6 +410,32 @@ async function handleCaptureItem(
   }
 
   const now = Date.now();
+  // 若条目此前仅被软删除且本地媒体已下载完成，直接原地恢复并复用原 relativeDir
+  if (
+    existing &&
+    existing.deletedAt != null &&
+    (existing.syncStatus === 'opfs_staged' ||
+      existing.syncStatus === 'vault_synced' ||
+      existing.syncStatus === 'meta_dirty')
+  ) {
+    const restored: CollectionItemRecord = {
+      ...existing,
+      deletedAt: null,
+      updatedAt: now,
+      syncStatus:
+        existing.syncStatus === 'vault_synced'
+          ? 'meta_dirty'
+          : existing.syncStatus,
+    };
+    await db.items.put(restored);
+    return {
+      ok: true,
+      itemId: restored.id,
+      deduplicated: false,
+      item: restored,
+    };
+  }
+
   const itemId = existing ? existing.id : ulid();
   const relativeDir = buildItemRelativeDir(
     payload.platform,
@@ -488,6 +526,228 @@ async function handleCaptureItem(
     deduplicated: false,
     item: itemRecord,
   };
+}
+
+async function handleCaptureBatchItems(
+  message: Extract<BackgroundMessage, { type: 'CAPTURE_BATCH_ITEMS' }>,
+): Promise<BackgroundResponseMap['CAPTURE_BATCH_ITEMS']> {
+  let capturedCount = 0;
+  let deduplicatedCount = 0;
+
+  for (const payload of message.payloads) {
+    const res = await handleCaptureItem({
+      target: 'background',
+      type: 'CAPTURE_ITEM',
+      payload,
+    });
+    if (res.ok) {
+      if (res.deduplicated) {
+        deduplicatedCount += 1;
+      } else {
+        capturedCount += 1;
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    capturedCount,
+    deduplicatedCount,
+  };
+}
+
+async function handleUncollectItems(
+  message: Extract<BackgroundMessage, { type: 'UNCOLLECT_ITEMS' }>,
+): Promise<BackgroundResponseMap['UNCOLLECT_ITEMS']> {
+  const prefs = await getUserPreferences();
+  if (!prefs.syncUncollectToPlugin) {
+    return { ok: true, removedItemIds: [], skipped: true };
+  }
+
+  const uniqueSourceIds = Array.from(
+    new Set(
+      message.sourceIds
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0),
+    ),
+  );
+  if (uniqueSourceIds.length === 0) {
+    return { ok: true, removedItemIds: [], skipped: false };
+  }
+
+  const now = Date.now();
+  const removedItemIds: string[] = [];
+  const activeTaskIdsToAbort: string[] = [];
+
+  await db.transaction('rw', db.items, db.tasks, async () => {
+    for (const sourceId of uniqueSourceIds) {
+      const dedupeKey = `${message.platform}:${sourceId}`;
+      const existing = await db.items
+        .where('dedupeKey')
+        .equals(dedupeKey)
+        .first();
+      if (!existing || existing.deletedAt != null) {
+        continue;
+      }
+
+      await db.items.put({
+        ...existing,
+        deletedAt: now,
+        updatedAt: now,
+        syncStatus:
+          existing.syncStatus === 'vault_synced'
+            ? 'meta_dirty'
+            : existing.syncStatus,
+      });
+      removedItemIds.push(existing.id);
+
+      const relatedTasks = await db.tasks
+        .where('itemId')
+        .equals(existing.id)
+        .toArray();
+      for (const task of relatedTasks) {
+        if (
+          task.status === 'queued' ||
+          task.status === 'downloading' ||
+          task.status === 'processing'
+        ) {
+          if (task.status === 'downloading' || task.status === 'processing') {
+            activeTaskIdsToAbort.push(task.id);
+          }
+          await db.tasks.put({
+            ...task,
+            status: 'cancelled',
+            errorMessage: '原站已取消收藏，任务已取消。',
+            updatedAt: now,
+          });
+        }
+      }
+    }
+  });
+
+  if (activeTaskIdsToAbort.length > 0 && (await hasOffscreenDocument())) {
+    await Promise.all(
+      activeTaskIdsToAbort.map((taskId) =>
+        sendToOffscreen({
+          target: 'offscreen',
+          type: 'OFFSCREEN_ABORT_DOWNLOAD',
+          taskId,
+        }).catch(() => undefined),
+      ),
+    );
+  }
+
+  if (removedItemIds.length > 0) {
+    void scheduleActionIconSync();
+    void pumpDownloadQueue();
+  }
+
+  return {
+    ok: true,
+    removedItemIds,
+    skipped: false,
+  };
+}
+
+async function handleCheckAccountSyncAction(
+  message: Extract<BackgroundMessage, { type: 'CHECK_ACCOUNT_SYNC_ACTION' }>,
+): Promise<BackgroundResponseMap['CHECK_ACCOUNT_SYNC_ACTION']> {
+  const accountId = message.accountId.trim();
+  if (!accountId) {
+    return { ok: true, action: 'none', passiveFallbackActive: false };
+  }
+
+  const accountKey = buildPlatformAccountKey(message.platform, accountId);
+  const passiveFallbackActive = passiveFallbackAccounts.has(accountKey);
+
+  if (inFlightAccountSyncs.has(accountKey)) {
+    return { ok: true, action: 'none', passiveFallbackActive };
+  }
+
+  const [prefs, existingState] = await Promise.all([
+    getUserPreferences(),
+    getPlatformAccountSyncState(message.platform, accountId),
+  ]);
+
+  if (prefs.autoSyncAllCollections) {
+    if (existingState?.status === 'synced') {
+      return { ok: true, action: 'none', passiveFallbackActive };
+    }
+    inFlightAccountSyncs.add(accountKey);
+    return { ok: true, action: 'auto_sync', passiveFallbackActive };
+  }
+
+  if (existingState !== null) {
+    return { ok: true, action: 'none', passiveFallbackActive };
+  }
+
+  return { ok: true, action: 'prompt', passiveFallbackActive };
+}
+
+async function handleBeginManualAccountSync(
+  message: Extract<BackgroundMessage, { type: 'BEGIN_MANUAL_ACCOUNT_SYNC' }>,
+): Promise<BackgroundResponseMap['BEGIN_MANUAL_ACCOUNT_SYNC']> {
+  const accountId = message.accountId.trim();
+  if (!accountId) {
+    return { ok: true, started: false };
+  }
+  const accountKey = buildPlatformAccountKey(message.platform, accountId);
+  if (inFlightAccountSyncs.has(accountKey)) {
+    return { ok: true, started: false };
+  }
+  inFlightAccountSyncs.add(accountKey);
+  return { ok: true, started: true };
+}
+
+async function handleReportAccountSyncResult(
+  message: Extract<BackgroundMessage, { type: 'REPORT_ACCOUNT_SYNC_RESULT' }>,
+): Promise<BackgroundResponseMap['REPORT_ACCOUNT_SYNC_RESULT']> {
+  const accountId = message.accountId.trim();
+  if (!accountId) {
+    return { ok: true };
+  }
+
+  const accountKey = buildPlatformAccountKey(message.platform, accountId);
+  inFlightAccountSyncs.delete(accountKey);
+  const now = Date.now();
+
+  switch (message.outcome) {
+    case 'synced': {
+      passiveFallbackAccounts.delete(accountKey);
+      await setPlatformAccountSyncState({
+        platform: message.platform,
+        accountId,
+        status: 'synced',
+        updatedAt: now,
+        lastSyncedAt: now,
+        ...(message.syncedCount !== undefined
+          ? { lastSyncedCount: message.syncedCount }
+          : {}),
+      });
+      break;
+    }
+
+    case 'dismissed': {
+      await setPlatformAccountSyncState({
+        platform: message.platform,
+        accountId,
+        status: 'dismissed',
+        updatedAt: now,
+      });
+      break;
+    }
+
+    case 'fallback_needed': {
+      passiveFallbackAccounts.add(accountKey);
+      break;
+    }
+
+    case 'failed': {
+      break;
+    }
+  }
+
+  return { ok: true };
 }
 
 async function handleGetStatusSummary(
@@ -709,6 +969,8 @@ async function handleNotifyPreferencesUpdated(): Promise<
           target: 'content',
           type: 'CONTENT_PREFERENCES_UPDATED',
           floatingButtonEnabled: preferences.floatingButtonEnabled,
+          autoSyncAllCollections: preferences.autoSyncAllCollections,
+          syncUncollectToPlugin: preferences.syncUncollectToPlugin,
         }).catch(() => undefined);
       }),
     );
@@ -868,6 +1130,16 @@ async function routeBackgroundMessage(
   switch (message.type) {
     case 'CAPTURE_ITEM':
       return handleCaptureItem(message);
+    case 'CAPTURE_BATCH_ITEMS':
+      return handleCaptureBatchItems(message);
+    case 'UNCOLLECT_ITEMS':
+      return handleUncollectItems(message);
+    case 'CHECK_ACCOUNT_SYNC_ACTION':
+      return handleCheckAccountSyncAction(message);
+    case 'BEGIN_MANUAL_ACCOUNT_SYNC':
+      return handleBeginManualAccountSync(message);
+    case 'REPORT_ACCOUNT_SYNC_RESULT':
+      return handleReportAccountSyncResult(message);
     case 'GET_STATUS_SUMMARY':
       return handleGetStatusSummary(message);
     case 'TRIGGER_ACTIVE_TAB_CAPTURE':

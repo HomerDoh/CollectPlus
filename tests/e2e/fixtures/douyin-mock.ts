@@ -38,73 +38,82 @@ export const MOCK_MP4_BYTES = Buffer.concat([
 const MOCK_CDN_HOST_RE =
   /^https:\/\/(?:v26-web\.douyinvod\.com|p3-pc-sign\.douyinpic\.com)\//;
 
-function buildMockVideoDetailResponse(awemeId: string): Record<string, unknown> {
+export function buildMockVideoAweme(
+  awemeId: string,
+  customTitle?: string,
+): Record<string, unknown> {
   const isDefaultVideo = awemeId === MOCK_VIDEO_AWEME_ID;
-  const title = isDefaultVideo
-    ? `${MOCK_VIDEO_TITLE} #前端工程 #离线归档`
-    : `连刷测试视频_${awemeId} #批量收藏`;
+  const title =
+    customTitle ??
+    (isDefaultVideo
+      ? `${MOCK_VIDEO_TITLE} #前端工程 #离线归档`
+      : `连刷测试视频_${awemeId} #批量收藏`);
   const coverName = isDefaultVideo
     ? 'mock-cover-video.png'
     : `mock-cover-${awemeId}.png`;
   const videoId = isDefaultVideo ? 'h264_primary' : `h264_${awemeId}`;
 
   return {
-    status_code: 0,
-    aweme_detail: {
-      aweme_id: awemeId,
-      aweme_type: 0,
-      desc: title,
-      create_time: 1_760_000_000,
-      author: {
-        uid: '10086001',
-        sec_uid: 'MS4wLjABAAAA_mock_author_video',
-        nickname: '自动化测试作者A',
-        unique_id: 'mock_author_a',
-      },
-      statistics: {
-        digg_count: 1280,
-        collect_count: 320,
-        comment_count: 45,
-        share_count: 19,
-      },
-      video: {
-        width: 1080,
-        height: 1920,
-        duration: 15_200,
-        origin_cover: {
-          url_list: [
-            'https://p3-pc-sign.douyinpic.com/mock-cover-video.heic',
-            `https://p3-pc-sign.douyinpic.com/${coverName}`,
-          ],
-        },
-        bit_rate: [
-          {
-            gear_name: 'hevc_1080p',
-            is_h265: 1,
-            bit_rate: 3_200_000,
-            play_addr: {
-              width: 1080,
-              height: 1920,
-              url_list: [
-                'https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=hevc_should_not_be_first',
-              ],
-            },
-          },
-          {
-            gear_name: 'normal_1080p',
-            is_h265: 0,
-            bit_rate: 1_800_000,
-            play_addr: {
-              width: 1080,
-              height: 1920,
-              url_list: [
-                `https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=${videoId}`,
-              ],
-            },
-          },
+    aweme_id: awemeId,
+    aweme_type: 0,
+    desc: title,
+    create_time: 1_760_000_000,
+    author: {
+      uid: '10086001',
+      sec_uid: 'MS4wLjABAAAA_mock_author_video',
+      nickname: '自动化测试作者A',
+      unique_id: 'mock_author_a',
+    },
+    statistics: {
+      digg_count: 1280,
+      collect_count: 320,
+      comment_count: 45,
+      share_count: 19,
+    },
+    video: {
+      width: 1080,
+      height: 1920,
+      duration: 15_200,
+      origin_cover: {
+        url_list: [
+          'https://p3-pc-sign.douyinpic.com/mock-cover-video.heic',
+          `https://p3-pc-sign.douyinpic.com/${coverName}`,
         ],
       },
+      bit_rate: [
+        {
+          gear_name: 'hevc_1080p',
+          is_h265: 1,
+          bit_rate: 3_200_000,
+          play_addr: {
+            width: 1080,
+            height: 1920,
+            url_list: [
+              'https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=hevc_should_not_be_first',
+            ],
+          },
+        },
+        {
+          gear_name: 'normal_1080p',
+          is_h265: 0,
+          bit_rate: 1_800_000,
+          play_addr: {
+            width: 1080,
+            height: 1920,
+            url_list: [
+              `https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=${videoId}`,
+            ],
+          },
+        },
+      ],
     },
+  };
+}
+
+function buildMockVideoDetailResponse(awemeId: string): Record<string, unknown> {
+  return {
+    status_code: 0,
+    aweme_detail: buildMockVideoAweme(awemeId),
   };
 }
 
@@ -141,7 +150,14 @@ const MOCK_GALLERY_DETAIL_RESPONSE = {
   },
 };
 
-function buildMockDouyinHtml(awemeId: string, kind: 'video' | 'note'): string {
+function buildMockDouyinHtml(
+  awemeId: string,
+  kind: 'video' | 'note',
+  options?: { autoFetchSelfProfile?: boolean },
+): string {
+  const autoProfileScript = options?.autoFetchSelfProfile
+    ? `void fetch('/aweme/v1/web/user/profile/self/').catch(() => undefined);`
+    : '';
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -154,6 +170,7 @@ function buildMockDouyinHtml(awemeId: string, kind: 'video' | 'note'): string {
         <video muted playsinline style="width: 360px; height: 640px;"></video>
         <button id="mock-load-detail" type="button">Load Detail</button>
         <button id="mock-native-collect" type="button">Native Collect</button>
+        <button id="mock-native-uncollect" type="button">Native Uncollect</button>
       </div>
     </main>
     <script>
@@ -172,12 +189,32 @@ function buildMockDouyinHtml(awemeId: string, kind: 'video' | 'note'): string {
         });
         return res.json();
       };
+      window.__mockTriggerNativeUncollect = async () => {
+        const res = await fetch('/aweme/v1/web/aweme/collect/?aweme_id=${awemeId}&action=0', {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: 'aweme_id=${awemeId}&action=0',
+        });
+        return res.json();
+      };
+      window.__mockTriggerPassiveListCollection = async (cursor = 0) => {
+        const res = await fetch('/aweme/v1/web/aweme/listcollection/?device_platform=webapp', {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: 'count=20&cursor=' + encodeURIComponent(String(cursor)),
+        });
+        return res.json();
+      };
       document.getElementById('mock-load-detail').addEventListener('click', () => {
         void window.__mockLoadDetail();
       });
       document.getElementById('mock-native-collect').addEventListener('click', () => {
         void window.__mockTriggerNativeCollect();
       });
+      document.getElementById('mock-native-uncollect').addEventListener('click', () => {
+        void window.__mockTriggerNativeUncollect();
+      });
+      ${autoProfileScript}
     </script>
   </body>
 </html>`;
@@ -218,9 +255,21 @@ interface CdpFetchPausedEvent {
   };
 }
 
+export interface MockLoggedInUser {
+  uid: string;
+  nickname: string;
+}
+
 export interface DouyinMockOptions {
   /** 可选钩子：在返回 CDN 媒体二进制前挂起等待，用于验证并发队列与图标进度状态 */
   beforeFulfillMedia?: (url: string) => Promise<void>;
+  /** 可选：返回当前登录账号，用于模拟已登录页面触发首次同步/弹窗 */
+  getLoggedInUser?: () => MockLoggedInUser | null;
+  /** 可选：自定义 `/aweme/v1/web/aweme/listcollection/` 响应（支持多页与风控模拟） */
+  handleListCollection?: (
+    cursor: string,
+    requestIndex: number,
+  ) => { status?: number; body: Record<string, unknown> };
 }
 
 /**
@@ -279,6 +328,7 @@ async function attachBrowserCdpCdnMock(
 
 export interface DouyinMockTracker {
   requestedMediaUrls: string[];
+  listCollectionRequests: number;
   dispose: () => Promise<void>;
 }
 
@@ -292,6 +342,7 @@ export async function installDouyinMockRoutes(
 ): Promise<DouyinMockTracker> {
   const tracker: DouyinMockTracker = {
     requestedMediaUrls: [],
+    listCollectionRequests: 0,
     dispose: async () => undefined,
   };
 
@@ -304,6 +355,53 @@ export async function installDouyinMockRoutes(
 
   await context.route('https://www.douyin.com/**', async (route: Route) => {
     const url = new URL(route.request().url());
+
+    if (url.pathname.startsWith('/aweme/v1/web/user/profile/self')) {
+      const user = options?.getLoggedInUser?.() ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify(
+          user
+            ? {
+                status_code: 0,
+                user: {
+                  uid: user.uid,
+                  nickname: user.nickname,
+                },
+              }
+            : {
+                status_code: 0,
+                user: {},
+              },
+        ),
+      });
+      return;
+    }
+
+    if (url.pathname.startsWith('/aweme/v1/web/aweme/listcollection')) {
+      tracker.listCollectionRequests += 1;
+      const bodyParams = new URLSearchParams(route.request().postData() ?? '');
+      const cursor =
+        bodyParams.get('cursor') ?? url.searchParams.get('cursor') ?? '0';
+      const custom = options?.handleListCollection?.(
+        cursor,
+        tracker.listCollectionRequests,
+      );
+      await route.fulfill({
+        status: custom?.status ?? 200,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify(
+          custom?.body ?? {
+            status_code: 0,
+            aweme_list: [],
+            has_more: 0,
+            cursor: 0,
+          },
+        ),
+      });
+      return;
+    }
 
     if (url.pathname.startsWith('/aweme/v1/web/aweme/detail')) {
       const awemeId = url.searchParams.get('aweme_id') ?? MOCK_VIDEO_AWEME_ID;
@@ -328,11 +426,15 @@ export async function installDouyinMockRoutes(
       return;
     }
 
+    const autoFetchSelfProfile = Boolean(options?.getLoggedInUser?.());
+
     if (url.pathname.startsWith(`/note/${MOCK_GALLERY_AWEME_ID}`)) {
       await route.fulfill({
         status: 200,
         contentType: 'text/html; charset=utf-8',
-        body: buildMockDouyinHtml(MOCK_GALLERY_AWEME_ID, 'note'),
+        body: buildMockDouyinHtml(MOCK_GALLERY_AWEME_ID, 'note', {
+          autoFetchSelfProfile,
+        }),
       });
       return;
     }
@@ -341,7 +443,9 @@ export async function installDouyinMockRoutes(
       await route.fulfill({
         status: 200,
         contentType: 'text/html; charset=utf-8',
-        body: buildMockDouyinHtml(MOCK_VIDEO_AWEME_ID, 'video'),
+        body: buildMockDouyinHtml(MOCK_VIDEO_AWEME_ID, 'video', {
+          autoFetchSelfProfile,
+        }),
       });
       return;
     }
@@ -349,7 +453,9 @@ export async function installDouyinMockRoutes(
     await route.fulfill({
       status: 200,
       contentType: 'text/html; charset=utf-8',
-      body: buildMockDouyinHtml(MOCK_VIDEO_AWEME_ID, 'video'),
+      body: buildMockDouyinHtml(MOCK_VIDEO_AWEME_ID, 'video', {
+        autoFetchSelfProfile,
+      }),
     });
   });
 

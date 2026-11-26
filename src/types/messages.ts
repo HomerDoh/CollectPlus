@@ -41,6 +41,48 @@ export interface CaptureItemMessage {
   tags?: string[];
 }
 
+export interface CaptureBatchItemsMessage {
+  target: 'background';
+  type: 'CAPTURE_BATCH_ITEMS';
+  payloads: CapturedPayload[];
+}
+
+export interface UncollectItemsMessage {
+  target: 'background';
+  type: 'UNCOLLECT_ITEMS';
+  platform: PlatformId;
+  sourceIds: string[];
+}
+
+export interface CheckAccountSyncActionMessage {
+  target: 'background';
+  type: 'CHECK_ACCOUNT_SYNC_ACTION';
+  platform: PlatformId;
+  accountId: string;
+}
+
+export interface BeginManualAccountSyncMessage {
+  target: 'background';
+  type: 'BEGIN_MANUAL_ACCOUNT_SYNC';
+  platform: PlatformId;
+  accountId: string;
+}
+
+export type AccountSyncReportOutcome =
+  | 'synced'
+  | 'dismissed'
+  | 'fallback_needed'
+  | 'failed';
+
+export interface ReportAccountSyncResultMessage {
+  target: 'background';
+  type: 'REPORT_ACCOUNT_SYNC_RESULT';
+  platform: PlatformId;
+  accountId: string;
+  outcome: AccountSyncReportOutcome;
+  syncedCount?: number;
+}
+
 export interface GetStatusSummaryMessage {
   target: 'background';
   type: 'GET_STATUS_SUMMARY';
@@ -116,6 +158,11 @@ export interface OffscreenErrorMessage {
 /** 所有发往 Background 的消息判别联合 */
 export type BackgroundMessage =
   | CaptureItemMessage
+  | CaptureBatchItemsMessage
+  | UncollectItemsMessage
+  | CheckAccountSyncActionMessage
+  | BeginManualAccountSyncMessage
+  | ReportAccountSyncResultMessage
   | GetStatusSummaryMessage
   | TriggerActiveTabCaptureMessage
   | RetryDownloadTaskMessage
@@ -141,6 +188,34 @@ export interface BackgroundResponseMap {
         item: CollectionItemRecord;
       }
     | ErrorResult;
+  CAPTURE_BATCH_ITEMS:
+    | {
+        ok: true;
+        capturedCount: number;
+        deduplicatedCount: number;
+      }
+    | ErrorResult;
+  UNCOLLECT_ITEMS:
+    | {
+        ok: true;
+        removedItemIds: string[];
+        skipped: boolean;
+      }
+    | ErrorResult;
+  CHECK_ACCOUNT_SYNC_ACTION:
+    | {
+        ok: true;
+        action: 'auto_sync' | 'prompt' | 'none';
+        passiveFallbackActive: boolean;
+      }
+    | ErrorResult;
+  BEGIN_MANUAL_ACCOUNT_SYNC:
+    | {
+        ok: true;
+        started: boolean;
+      }
+    | ErrorResult;
+  REPORT_ACCOUNT_SYNC_RESULT: { ok: true } | ErrorResult;
   GET_STATUS_SUMMARY:
     | {
         ok: true;
@@ -220,6 +295,8 @@ export interface ContentPreferencesUpdatedMessage {
   target: 'content';
   type: 'CONTENT_PREFERENCES_UPDATED';
   floatingButtonEnabled: boolean;
+  autoSyncAllCollections: boolean;
+  syncUncollectToPlugin: boolean;
 }
 
 /** 所有发往 Content Script 的消息判别联合 */
@@ -250,6 +327,11 @@ const BACKGROUND_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   BackgroundRequestType
 >([
   'CAPTURE_ITEM',
+  'CAPTURE_BATCH_ITEMS',
+  'UNCOLLECT_ITEMS',
+  'CHECK_ACCOUNT_SYNC_ACTION',
+  'BEGIN_MANUAL_ACCOUNT_SYNC',
+  'REPORT_ACCOUNT_SYNC_RESULT',
   'GET_STATUS_SUMMARY',
   'TRIGGER_ACTIVE_TAB_CAPTURE',
   'RETRY_DOWNLOAD_TASK',

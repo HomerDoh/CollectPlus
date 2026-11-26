@@ -102,6 +102,20 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
       await expect(fabButton).toBeVisible();
       await expect(secondDouyinPage.locator('button.cp-fab-btn')).toBeVisible();
 
+      // 验证新增两个同步开关默认均为关闭，并切换后验证持久化
+      const autoSyncAllSwitch = libraryPage.getByRole('switch', {
+        name: '自动同步全部收藏',
+      });
+      const syncUncollectSwitch = libraryPage.getByRole('switch', {
+        name: '取消收藏时同步至插件',
+      });
+      await expect(autoSyncAllSwitch).toHaveAttribute('aria-checked', 'false');
+      await expect(syncUncollectSwitch).toHaveAttribute('aria-checked', 'false');
+      await autoSyncAllSwitch.click();
+      await syncUncollectSwitch.click();
+      await expect(autoSyncAllSwitch).toHaveAttribute('aria-checked', 'true');
+      await expect(syncUncollectSwitch).toHaveAttribute('aria-checked', 'true');
+
       // 修改并发数、自动同步与默认显示偏好并验证刷新后持久化
       const concurrencyGroup = libraryPage.getByRole('group', {
         name: '最大并发下载任务数',
@@ -179,6 +193,16 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
           name: '打开控制台时自动同步暂存内容',
         }),
       ).toHaveAttribute('aria-checked', 'false');
+      await expect(
+        libraryPage.getByRole('switch', {
+          name: '自动同步全部收藏',
+        }),
+      ).toHaveAttribute('aria-checked', 'true');
+      await expect(
+        libraryPage.getByRole('switch', {
+          name: '取消收藏时同步至插件',
+        }),
+      ).toHaveAttribute('aria-checked', 'true');
 
       expect(pageErrors).toEqual([]);
     } finally {

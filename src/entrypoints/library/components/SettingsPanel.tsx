@@ -464,6 +464,67 @@ export function SettingsPanel({
                 />
               </div>
 
+              {/* 自动同步全部收藏（总开关） */}
+              <div className="flex items-center justify-between gap-4 py-3.5">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <label
+                      htmlFor="setting-auto-sync-all"
+                      className="block text-xs font-semibold text-slate-900"
+                    >
+                      自动同步全部收藏
+                    </label>
+                    <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200">
+                      总开关
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    开启后，首次进入支持的已登录网页将自动同步账号全部收藏数据；关闭时，首次进入将弹窗询问是否同步
+                  </p>
+                </div>
+                <ToggleSwitch
+                  id="setting-auto-sync-all"
+                  checked={preferences.autoSyncAllCollections}
+                  ariaLabel="自动同步全部收藏"
+                  onChange={(checked) =>
+                    void handlePatchPreferences(
+                      { autoSyncAllCollections: checked },
+                      checked
+                        ? '已开启自动同步全部收藏'
+                        : '已关闭自动同步全部收藏',
+                    )
+                  }
+                />
+              </div>
+
+              {/* 取消收藏时同步至插件 */}
+              <div className="flex items-center justify-between gap-4 py-3.5">
+                <div className="min-w-0">
+                  <label
+                    htmlFor="setting-sync-uncollect"
+                    className="block text-xs font-semibold text-slate-900"
+                  >
+                    取消收藏时同步至插件
+                  </label>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    开启后，在原平台取消收藏某个作品时，插件内对应条目将自动移入回收站并取消未完成的下载任务
+                  </p>
+                </div>
+                <ToggleSwitch
+                  id="setting-sync-uncollect"
+                  checked={preferences.syncUncollectToPlugin}
+                  ariaLabel="取消收藏时同步至插件"
+                  onChange={(checked) =>
+                    void handlePatchPreferences(
+                      { syncUncollectToPlugin: checked },
+                      checked
+                        ? '已开启取消收藏同步至插件'
+                        : '已关闭取消收藏同步至插件',
+                    )
+                  }
+                />
+              </div>
+
               {/* 快捷收藏默认保存文件夹 */}
               <div className="flex flex-wrap items-center justify-between gap-4 py-3.5">
                 <div className="min-w-0">

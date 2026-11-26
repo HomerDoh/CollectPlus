@@ -276,6 +276,10 @@ export interface UserPreferences {
   autoSyncOnLibraryOpen: boolean;
   /** 是否在支持的平台页面显示右下角浮动收藏按钮 */
   floatingButtonEnabled: boolean;
+  /** 自动同步全部收藏（默认关闭，跨平台全量同步总开关） */
+  autoSyncAllCollections: boolean;
+  /** 取消收藏时同步至插件（默认关闭，开启后原站取消收藏自动移入回收站） */
+  syncUncollectToPlugin: boolean;
   /** 快捷收藏默认归属的文件夹 ID */
   defaultFolderId: string | null;
   /** 最大并发下载任务数 */
@@ -284,6 +288,19 @@ export interface UserPreferences {
   defaultViewMode: LibraryViewMode;
   /** 控制台默认排序方式 */
   defaultSortBy: LibrarySortOption;
+}
+
+/** 单个已登录平台账号的全量收藏首次同步状态 */
+export type PlatformAccountSyncStatus = 'synced' | 'dismissed';
+
+/** 按平台 + 非敏感账号 ID 持久化的全量收藏同步记录（严禁存储 Cookie/Token） */
+export interface PlatformAccountSyncEntry {
+  platform: PlatformId;
+  accountId: string;
+  status: PlatformAccountSyncStatus;
+  updatedAt: number;
+  lastSyncedAt?: number;
+  lastSyncedCount?: number;
 }
 
 /** IndexedDB `settings` 表：已绑定的 CollectVault 目录句柄 */
@@ -314,6 +331,13 @@ export interface UserPreferencesSetting {
   updatedAt: number;
 }
 
+/** IndexedDB `settings` 表：按 `${platform}:${accountId}` 记录的各账号全量收藏同步状态 */
+export interface PlatformAccountSyncStateSetting {
+  key: 'platform_account_sync_states';
+  value: Record<string, PlatformAccountSyncEntry>;
+  updatedAt: number;
+}
+
 /**
  * IndexedDB `settings` 表的强类型判别联合记录。
  * 通过 `key` 精确区分句柄、配置及偏好值类型。
@@ -322,7 +346,8 @@ export type SettingRecord =
   | VaultDirectoryHandleSetting
   | VaultConfigSetting
   | LastSyncTimestampSetting
-  | UserPreferencesSetting;
+  | UserPreferencesSetting
+  | PlatformAccountSyncStateSetting;
 
 /** 所有受支持的设置键联合类型 */
 export type SettingKey = SettingRecord['key'];

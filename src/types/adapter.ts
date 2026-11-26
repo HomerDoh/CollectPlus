@@ -18,6 +18,7 @@ export const CAPTURE_TRIGGER_SOURCES = [
   'hotkey',
   'floating_button',
   'popup',
+  'auto_sync',
 ] as const;
 
 /** 触发采集的来源通道 */
@@ -169,15 +170,117 @@ export interface CurrentItemResponseMessage {
   triggerSource: CaptureTriggerSource;
 }
 
+/** Main World 捕获到用户在原站触发取消收藏动作 */
+export interface NativeUncollectCapturedMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'main-to-content';
+  type: 'NATIVE_UNCOLLECT_CAPTURED';
+  platform: PlatformId;
+  sourceIds: string[];
+}
+
+/** Isolated Content Script 主动查询当前页面是否已检测到登录账号 */
+export interface RequestLoginStateMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'content-to-main';
+  type: 'REQUEST_LOGIN_STATE';
+}
+
+/** Main World 上报当前页面已登录账号（仅非敏感 ID 与可选昵称） */
+export interface LoginStateDetectedMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'main-to-content';
+  type: 'LOGIN_STATE_DETECTED';
+  platform: PlatformId;
+  accountId: string;
+  accountName?: string;
+}
+
+/** Isolated Content Script 请求 Main World 启动全量收藏分页拉取 */
+export interface RequestFullCollectionSyncMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'content-to-main';
+  type: 'REQUEST_FULL_COLLECTION_SYNC';
+  syncId: string;
+}
+
+/** Isolated Content Script 请求中止进行中的全量收藏拉取 */
+export interface CancelFullCollectionSyncMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'content-to-main';
+  type: 'CANCEL_FULL_COLLECTION_SYNC';
+  syncId: string;
+}
+
+/** Main World 向上游推送一页全量收藏原始数据 */
+export interface CollectionSyncBatchMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'main-to-content';
+  type: 'COLLECTION_SYNC_BATCH';
+  syncId: string;
+  platform: PlatformId;
+  rawItems: unknown[];
+  pageIndex: number;
+  hasMore: boolean;
+}
+
+/** 全量收藏同步结束状态 */
+export type CollectionSyncDoneStatus =
+  | 'completed'
+  | 'fallback_needed'
+  | 'cancelled'
+  | 'error';
+
+/** Main World 通知全量收藏拉取结束（正常完成、触发风控需被动兜底、取消或异常） */
+export interface CollectionSyncDoneMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'main-to-content';
+  type: 'COLLECTION_SYNC_DONE';
+  syncId: string;
+  platform: PlatformId;
+  totalFetched: number;
+  status: CollectionSyncDoneStatus;
+  error?: string;
+  fallbackUrl?: string;
+}
+
+/** Main World 被动旁路捕获到宿主页面自然加载的收藏列表响应 */
+export interface PassiveCollectionListCapturedMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'main-to-content';
+  type: 'PASSIVE_COLLECTION_LIST_CAPTURED';
+  platform: PlatformId;
+  rawItems: unknown[];
+  hasMore: boolean;
+}
+
 /** Main World ↔ Isolated Content Script 强类型桥接消息判别联合 */
 export type PageBridgeMessage =
   | BridgeReadyMessage
   | NativeCollectCapturedMessage
+  | NativeUncollectCapturedMessage
   | RequestCurrentItemMessage
-  | CurrentItemResponseMessage;
+  | CurrentItemResponseMessage
+  | RequestLoginStateMessage
+  | LoginStateDetectedMessage
+  | RequestFullCollectionSyncMessage
+  | CancelFullCollectionSyncMessage
+  | CollectionSyncBatchMessage
+  | CollectionSyncDoneMessage
+  | PassiveCollectionListCapturedMessage;
+
+const COLLECTION_SYNC_DONE_STATUSES: ReadonlySet<string> = new Set<
+  CollectionSyncDoneStatus
+>(['completed', 'fallback_needed', 'cancelled', 'error']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+  );
 }
 
 /**
@@ -209,6 +312,13 @@ export function isPageBridgeMessage(data: unknown): data is PageBridgeMessage {
         (data.sourceId === undefined || typeof data.sourceId === 'string')
       );
 
+    case 'NATIVE_UNCOLLECT_CAPTURED':
+      return (
+        direction === 'main-to-content' &&
+        isPlatformId(data.platform) &&
+        isStringArray(data.sourceIds)
+      );
+
     case 'REQUEST_CURRENT_ITEM':
       return (
         direction === 'content-to-main' &&
@@ -224,6 +334,58 @@ export function isPageBridgeMessage(data: unknown): data is PageBridgeMessage {
         'rawData' in data &&
         (data.error === undefined || typeof data.error === 'string') &&
         isCaptureTriggerSource(data.triggerSource)
+      );
+
+    case 'REQUEST_LOGIN_STATE':
+      return direction === 'content-to-main';
+
+    case 'LOGIN_STATE_DETECTED':
+      return (
+        direction === 'main-to-content' &&
+        isPlatformId(data.platform) &&
+        typeof data.accountId === 'string' &&
+        data.accountId.trim().length > 0 &&
+        (data.accountName === undefined || typeof data.accountName === 'string')
+      );
+
+    case 'REQUEST_FULL_COLLECTION_SYNC':
+      return (
+        direction === 'content-to-main' && typeof data.syncId === 'string'
+      );
+
+    case 'CANCEL_FULL_COLLECTION_SYNC':
+      return (
+        direction === 'content-to-main' && typeof data.syncId === 'string'
+      );
+
+    case 'COLLECTION_SYNC_BATCH':
+      return (
+        direction === 'main-to-content' &&
+        typeof data.syncId === 'string' &&
+        isPlatformId(data.platform) &&
+        Array.isArray(data.rawItems) &&
+        typeof data.pageIndex === 'number' &&
+        typeof data.hasMore === 'boolean'
+      );
+
+    case 'COLLECTION_SYNC_DONE':
+      return (
+        direction === 'main-to-content' &&
+        typeof data.syncId === 'string' &&
+        isPlatformId(data.platform) &&
+        typeof data.totalFetched === 'number' &&
+        typeof data.status === 'string' &&
+        COLLECTION_SYNC_DONE_STATUSES.has(data.status) &&
+        (data.error === undefined || typeof data.error === 'string') &&
+        (data.fallbackUrl === undefined || typeof data.fallbackUrl === 'string')
+      );
+
+    case 'PASSIVE_COLLECTION_LIST_CAPTURED':
+      return (
+        direction === 'main-to-content' &&
+        isPlatformId(data.platform) &&
+        Array.isArray(data.rawItems) &&
+        typeof data.hasMore === 'boolean'
       );
 
     default:

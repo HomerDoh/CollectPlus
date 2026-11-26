@@ -11,9 +11,14 @@ import {
   isPageBridgeMessage,
   PAGE_BRIDGE_CHANNEL,
   type BridgeReadyMessage,
+  type CollectionSyncBatchMessage,
+  type CollectionSyncDoneMessage,
   type CurrentItemResponseMessage,
+  type LoginStateDetectedMessage,
   type NativeCollectCapturedMessage,
+  type NativeUncollectCapturedMessage,
   type PageBridgeMessage,
+  type PassiveCollectionListCapturedMessage,
   type RequestCurrentItemMessage,
 } from '../../types/adapter.ts';
 
@@ -25,11 +30,20 @@ const MAX_HARVEST_DEPTH = 8;
 const MAX_HARVEST_NODES = 4000;
 const MAX_FIBER_ASCENT_DEPTH = 35;
 const MAX_DOM_PARENT_ASCENT = 16;
+const FULL_SYNC_PAGE_SIZE = 20;
+const MAX_FULL_SYNC_PAGES = 200;
+const FULL_SYNC_MIN_DELAY_MS = 1500;
+const FULL_SYNC_JITTER_MS = 700;
+const DOUYIN_LIST_COLLECTION_ENDPOINT =
+  '/aweme/v1/web/aweme/listcollection/?device_platform=webapp&aid=6383&channel=channel_pc_web&publish_video_strategy_type=2';
+const DOUYIN_FALLBACK_COLLECTION_URL =
+  'https://www.douyin.com/user/self?showTab=favorite_collection';
 
 const DOUYIN_API_MARKERS: readonly string[] = [
   '/aweme/v1/web/',
   '/aweme/v2/web/',
   '/web/api/',
+  '/passport/web/account/info',
 ];
 
 const FIBER_PROP_CHILD_KEYS: readonly string[] = [
@@ -63,6 +77,17 @@ interface XhrRequestMeta {
   collectKind: CollectEndpointKind | null;
   bodyParams: Map<string, string>;
 }
+
+interface DetectedAccount {
+  accountId: string;
+  accountName?: string;
+}
+
+let detectedAccount: DetectedAccount | null = null;
+let lastEmittedAccountId: string | null = null;
+let activeSyncId: string | null = null;
+let activeSyncAbortController: AbortController | null = null;
+let internalSyncFetchInFlight = 0;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -305,6 +330,414 @@ function classifyCollectEndpoint(rawUrl: string): CollectEndpointKind | null {
   return null;
 }
 
+function isUserProfileSelfUrl(rawUrl: string): boolean {
+  const parsed = resolveRequestUrl(rawUrl);
+  if (!parsed) {
+    return false;
+  }
+  const pathname = parsed.pathname;
+  return (
+    /\/aweme\/v1\/web\/user\/profile\/self(?:\/|$)/.test(pathname) ||
+    /\/passport\/web\/account\/info(?:\/|$)/.test(pathname)
+  );
+}
+
+function isCollectionListUrl(rawUrl: string): boolean {
+  const parsed = resolveRequestUrl(rawUrl);
+  if (!parsed) {
+    return false;
+  }
+  const pathname = parsed.pathname;
+  return (
+    /\/aweme\/v1\/web\/aweme\/listcollection(?:\/|$)/.test(pathname) ||
+    /\/aweme\/v1\/web\/collects\/video\/list(?:\/|$)/.test(pathname)
+  );
+}
+
+function normalizeValidAccountId(value: unknown): string | null {
+  let raw = '';
+  if (typeof value === 'string') {
+    raw = value.trim();
+  } else if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    raw = String(Math.trunc(value));
+  }
+  if (
+    !raw ||
+    raw === '0' ||
+    raw.toLowerCase() === 'null' ||
+    raw.toLowerCase() === 'undefined'
+  ) {
+    return null;
+  }
+  return raw;
+}
+
+function extractAccountFromUserObject(
+  userObj: UnknownRecord,
+): DetectedAccount | null {
+  const accountId =
+    normalizeValidAccountId(userObj.uid) ??
+    normalizeValidAccountId(userObj.user_id_str) ??
+    normalizeValidAccountId(userObj.user_id) ??
+    normalizeValidAccountId(userObj.sec_uid) ??
+    normalizeValidAccountId(userObj.secUid);
+
+  if (!accountId) {
+    return null;
+  }
+
+  const rawName = userObj.nickname ?? userObj.screen_name ?? userObj.name;
+  const accountName =
+    typeof rawName === 'string' && rawName.trim().length > 0
+      ? rawName.trim()
+      : undefined;
+
+  return accountName !== undefined ? { accountId, accountName } : { accountId };
+}
+
+function extractAccountFromProfileResponse(
+  payload: unknown,
+): DetectedAccount | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+  if (!isResponseStatusSuccess(payload)) {
+    return null;
+  }
+
+  if (isRecord(payload.user)) {
+    const found = extractAccountFromUserObject(payload.user);
+    if (found) {
+      return found;
+    }
+  }
+
+  if (isRecord(payload.data)) {
+    if (isRecord(payload.data.user)) {
+      const found = extractAccountFromUserObject(payload.data.user);
+      if (found) {
+        return found;
+      }
+    }
+    const found = extractAccountFromUserObject(payload.data);
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
+function extractLoggedInAccountFromSsrTree(
+  payload: unknown,
+): DetectedAccount | null {
+  if (typeof payload !== 'object' || payload === null) {
+    return null;
+  }
+
+  const visited = new WeakSet<object>();
+  let visitedCount = 0;
+
+  const walk = (node: unknown, depth: number): DetectedAccount | null => {
+    if (
+      depth > 6 ||
+      visitedCount >= 1200 ||
+      typeof node !== 'object' ||
+      node === null
+    ) {
+      return null;
+    }
+    if (visited.has(node)) {
+      return null;
+    }
+    visited.add(node);
+    visitedCount += 1;
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = walk(item, depth + 1);
+        if (found) {
+          return found;
+        }
+      }
+      return null;
+    }
+
+    if (!isRecord(node)) {
+      return null;
+    }
+
+    // 仅当 SSR 状态显式声明 isLogin === true 时提取，避免误将作品作者 uid 识别为当前登录账号
+    if (node.isLogin === true) {
+      const candidates = [node.info, node.userInfo, node.user, node];
+      for (const candidate of candidates) {
+        if (isRecord(candidate)) {
+          const found = extractAccountFromUserObject(candidate);
+          if (found) {
+            return found;
+          }
+        }
+      }
+    }
+
+    for (const value of Object.values(node)) {
+      if (typeof value === 'object' && value !== null) {
+        const found = walk(value, depth + 1);
+        if (found) {
+          return found;
+        }
+      }
+    }
+
+    return null;
+  };
+
+  return walk(payload, 0);
+}
+
+function notifyLoginState(account: DetectedAccount, force = false): void {
+  detectedAccount = account;
+  if (!force && lastEmittedAccountId === account.accountId) {
+    return;
+  }
+  lastEmittedAccountId = account.accountId;
+
+  const message: LoginStateDetectedMessage = {
+    channel: PAGE_BRIDGE_CHANNEL,
+    direction: 'main-to-content',
+    type: 'LOGIN_STATE_DETECTED',
+    platform: 'douyin',
+    accountId: account.accountId,
+    ...(account.accountName !== undefined
+      ? { accountName: account.accountName }
+      : {}),
+  };
+  postBridgeMessage(message);
+}
+
+function extractAwemeListFromCollectionPayload(
+  payload: unknown,
+): { rawItems: UnknownRecord[]; hasMore: boolean; nextCursor: string | number | null } | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+  if (!isResponseStatusSuccess(payload)) {
+    return null;
+  }
+
+  const rawList = Array.isArray(payload.aweme_list)
+    ? payload.aweme_list
+    : Array.isArray(payload.awemeList)
+      ? payload.awemeList
+      : null;
+
+  if (rawList === null) {
+    return null;
+  }
+
+  const rawItems: UnknownRecord[] = [];
+  for (const entry of rawList) {
+    if (isHarvestableAweme(entry)) {
+      rawItems.push(entry);
+    }
+  }
+
+  const hasMoreRaw = payload.has_more ?? payload.hasMore;
+  const hasMore =
+    hasMoreRaw === 1 || hasMoreRaw === true || hasMoreRaw === '1';
+
+  const cursorRaw = payload.cursor;
+  const nextCursor =
+    typeof cursorRaw === 'string' ||
+    (typeof cursorRaw === 'number' && Number.isFinite(cursorRaw))
+      ? cursorRaw
+      : null;
+
+  return { rawItems, hasMore, nextCursor };
+}
+
+function handlePassiveCollectionListResponse(payload: unknown): void {
+  const extracted = extractAwemeListFromCollectionPayload(payload);
+  if (!extracted || extracted.rawItems.length === 0) {
+    return;
+  }
+
+  const message: PassiveCollectionListCapturedMessage = {
+    channel: PAGE_BRIDGE_CHANNEL,
+    direction: 'main-to-content',
+    type: 'PASSIVE_COLLECTION_LIST_CAPTURED',
+    platform: 'douyin',
+    rawItems: extracted.rawItems,
+    hasMore: extracted.hasMore,
+  };
+  postBridgeMessage(message);
+}
+
+function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function runFullCollectionSync(syncId: string): Promise<void> {
+  if (activeSyncId !== null) {
+    return;
+  }
+
+  const controller = new AbortController();
+  activeSyncId = syncId;
+  activeSyncAbortController = controller;
+
+  let cursor: string | number = 0;
+  let totalFetched = 0;
+
+  const emitDone = (
+    status: CollectionSyncDoneMessage['status'],
+    extra?: { error?: string; fallbackUrl?: string },
+  ): void => {
+    const doneMessage: CollectionSyncDoneMessage = {
+      channel: PAGE_BRIDGE_CHANNEL,
+      direction: 'main-to-content',
+      type: 'COLLECTION_SYNC_DONE',
+      syncId,
+      platform: 'douyin',
+      totalFetched,
+      status,
+      ...(extra?.error !== undefined ? { error: extra.error } : {}),
+      ...(extra?.fallbackUrl !== undefined
+        ? { fallbackUrl: extra.fallbackUrl }
+        : {}),
+    };
+    postBridgeMessage(doneMessage);
+  };
+
+  try {
+    for (let pageIndex = 0; pageIndex < MAX_FULL_SYNC_PAGES; pageIndex += 1) {
+      if (controller.signal.aborted || activeSyncId !== syncId) {
+        emitDone('cancelled');
+        return;
+      }
+
+      if (pageIndex > 0) {
+        const delayMs =
+          FULL_SYNC_MIN_DELAY_MS +
+          Math.floor(Math.random() * FULL_SYNC_JITTER_MS);
+        await sleepAbortable(delayMs, controller.signal);
+      }
+
+      let parsedJson: unknown;
+      internalSyncFetchInFlight += 1;
+      try {
+        // 使用页面当前 window.fetch，复用宿主页已挂载的登录态与签名拦截，不逆向签名算法
+        const response = await window.fetch(DOUYIN_LIST_COLLECTION_ENDPOINT, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          },
+          body: `count=${FULL_SYNC_PAGE_SIZE}&cursor=${encodeURIComponent(String(cursor))}`,
+          signal: controller.signal,
+        });
+
+        if (response.status < 200 || response.status >= 300) {
+          emitDone('fallback_needed', {
+            error: `收藏列表接口返回异常状态（HTTP ${response.status}），已安全中止主动拉取。`,
+            fallbackUrl: DOUYIN_FALLBACK_COLLECTION_URL,
+          });
+          return;
+        }
+
+        const text = await response.text();
+        if (!text) {
+          emitDone('fallback_needed', {
+            error: '收藏列表接口返回空响应（可能触发风控校验），已安全中止主动拉取。',
+            fallbackUrl: DOUYIN_FALLBACK_COLLECTION_URL,
+          });
+          return;
+        }
+        parsedJson = JSON.parse(text);
+      } catch (error) {
+        if (controller.signal.aborted || activeSyncId !== syncId) {
+          emitDone('cancelled');
+          return;
+        }
+        emitDone('fallback_needed', {
+          error:
+            error instanceof Error && error.message
+              ? `主动拉取收藏列表受阻（${error.message}），已安全中止。`
+              : '主动拉取收藏列表受阻，已安全中止。',
+          fallbackUrl: DOUYIN_FALLBACK_COLLECTION_URL,
+        });
+        return;
+      } finally {
+        internalSyncFetchInFlight = Math.max(0, internalSyncFetchInFlight - 1);
+      }
+
+      const extracted = extractAwemeListFromCollectionPayload(parsedJson);
+      if (!extracted) {
+        emitDone('fallback_needed', {
+          error: '接口返回未通过校验或数据结构受限，已停止主动拉取。',
+          fallbackUrl: DOUYIN_FALLBACK_COLLECTION_URL,
+        });
+        return;
+      }
+
+      harvestAwemeObjects(parsedJson);
+
+      if (extracted.rawItems.length > 0) {
+        totalFetched += extracted.rawItems.length;
+        const batchMessage: CollectionSyncBatchMessage = {
+          channel: PAGE_BRIDGE_CHANNEL,
+          direction: 'main-to-content',
+          type: 'COLLECTION_SYNC_BATCH',
+          syncId,
+          platform: 'douyin',
+          rawItems: extracted.rawItems,
+          pageIndex,
+          hasMore: extracted.hasMore,
+        };
+        postBridgeMessage(batchMessage);
+      }
+
+      if (
+        !extracted.hasMore ||
+        extracted.nextCursor === null ||
+        String(extracted.nextCursor) === String(cursor)
+      ) {
+        break;
+      }
+      cursor = extracted.nextCursor;
+    }
+
+    emitDone('completed');
+  } catch (error) {
+    if (controller.signal.aborted || activeSyncId !== syncId) {
+      emitDone('cancelled');
+    } else {
+      emitDone('error', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  } finally {
+    if (activeSyncId === syncId) {
+      activeSyncId = null;
+      activeSyncAbortController = null;
+    }
+  }
+}
+
 function parseParamsFromString(rawText: string): Map<string, string> {
   const map = new Map<string, string>();
   const trimmed = rawText.trim();
@@ -430,18 +863,7 @@ function parseIdList(raw: string | undefined): string[] {
   return matches ? Array.from(new Set(matches)) : [];
 }
 
-function extractCollectedAwemeIds(
-  collectKind: CollectEndpointKind,
-  params: Map<string, string>,
-): string[] {
-  if (collectKind === 'aweme_collect') {
-    const action = params.get('action');
-    // 仅处理收藏动作 action=1，忽略取消收藏 action=0
-    if (action !== '1') {
-      return [];
-    }
-  }
-
+function extractAwemeIdsFromParams(params: Map<string, string>): string[] {
   const ids = new Set<string>();
   const singleId =
     params.get('aweme_id') ??
@@ -458,6 +880,20 @@ function extractCollectedAwemeIds(
   }
 
   return Array.from(ids);
+}
+
+function extractCollectedAwemeIds(
+  collectKind: CollectEndpointKind,
+  params: Map<string, string>,
+): string[] {
+  if (collectKind === 'aweme_collect') {
+    const action = params.get('action');
+    if (action !== '1') {
+      return [];
+    }
+  }
+
+  return extractAwemeIdsFromParams(params);
 }
 
 function isResponseStatusSuccess(payload: unknown): boolean {
@@ -778,6 +1214,23 @@ function handleNativeCollectSuccess(
   }
 
   const mergedParams = mergeRequestParams(rawUrl, bodyParams);
+
+  // 原站取消收藏（action=0）直接上报 sourceIds，不依赖 LRU 缓存命中
+  if (collectKind === 'aweme_collect' && mergedParams.get('action') === '0') {
+    const uncollectedIds = extractAwemeIdsFromParams(mergedParams);
+    if (uncollectedIds.length > 0) {
+      const uncollectMessage: NativeUncollectCapturedMessage = {
+        channel: PAGE_BRIDGE_CHANNEL,
+        direction: 'main-to-content',
+        type: 'NATIVE_UNCOLLECT_CAPTURED',
+        platform: 'douyin',
+        sourceIds: uncollectedIds,
+      };
+      postBridgeMessage(uncollectMessage);
+    }
+    return;
+  }
+
   const awemeIds = extractCollectedAwemeIds(collectKind, mergedParams);
   if (awemeIds.length === 0) {
     return;
@@ -862,6 +1315,10 @@ function scanInitialPageData(): void {
       const decoded = decodeURIComponent(rawText);
       const parsed: unknown = JSON.parse(decoded);
       harvestAwemeObjects(parsed);
+      const account = extractLoggedInAccountFromSsrTree(parsed);
+      if (account) {
+        notifyLoginState(account);
+      }
     }
   } catch {
     // 忽略首屏 RENDER_DATA 解码异常
@@ -871,6 +1328,10 @@ function scanInitialPageData(): void {
     const hostGlobal = globalThis as unknown as GlobalWithDouyinHook;
     if (hostGlobal._ROUTER_DATA !== undefined) {
       harvestAwemeObjects(hostGlobal._ROUTER_DATA);
+      const account = extractLoggedInAccountFromSsrTree(hostGlobal._ROUTER_DATA);
+      if (account) {
+        notifyLoginState(account);
+      }
     }
   } catch {
     // 忽略 _ROUTER_DATA 扫描异常
@@ -902,6 +1363,9 @@ function installFetchHook(): void {
     const requestUrl = getFetchRequestUrl(input);
     const isApi = isDouyinApiUrl(requestUrl);
     const collectKind = isApi ? classifyCollectEndpoint(requestUrl) : null;
+    const isProfileSelf = isApi && isUserProfileSelfUrl(requestUrl);
+    const isCollectionList =
+      isApi && internalSyncFetchInFlight === 0 && isCollectionListUrl(requestUrl);
 
     let bodyParamsPromise: Promise<Map<string, string>> | null = null;
     if (collectKind !== null) {
@@ -946,6 +1410,25 @@ function installFetchHook(): void {
             harvestAwemeObjects(parsedJson);
           } catch {
             // 静默吞掉解析异常
+          }
+
+          if (isProfileSelf) {
+            try {
+              const account = extractAccountFromProfileResponse(parsedJson);
+              if (account) {
+                notifyLoginState(account);
+              }
+            } catch {
+              // 静默吞掉登录态解析异常
+            }
+          }
+
+          if (isCollectionList && internalSyncFetchInFlight === 0) {
+            try {
+              handlePassiveCollectionListResponse(parsedJson);
+            } catch {
+              // 静默吞掉被动收藏列表解析异常
+            }
           }
 
           if (collectKind !== null) {
@@ -1058,6 +1541,20 @@ function installXhrHook(): void {
 
               harvestAwemeObjects(parsedJson);
 
+              if (isUserProfileSelfUrl(meta.url)) {
+                const account = extractAccountFromProfileResponse(parsedJson);
+                if (account) {
+                  notifyLoginState(account);
+                }
+              }
+
+              if (
+                internalSyncFetchInFlight === 0 &&
+                isCollectionListUrl(meta.url)
+              ) {
+                handlePassiveCollectionListResponse(parsedJson);
+              }
+
               if (meta.collectKind !== null) {
                 handleNativeCollectSuccess(
                   meta.collectKind,
@@ -1089,30 +1586,54 @@ function installBridgeMessageListener(): void {
     if (!isPageBridgeMessage(event.data)) {
       return;
     }
-    if (
-      event.data.direction !== 'content-to-main' ||
-      event.data.type !== 'REQUEST_CURRENT_ITEM'
-    ) {
+    if (event.data.direction !== 'content-to-main') {
       return;
     }
 
-    const request: RequestCurrentItemMessage = event.data;
-    const { rawData, error } = resolveCurrentItemRawData();
+    switch (event.data.type) {
+      case 'REQUEST_CURRENT_ITEM': {
+        const request: RequestCurrentItemMessage = event.data;
+        const { rawData, error } = resolveCurrentItemRawData();
 
-    const response: CurrentItemResponseMessage = {
-      channel: PAGE_BRIDGE_CHANNEL,
-      direction: 'main-to-content',
-      type: 'CURRENT_ITEM_RESPONSE',
-      requestId: request.requestId,
-      platform: 'douyin',
-      rawData,
-      triggerSource: request.triggerSource,
-    };
-    if (error !== undefined) {
-      response.error = error;
+        const response: CurrentItemResponseMessage = {
+          channel: PAGE_BRIDGE_CHANNEL,
+          direction: 'main-to-content',
+          type: 'CURRENT_ITEM_RESPONSE',
+          requestId: request.requestId,
+          platform: 'douyin',
+          rawData,
+          triggerSource: request.triggerSource,
+        };
+        if (error !== undefined) {
+          response.error = error;
+        }
+
+        postBridgeMessage(response);
+        break;
+      }
+
+      case 'REQUEST_LOGIN_STATE': {
+        if (!detectedAccount) {
+          scanInitialPageData();
+        }
+        if (detectedAccount) {
+          notifyLoginState(detectedAccount, true);
+        }
+        break;
+      }
+
+      case 'REQUEST_FULL_COLLECTION_SYNC': {
+        void runFullCollectionSync(event.data.syncId);
+        break;
+      }
+
+      case 'CANCEL_FULL_COLLECTION_SYNC': {
+        if (activeSyncId === event.data.syncId && activeSyncAbortController) {
+          activeSyncAbortController.abort();
+        }
+        break;
+      }
     }
-
-    postBridgeMessage(response);
   });
 }
 

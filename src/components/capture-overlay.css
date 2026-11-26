@@ -184,3 +184,237 @@
     transform: rotate(360deg);
   }
 }
+
+/* 首次进入已登录页面：全量同步询问弹窗与进度/兜底横幅（避开左下角悬浮按钮与右侧互动栏） */
+
+.cp-sync-prompt,
+.cp-sync-banner {
+  position: fixed;
+  left: 24px;
+  bottom: 76px;
+  width: 332px;
+  max-width: calc(100vw - 48px);
+  z-index: 2147483647;
+  pointer-events: auto;
+  border-radius: 14px;
+  border: 1px solid rgba(129, 140, 248, 0.36);
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  color: #f8fafc;
+  box-shadow:
+    0 16px 38px rgba(2, 6, 23, 0.56),
+    0 2px 10px rgba(79, 70, 229, 0.24);
+}
+
+.cp-sync-prompt {
+  padding: 14px 14px 12px;
+}
+
+.cp-sync-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.cp-sync-icon-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cp-sync-card-title-wrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.cp-sync-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
+  color: #f8fafc;
+}
+
+.cp-sync-card-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #94a3b8;
+  word-break: break-word;
+}
+
+.cp-sync-close-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.cp-sync-close-btn:hover {
+  background: rgba(148, 163, 184, 0.16);
+  color: #f8fafc;
+}
+
+.cp-sync-card-desc {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #cbd5e1;
+}
+
+.cp-sync-card-actions {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cp-sync-btn-secondary,
+.cp-sync-btn-primary {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.cp-sync-btn-secondary {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(30, 41, 59, 0.72);
+  color: #cbd5e1;
+}
+
+.cp-sync-btn-secondary:hover {
+  background: rgba(51, 65, 85, 0.9);
+  color: #f8fafc;
+}
+
+.cp-sync-btn-primary {
+  border: 1px solid rgba(129, 140, 248, 0.55);
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  color: #ffffff;
+}
+
+.cp-sync-btn-primary:hover {
+  background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+}
+
+.cp-sync-card-hint {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+  font-size: 11px;
+  line-height: 15px;
+  color: #94a3b8;
+}
+
+.cp-sync-banner {
+  padding: 11px 12px;
+}
+
+.cp-sync-banner--completed {
+  border-color: rgba(52, 211, 153, 0.42);
+}
+
+.cp-sync-banner--fallback,
+.cp-sync-banner--error {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
+.cp-sync-banner-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.cp-sync-banner-icon {
+  margin-top: 2px;
+  flex-shrink: 0;
+  color: #818cf8;
+  display: inline-flex;
+}
+
+.cp-sync-banner--completed .cp-sync-banner-icon {
+  color: #34d399;
+}
+
+.cp-sync-banner--fallback .cp-sync-banner-icon,
+.cp-sync-banner--error .cp-sync-banner-icon {
+  color: #fbbf24;
+}
+
+.cp-sync-banner-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.cp-sync-banner-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 17px;
+  color: #f8fafc;
+}
+
+.cp-sync-banner-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #cbd5e1;
+  word-break: break-word;
+}
+
+.cp-sync-cancel-btn {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(30, 41, 59, 0.8);
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.cp-sync-cancel-btn:hover {
+  background: rgba(51, 65, 85, 0.95);
+  color: #f8fafc;
+}
+
+.cp-sync-fallback-btn {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(245, 158, 11, 0.16);
+  color: #fde68a;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cp-sync-fallback-btn:hover {
+  background: rgba(245, 158, 11, 0.28);
+  color: #fef3c7;
+}

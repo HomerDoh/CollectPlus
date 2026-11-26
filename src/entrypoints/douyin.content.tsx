@@ -19,10 +19,16 @@ import {
 import {
   isPageBridgeMessage,
   PAGE_BRIDGE_CHANNEL,
+  type CancelFullCollectionSyncMessage,
   type CapturedPayload,
   type CaptureTriggerSource,
+  type CollectionSyncBatchMessage,
+  type CollectionSyncDoneMessage,
   type CurrentItemResponseMessage,
+  type PassiveCollectionListCapturedMessage,
   type RequestCurrentItemMessage,
+  type RequestFullCollectionSyncMessage,
+  type RequestLoginStateMessage,
 } from '../types/adapter.ts';
 import { isContentMessage, sendToBackground } from '../types/messages.ts';
 
@@ -90,6 +96,8 @@ function createOverlayStore(): {
   let snapshot: CaptureOverlaySnapshot = {
     isCapturing: false,
     floatingButtonEnabled: true,
+    syncPrompt: null,
+    syncBanner: null,
   };
 
   const listeners = new Set<() => void>();
@@ -135,9 +143,366 @@ export default defineContentScript({
     let isMainBridgeReady = false;
     let requestCounter = 0;
     let lastManualTriggerAt = 0;
+    let autoSyncAllCollections = false;
+    let currentAccount: { accountId: string; accountName?: string } | null =
+      null;
+    let activeSyncId: string | null = null;
+    let activeSyncFetched = 0;
+    let activeSyncAdded = 0;
+    let activeSyncDeduplicated = 0;
+    let activeSyncBatchQueue: Promise<void> = Promise.resolve();
+    let passiveFallbackActive = false;
+    let bannerAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
     const pendingRequests = new Map<string, PendingItemRequest>();
     const recentNativeCaptures = new Map<string, number>();
+
+    const postToMainWorld = (
+      message:
+        | RequestCurrentItemMessage
+        | RequestLoginStateMessage
+        | RequestFullCollectionSyncMessage
+        | CancelFullCollectionSyncMessage,
+    ): void => {
+      try {
+        window.postMessage(message, getBridgeTargetOrigin());
+      } catch {
+        // 忽略跨域或已销毁窗口 postMessage 异常
+      }
+    };
+
+    const clearBannerTimer = (): void => {
+      if (bannerAutoCloseTimer !== null) {
+        clearTimeout(bannerAutoCloseTimer);
+        bannerAutoCloseTimer = null;
+      }
+    };
+
+    const scheduleBannerAutoClose = (delayMs = 6000): void => {
+      clearBannerTimer();
+      bannerAutoCloseTimer = setTimeout(() => {
+        bannerAutoCloseTimer = null;
+        updateState((prev) =>
+          prev.syncBanner?.phase === 'completed'
+            ? { ...prev, syncBanner: null }
+            : prev,
+        );
+      }, delayMs);
+    };
+
+    const startFullCollectionSync = (): void => {
+      if (activeSyncId !== null) {
+        return;
+      }
+      requestCounter += 1;
+      const syncId = `cp-sync-${Date.now()}-${requestCounter}`;
+      activeSyncId = syncId;
+      activeSyncFetched = 0;
+      activeSyncAdded = 0;
+      activeSyncDeduplicated = 0;
+      activeSyncBatchQueue = Promise.resolve();
+      clearBannerTimer();
+
+      updateState((prev) => ({
+        ...prev,
+        syncPrompt: null,
+        syncBanner: {
+          phase: 'syncing',
+          fetchedCount: 0,
+          addedCount: 0,
+          deduplicatedCount: 0,
+        },
+      }));
+
+      postToMainWorld({
+        channel: PAGE_BRIDGE_CHANNEL,
+        direction: 'content-to-main',
+        type: 'REQUEST_FULL_COLLECTION_SYNC',
+        syncId,
+      });
+    };
+
+    const evaluateAccountSync = async (account: {
+      accountId: string;
+      accountName?: string;
+    }): Promise<void> => {
+      try {
+        const decision = await sendToBackground({
+          target: 'background',
+          type: 'CHECK_ACCOUNT_SYNC_ACTION',
+          platform: 'douyin',
+          accountId: account.accountId,
+        });
+        if (!decision || !decision.ok) {
+          return;
+        }
+        passiveFallbackActive = decision.passiveFallbackActive;
+
+        if (decision.action === 'auto_sync') {
+          startFullCollectionSync();
+        } else if (decision.action === 'prompt') {
+          updateState((prev) => ({
+            ...prev,
+            syncPrompt: {
+              platformLabel: '抖音',
+              ...(account.accountName !== undefined
+                ? { accountName: account.accountName }
+                : {}),
+            },
+          }));
+        }
+      } catch (error) {
+        console.warn('[Collect+] Failed to check account sync action:', error);
+      }
+    };
+
+    const handleConfirmFullSync = async (): Promise<void> => {
+      const account = currentAccount;
+      updateState((prev) => ({ ...prev, syncPrompt: null }));
+      if (!account) {
+        return;
+      }
+      try {
+        const res = await sendToBackground({
+          target: 'background',
+          type: 'BEGIN_MANUAL_ACCOUNT_SYNC',
+          platform: 'douyin',
+          accountId: account.accountId,
+        });
+        if (res && res.ok && res.started) {
+          startFullCollectionSync();
+        }
+      } catch (error) {
+        console.warn('[Collect+] Failed to begin manual full sync:', error);
+      }
+    };
+
+    const handleDismissFullSync = async (): Promise<void> => {
+      const account = currentAccount;
+      updateState((prev) => ({ ...prev, syncPrompt: null }));
+      if (!account) {
+        return;
+      }
+      await sendToBackground({
+        target: 'background',
+        type: 'REPORT_ACCOUNT_SYNC_RESULT',
+        platform: 'douyin',
+        accountId: account.accountId,
+        outcome: 'dismissed',
+      }).catch(() => undefined);
+    };
+
+    const handleCancelFullSync = (): void => {
+      if (!activeSyncId) {
+        return;
+      }
+      postToMainWorld({
+        channel: PAGE_BRIDGE_CHANNEL,
+        direction: 'content-to-main',
+        type: 'CANCEL_FULL_COLLECTION_SYNC',
+        syncId: activeSyncId,
+      });
+    };
+
+    const ingestRawItemsBatch = async (
+      rawItems: readonly unknown[],
+    ): Promise<{ added: number; deduplicated: number }> => {
+      const payloads: CapturedPayload[] = [];
+      for (const rawItem of rawItems) {
+        const normalized = douyinAdapter.normalizeRawData(rawItem, 'auto_sync');
+        if (normalized) {
+          payloads.push(normalized);
+        }
+      }
+      if (payloads.length === 0) {
+        return { added: 0, deduplicated: 0 };
+      }
+
+      const response = await sendToBackground({
+        target: 'background',
+        type: 'CAPTURE_BATCH_ITEMS',
+        payloads,
+      });
+      if (!response || !response.ok) {
+        return { added: 0, deduplicated: 0 };
+      }
+      return {
+        added: response.capturedCount,
+        deduplicated: response.deduplicatedCount,
+      };
+    };
+
+    const handleCollectionSyncBatch = (
+      message: CollectionSyncBatchMessage,
+    ): void => {
+      if (message.syncId !== activeSyncId) {
+        return;
+      }
+      const batchSyncId = message.syncId;
+      activeSyncBatchQueue = activeSyncBatchQueue.then(async () => {
+        if (activeSyncId !== batchSyncId) {
+          return;
+        }
+        const { added, deduplicated } = await ingestRawItemsBatch(
+          message.rawItems,
+        );
+        activeSyncFetched += message.rawItems.length;
+        activeSyncAdded += added;
+        activeSyncDeduplicated += deduplicated;
+
+        updateState((prev) => ({
+          ...prev,
+          syncBanner: {
+            phase: 'syncing',
+            fetchedCount: activeSyncFetched,
+            addedCount: activeSyncAdded,
+            deduplicatedCount: activeSyncDeduplicated,
+          },
+        }));
+      });
+    };
+
+    const handleCollectionSyncDone = async (
+      message: CollectionSyncDoneMessage,
+    ): Promise<void> => {
+      if (message.syncId !== activeSyncId) {
+        return;
+      }
+
+      // 等待所有批次入库完成后再上报同步结果与最终统计
+      await activeSyncBatchQueue;
+      if (activeSyncId !== message.syncId) {
+        return;
+      }
+      activeSyncId = null;
+
+      const account = currentAccount;
+      if (message.status === 'completed') {
+        if (account) {
+          await sendToBackground({
+            target: 'background',
+            type: 'REPORT_ACCOUNT_SYNC_RESULT',
+            platform: 'douyin',
+            accountId: account.accountId,
+            outcome: 'synced',
+            syncedCount: activeSyncAdded,
+          }).catch(() => undefined);
+        }
+        updateState((prev) => ({
+          ...prev,
+          syncBanner: {
+            phase: 'completed',
+            fetchedCount: activeSyncFetched,
+            addedCount: activeSyncAdded,
+            deduplicatedCount: activeSyncDeduplicated,
+          },
+        }));
+        scheduleBannerAutoClose();
+        return;
+      }
+
+      if (message.status === 'fallback_needed') {
+        passiveFallbackActive = true;
+        if (account) {
+          await sendToBackground({
+            target: 'background',
+            type: 'REPORT_ACCOUNT_SYNC_RESULT',
+            platform: 'douyin',
+            accountId: account.accountId,
+            outcome: 'fallback_needed',
+          }).catch(() => undefined);
+        }
+        updateState((prev) => ({
+          ...prev,
+          syncBanner: {
+            phase: 'fallback',
+            fetchedCount: activeSyncFetched,
+            addedCount: activeSyncAdded,
+            deduplicatedCount: activeSyncDeduplicated,
+            ...(message.error !== undefined ? { message: message.error } : {}),
+            ...(message.fallbackUrl !== undefined
+              ? { fallbackUrl: message.fallbackUrl }
+              : {}),
+          },
+        }));
+        return;
+      }
+
+      if (account) {
+        await sendToBackground({
+          target: 'background',
+          type: 'REPORT_ACCOUNT_SYNC_RESULT',
+          platform: 'douyin',
+          accountId: account.accountId,
+          outcome: 'failed',
+        }).catch(() => undefined);
+      }
+
+      if (message.status === 'cancelled') {
+        updateState((prev) => ({ ...prev, syncBanner: null }));
+      } else {
+        updateState((prev) => ({
+          ...prev,
+          syncBanner: {
+            phase: 'error',
+            fetchedCount: activeSyncFetched,
+            addedCount: activeSyncAdded,
+            deduplicatedCount: activeSyncDeduplicated,
+            ...(message.error !== undefined ? { message: message.error } : {}),
+          },
+        }));
+      }
+    };
+
+    const handlePassiveCollectionListCaptured = async (
+      message: PassiveCollectionListCapturedMessage,
+    ): Promise<void> => {
+      if (!passiveFallbackActive && !autoSyncAllCollections) {
+        return;
+      }
+      if (message.rawItems.length === 0) {
+        return;
+      }
+
+      const { added, deduplicated } = await ingestRawItemsBatch(
+        message.rawItems,
+      );
+      if (passiveFallbackActive && (added > 0 || deduplicated > 0)) {
+        updateState((prev) => ({
+          ...prev,
+          syncBanner: {
+            phase: 'completed',
+            fetchedCount: message.rawItems.length,
+            addedCount: added,
+            deduplicatedCount: deduplicated,
+            message: '已通过被动旁路同步本页收藏作品',
+          },
+        }));
+        scheduleBannerAutoClose();
+      }
+    };
+
+    const handleNativeUncollectCaptured = async (
+      sourceIds: readonly string[],
+    ): Promise<void> => {
+      if (sourceIds.length === 0) {
+        return;
+      }
+      // 取消收藏后清理短时收藏去重窗口，确保用户在 2 秒内误删后立即重新收藏不会被吞掉
+      for (const id of sourceIds) {
+        recentNativeCaptures.delete(id);
+      }
+      try {
+        await sendToBackground({
+          target: 'background',
+          type: 'UNCOLLECT_ITEMS',
+          platform: 'douyin',
+          sourceIds: [...sourceIds],
+        });
+      } catch (error) {
+        console.warn('[Collect+] Native uncollect sync failed:', error);
+      }
+    };
 
     const submitCapturedPayload = async (
       payload: CapturedPayload,
@@ -321,6 +686,47 @@ export default defineContentScript({
           );
           break;
         }
+
+        case 'NATIVE_UNCOLLECT_CAPTURED': {
+          isMainBridgeReady = true;
+          void handleNativeUncollectCaptured(event.data.sourceIds);
+          break;
+        }
+
+        case 'LOGIN_STATE_DETECTED': {
+          isMainBridgeReady = true;
+          const nextAccount = {
+            accountId: event.data.accountId,
+            ...(event.data.accountName !== undefined
+              ? { accountName: event.data.accountName }
+              : {}),
+          };
+          const isNewAccount =
+            currentAccount?.accountId !== nextAccount.accountId;
+          currentAccount = nextAccount;
+          if (isNewAccount) {
+            void evaluateAccountSync(nextAccount);
+          }
+          break;
+        }
+
+        case 'COLLECTION_SYNC_BATCH': {
+          isMainBridgeReady = true;
+          handleCollectionSyncBatch(event.data);
+          break;
+        }
+
+        case 'COLLECTION_SYNC_DONE': {
+          isMainBridgeReady = true;
+          void handleCollectionSyncDone(event.data);
+          break;
+        }
+
+        case 'PASSIVE_COLLECTION_LIST_CAPTURED': {
+          isMainBridgeReady = true;
+          void handlePassiveCollectionListCaptured(event.data);
+          break;
+        }
       }
     });
 
@@ -342,10 +748,21 @@ export default defineContentScript({
         }
 
         case 'CONTENT_PREFERENCES_UPDATED': {
+          const prevAutoSync = autoSyncAllCollections;
+          autoSyncAllCollections = message.autoSyncAllCollections;
           updateState((prev) => ({
             ...prev,
             floatingButtonEnabled: message.floatingButtonEnabled,
+            ...(message.autoSyncAllCollections ? { syncPrompt: null } : {}),
           }));
+          if (
+            !prevAutoSync &&
+            message.autoSyncAllCollections &&
+            currentAccount &&
+            activeSyncId === null
+          ) {
+            void evaluateAccountSync(currentAccount);
+          }
           sendResponse({ ok: true });
           return false;
         }
@@ -377,10 +794,20 @@ export default defineContentScript({
 
     window.addEventListener('keydown', keydownListener, true);
 
-    // 上下文失效时清理消息监听器、热键监听与挂起请求定时器
+    // 上下文失效时清理消息监听器、热键监听、挂起请求与进行中的全量同步
     ctx.onInvalidated(() => {
       chrome.runtime.onMessage.removeListener(runtimeMessageListener);
       window.removeEventListener('keydown', keydownListener, true);
+      clearBannerTimer();
+      if (activeSyncId !== null) {
+        postToMainWorld({
+          channel: PAGE_BRIDGE_CHANNEL,
+          direction: 'content-to-main',
+          type: 'CANCEL_FULL_COLLECTION_SYNC',
+          syncId: activeSyncId,
+        });
+        activeSyncId = null;
+      }
       for (const pending of pendingRequests.values()) {
         clearTimeout(pending.timer);
         pending.resolve(null);
@@ -393,6 +820,22 @@ export default defineContentScript({
       onTriggerCapture: () => {
         void triggerManualCapture('floating_button');
       },
+      onConfirmFullSync: () => {
+        void handleConfirmFullSync();
+      },
+      onDismissFullSync: () => {
+        void handleDismissFullSync();
+      },
+      onCancelFullSync: () => {
+        handleCancelFullSync();
+      },
+      onOpenFallbackPage: (url: string) => {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      },
+      onDismissSyncBanner: () => {
+        clearBannerTimer();
+        updateState((prev) => ({ ...prev, syncBanner: null }));
+      },
     };
 
     try {
@@ -401,6 +844,8 @@ export default defineContentScript({
         type: 'GET_USER_PREFERENCES',
       });
       if (prefResponse && prefResponse.ok) {
+        autoSyncAllCollections =
+          prefResponse.preferences.autoSyncAllCollections;
         updateState((prev) => ({
           ...prev,
           floatingButtonEnabled: prefResponse.preferences.floatingButtonEnabled,
@@ -428,5 +873,12 @@ export default defineContentScript({
     });
 
     ui.mount();
+
+    // 主动向 Main World 查询是否已捕获登录态，避免 document_start 广播早于监听器挂载
+    postToMainWorld({
+      channel: PAGE_BRIDGE_CHANNEL,
+      direction: 'content-to-main',
+      type: 'REQUEST_LOGIN_STATE',
+    });
   },
 });
