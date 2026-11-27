@@ -5,7 +5,11 @@
  * 防止 Background Service Worker 与 Offscreen Document 之间互相误消费广播消息。
  */
 
-import type { CapturedPayload, CaptureTriggerSource } from './adapter.ts';
+import type {
+  CapturedCommentInput,
+  CapturedPayload,
+  CaptureTriggerSource,
+} from './adapter.ts';
 import type {
   CollectionItemRecord,
   MediaAsset,
@@ -155,10 +159,37 @@ export interface OffscreenErrorMessage {
   retryable: boolean;
 }
 
+export interface SaveItemCommentsMessage {
+  target: 'background';
+  type: 'SAVE_ITEM_COMMENTS';
+  itemId: string;
+  platform: PlatformId;
+  sourceId: string;
+  comments: CapturedCommentInput[];
+  limit: number;
+}
+
+export interface OffscreenCommentsCompleteMessage {
+  target: 'background';
+  type: 'OFFSCREEN_COMMENTS_COMPLETE';
+  itemId: string;
+  commentsRelativePath: string;
+  savedCommentCount: number;
+  commentsSizeBytes: number;
+}
+
+export interface OffscreenCommentsErrorMessage {
+  target: 'background';
+  type: 'OFFSCREEN_COMMENTS_ERROR';
+  itemId: string;
+  error: string;
+}
+
 /** 所有发往 Background 的消息判别联合 */
 export type BackgroundMessage =
   | CaptureItemMessage
   | CaptureBatchItemsMessage
+  | SaveItemCommentsMessage
   | UncollectItemsMessage
   | CheckAccountSyncActionMessage
   | BeginManualAccountSyncMessage
@@ -172,7 +203,9 @@ export type BackgroundMessage =
   | NotifyPreferencesUpdatedMessage
   | OffscreenProgressMessage
   | OffscreenCompleteMessage
-  | OffscreenErrorMessage;
+  | OffscreenErrorMessage
+  | OffscreenCommentsCompleteMessage
+  | OffscreenCommentsErrorMessage;
 
 /** Background 消息类型名联合 */
 export type BackgroundRequestType = BackgroundMessage['type'];
@@ -238,6 +271,9 @@ export interface BackgroundResponseMap {
   OFFSCREEN_PROGRESS: { ok: true };
   OFFSCREEN_COMPLETE: { ok: true };
   OFFSCREEN_ERROR: { ok: true };
+  SAVE_ITEM_COMMENTS: { ok: true } | ErrorResult;
+  OFFSCREEN_COMMENTS_COMPLETE: { ok: true };
+  OFFSCREEN_COMMENTS_ERROR: { ok: true };
 }
 
 // ============================================================================
@@ -254,6 +290,16 @@ export interface OffscreenStartDownloadMessage {
   assets: MediaAsset[];
 }
 
+export interface OffscreenStageCommentsMessage {
+  target: 'offscreen';
+  type: 'OFFSCREEN_STAGE_COMMENTS';
+  itemId: string;
+  platform: PlatformId;
+  sourceId: string;
+  comments: CapturedCommentInput[];
+  limit: number;
+}
+
 export interface OffscreenAbortDownloadMessage {
   target: 'offscreen';
   type: 'OFFSCREEN_ABORT_DOWNLOAD';
@@ -268,6 +314,7 @@ export interface OffscreenPingMessage {
 /** 所有发往 Offscreen Document 的消息判别联合 */
 export type OffscreenMessage =
   | OffscreenStartDownloadMessage
+  | OffscreenStageCommentsMessage
   | OffscreenAbortDownloadMessage
   | OffscreenPingMessage;
 
@@ -277,6 +324,7 @@ export type OffscreenRequestType = OffscreenMessage['type'];
 /** Offscreen 各消息类型对应的响应映射表 */
 export interface OffscreenResponseMap {
   OFFSCREEN_START_DOWNLOAD: { ok: true } | ErrorResult;
+  OFFSCREEN_STAGE_COMMENTS: { ok: true } | ErrorResult;
   OFFSCREEN_ABORT_DOWNLOAD: { ok: true };
   OFFSCREEN_PING: { ok: true; ready: true };
 }
@@ -328,6 +376,7 @@ const BACKGROUND_MESSAGE_TYPES: ReadonlySet<string> = new Set<
 >([
   'CAPTURE_ITEM',
   'CAPTURE_BATCH_ITEMS',
+  'SAVE_ITEM_COMMENTS',
   'UNCOLLECT_ITEMS',
   'CHECK_ACCOUNT_SYNC_ACTION',
   'BEGIN_MANUAL_ACCOUNT_SYNC',
@@ -342,11 +391,18 @@ const BACKGROUND_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   'OFFSCREEN_PROGRESS',
   'OFFSCREEN_COMPLETE',
   'OFFSCREEN_ERROR',
+  'OFFSCREEN_COMMENTS_COMPLETE',
+  'OFFSCREEN_COMMENTS_ERROR',
 ]);
 
 const OFFSCREEN_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   OffscreenRequestType
->(['OFFSCREEN_START_DOWNLOAD', 'OFFSCREEN_ABORT_DOWNLOAD', 'OFFSCREEN_PING']);
+>([
+  'OFFSCREEN_START_DOWNLOAD',
+  'OFFSCREEN_STAGE_COMMENTS',
+  'OFFSCREEN_ABORT_DOWNLOAD',
+  'OFFSCREEN_PING',
+]);
 
 const CONTENT_MESSAGE_TYPES: ReadonlySet<string> = new Set<ContentRequestType>([
   'CONTENT_TRIGGER_CAPTURE',

@@ -15,6 +15,7 @@ import {
   Images,
   Loader2,
   Maximize2,
+  MessageSquare,
   Plus,
   RotateCcw,
   Save,
@@ -41,6 +42,7 @@ import {
   platformMeta,
   syncStatusMeta,
 } from '../utils/format.ts';
+import { ItemCommentsPanel } from './ItemCommentsPanel.tsx';
 
 export interface ItemEditPatch {
   title: string;
@@ -161,6 +163,9 @@ export function ItemDetailDrawer({
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [reloadTick, setReloadTick] = useState(0);
   const [authorizing, setAuthorizing] = useState(false);
+  const [activeRightTab, setActiveRightTab] = useState<'details' | 'comments'>(
+    'details',
+  );
 
   // 元数据编辑表单状态
   const [draftTitle, setDraftTitle] = useState(item.title);
@@ -185,10 +190,11 @@ export function ItemDetailDrawer({
     setTagInput('');
   }, [item.id, item.updatedAt, item.title, item.folderId, item.tags, item.note]);
 
-  // 仅在切换不同条目时重置图集页码与保存反馈提示，避免保存后 liveQuery 刷新把成功提示瞬间擦除
+  // 仅在切换不同条目时重置图集页码、右侧标签页与保存反馈提示，避免保存后 liveQuery 刷新把成功提示瞬间擦除
   useEffect(() => {
     setActiveSlideIndex(0);
     setSaveFeedback(null);
+    setActiveRightTab('details');
   }, [item.id]);
 
   // 仅在媒体来源或授权状态真正变化时重新加载，避免编辑标题/标签/备注时打断播放
@@ -486,6 +492,10 @@ export function ItemDetailDrawer({
   const platformInfo = platformMeta(item.platform);
   const syncInfo = syncStatusMeta(item.syncStatus);
   const isDeleted = item.deletedAt != null;
+  const showCommentsTab =
+    item.kind === 'video' ||
+    Boolean(item.commentsRelativePath) ||
+    (item.savedCommentCount ?? 0) > 0;
 
   return (
     <div
@@ -788,7 +798,57 @@ export function ItemDetailDrawer({
             </button>
           </header>
 
-          {/* 可滚动编辑表单与详情区 */}
+          {/* 详情 / 评论切换标签栏 */}
+          {showCommentsTab && (
+            <div
+              role="tablist"
+              aria-label="详情与评论切换"
+              className="flex items-center gap-1 border-b border-slate-200 bg-slate-50/60 px-5 py-2"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeRightTab === 'details'}
+                onClick={() => setActiveRightTab('details')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  activeRightTab === 'details'
+                    ? 'bg-white text-indigo-700 shadow-xs ring-1 ring-slate-200'
+                    : 'text-slate-600 hover:bg-white/60 hover:text-slate-900'
+                }`}
+              >
+                <span>详情</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeRightTab === 'comments'}
+                onClick={() => setActiveRightTab('comments')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  activeRightTab === 'comments'
+                    ? 'bg-white text-indigo-700 shadow-xs ring-1 ring-slate-200'
+                    : 'text-slate-600 hover:bg-white/60 hover:text-slate-900'
+                }`}
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+                <span>评论</span>
+                {(item.savedCommentCount ?? 0) > 0 && (
+                  <span className="rounded-full bg-indigo-50 px-1.5 py-0.2 text-[10px] font-semibold tabular-nums text-indigo-700">
+                    {item.savedCommentCount}
+                  </span>
+                )}
+              </button>
+            </div>
+          )}
+
+          {activeRightTab === 'comments' && showCommentsTab ? (
+            <ItemCommentsPanel
+              item={item}
+              vaultHandle={vaultHandle}
+              permissionState={permissionState}
+              onRequestVaultAccess={onRequestVaultAccess}
+            />
+          ) : (
+          /* 可滚动编辑表单与详情区 */
           <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
             {/* 标题编辑 */}
             <div>
@@ -1079,6 +1139,7 @@ export function ItemDetailDrawer({
               </div>
             </dl>
           </div>
+          )}
 
           {/* 底部操作条 */}
           <footer className="flex items-center justify-between gap-2 border-t border-slate-200 bg-slate-50/70 px-5 py-3">

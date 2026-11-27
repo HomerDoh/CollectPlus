@@ -7,6 +7,7 @@
 
 import type {
   CapturedAssetInput,
+  CapturedCommentInput,
   CapturedPayload,
   CaptureTriggerSource,
   DnrHeaderRuleSpec,
@@ -961,6 +962,130 @@ export function parseDouyinAweme(
   }
 
   return payload;
+}
+
+function extractCommentAvatarUrls(userObj: UnknownRecord): {
+  avatarUrl?: string;
+  avatarFallbackUrls?: string[];
+} {
+  const collected: string[] = [];
+  const avatarKeyGroups: readonly (readonly string[])[] = [
+    ['avatar_thumb', 'avatarThumb'],
+    ['avatar_medium', 'avatarMedium'],
+    ['avatar_larger', 'avatarLarger'],
+  ];
+
+  for (const keys of avatarKeyGroups) {
+    const obj = readRecord(userObj, keys);
+    if (obj) {
+      collected.push(...extractUrlListFromObject(obj));
+    }
+  }
+
+  const directStr = readFirstString(userObj, [
+    'avatar_thumb',
+    'avatarUrl',
+    'avatarUri',
+  ]);
+  if (directStr) {
+    const normalized = normalizeMediaUrl(directStr);
+    if (normalized) {
+      collected.push(normalized);
+    }
+  }
+
+  const ranked = rankImageUrls(collected);
+  const avatarUrl = ranked[0];
+  if (!avatarUrl) {
+    return {};
+  }
+  const avatarFallbackUrls = ranked.slice(1);
+  return {
+    avatarUrl,
+    ...(avatarFallbackUrls.length > 0 ? { avatarFallbackUrls } : {}),
+  };
+}
+
+function extractCommentCreatedAt(comment: UnknownRecord): number | undefined {
+  const rawTime = readFirstNumber(comment, ['create_time', 'createTime']);
+  if (rawTime === undefined || rawTime <= 0) {
+    return undefined;
+  }
+  return rawTime >= 1_000_000_000_000
+    ? Math.trunc(rawTime)
+    : Math.trunc(rawTime * 1000);
+}
+
+/**
+ * 将抖音 `/aweme/v1/web/comment/list/` 返回的原始评论数组归一化为标准 `CapturedCommentInput[]`。
+ * 按评论 `cid` 去重并严格截断至最多 `limit`（默认 100）条。
+ */
+export function parseDouyinComments(
+  rawComments: readonly unknown[],
+  limit = 100,
+): CapturedCommentInput[] {
+  const safeLimit =
+    Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 100;
+  const seenIds = new Set<string>();
+  const normalized: CapturedCommentInput[] = [];
+
+  for (let i = 0; i < rawComments.length; i += 1) {
+    if (normalized.length >= safeLimit) {
+      break;
+    }
+    const raw = rawComments[i];
+    if (!isRecord(raw)) {
+      continue;
+    }
+
+    const id =
+      readFirstIdString(raw, ['cid', 'comment_id', 'commentId', 'id']) ??
+      `comment-${i + 1}`;
+    if (seenIds.has(id)) {
+      continue;
+    }
+
+    const rawText = readFirstString(raw, ['text', 'content']) ?? '';
+    const hasImages =
+      (readArray(raw, ['image_list', 'imageList'])?.length ?? 0) > 0;
+    const hasSticker = readRecord(raw, ['sticker']) !== undefined;
+    const content =
+      rawText || (hasImages ? '[图片评论]' : hasSticker ? '[表情]' : '');
+    if (!content) {
+      continue;
+    }
+
+    const userObj = readRecord(raw, ['user', 'author']);
+    const authorId = userObj
+      ? readFirstIdString(userObj, ['uid', 'sec_uid', 'secUid', 'id'])
+      : undefined;
+    const authorName =
+      (userObj
+        ? readFirstString(userObj, ['nickname', 'name', 'screen_name'])
+        : undefined) ?? '匿名用户';
+    const { avatarUrl, avatarFallbackUrls } = userObj
+      ? extractCommentAvatarUrls(userObj)
+      : {};
+
+    const rawLike = readFirstNumber(raw, ['digg_count', 'diggCount', 'likeCount']);
+    const likeCount =
+      rawLike !== undefined && rawLike > 0 ? Math.trunc(rawLike) : 0;
+    const createdAt = extractCommentCreatedAt(raw);
+
+    seenIds.add(id);
+    normalized.push({
+      id,
+      ...(authorId !== undefined ? { authorId } : {}),
+      authorName,
+      ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+      ...(avatarFallbackUrls !== undefined ? { avatarFallbackUrls } : {}),
+      content,
+      likeCount,
+      ...(createdAt !== undefined ? { createdAt } : {}),
+    });
+  }
+
+  return normalized;
 }
 
 /** 校验给定 URL 是否属于抖音主站页面 */

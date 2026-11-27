@@ -127,9 +127,11 @@ pnpm zip
    ├── taxonomy.json               # 多级文件夹树 + 标签定义
    ├── items/{platform}/{YYYY-MM}/{YYYYMMDD}_{sourceId}_{sanitizedTitle}/
    │   ├── meta.json               # 纯净结构化元数据（全量相对路径，不含 thumbnailDataUrl）
+   │   ├── comments.json           # 离线评论快照（可选，如抖音视频前 100 条评论，仅含相对路径）
    │   ├── cover.jpg
    │   ├── video.mp4               # 视频类
-   │   └── media/01.jpg ...        # 图集类
+   │   ├── media/01.jpg ...        # 图集类
+   │   └── comments/avatars/       # 评论者离线头像（按 URL 去重，如 001.jpg ...）
    └── .trash/
    ```
 2. **相对路径与元数据纯净性**：

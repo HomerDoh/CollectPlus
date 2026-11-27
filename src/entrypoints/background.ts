@@ -74,6 +74,8 @@ let pendingQueuePump = false;
 const inFlightAccountSyncs = new Set<string>();
 /** 已触发风控进入被动旁路采集兜底的账号集合（`${platform}:${accountId}`） */
 const passiveFallbackAccounts = new Set<string>();
+/** 正在 Offscreen 中暂存评论与头像的条目 ID 集合 */
+const inFlightCommentItemIds = new Set<string>();
 
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
@@ -788,7 +790,7 @@ async function handleGetStatusSummary(
     totalItems,
     stagedCount,
     metaDirtyCount,
-    activeTaskCount,
+    activeTaskCount: activeTaskCount + inFlightCommentItemIds.size,
     hasVaultDirectory: vaultHandleCount > 0,
   };
 }
@@ -1041,10 +1043,12 @@ async function handleOffscreenComplete(
         : message.assets;
 
       if (existingItem) {
+        const nextTotalSizeBytes =
+          message.totalSizeBytes + (existingItem.commentsSizeBytes ?? 0);
         await db.items.put({
           ...existingItem,
           assets: mergedAssets,
-          totalSizeBytes: message.totalSizeBytes,
+          totalSizeBytes: nextTotalSizeBytes,
           syncStatus: 'opfs_staged',
           updatedAt: now,
           ...(message.thumbnailDataUrl !== undefined
@@ -1124,6 +1128,104 @@ async function handleOffscreenError(
   return { ok: true };
 }
 
+async function handleSaveItemComments(
+  message: Extract<BackgroundMessage, { type: 'SAVE_ITEM_COMMENTS' }>,
+): Promise<BackgroundResponseMap['SAVE_ITEM_COMMENTS']> {
+  if (message.comments.length === 0) {
+    return { ok: true };
+  }
+
+  const item = await db.items.get(message.itemId);
+  if (!item || item.deletedAt != null) {
+    return { ok: true };
+  }
+
+  inFlightCommentItemIds.add(item.id);
+  try {
+    await ensureDnrReady();
+    await ensureOffscreenDocument();
+
+    const response = await sendToOffscreen({
+      target: 'offscreen',
+      type: 'OFFSCREEN_STAGE_COMMENTS',
+      itemId: item.id,
+      platform: message.platform,
+      sourceId: message.sourceId,
+      comments: message.comments,
+      limit: message.limit,
+    });
+
+    if (!response || !response.ok) {
+      inFlightCommentItemIds.delete(item.id);
+      return {
+        ok: false,
+        error:
+          response && !response.ok
+            ? response.error
+            : 'Offscreen 拒绝启动评论暂存任务。',
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    inFlightCommentItemIds.delete(item.id);
+    return { ok: false, error: formatErrorMessage(error) };
+  }
+}
+
+async function handleOffscreenCommentsComplete(
+  message: Extract<BackgroundMessage, { type: 'OFFSCREEN_COMMENTS_COMPLETE' }>,
+): Promise<BackgroundResponseMap['OFFSCREEN_COMMENTS_COMPLETE']> {
+  try {
+    const now = Date.now();
+    await db.transaction('rw', db.items, async () => {
+      const existingItem = await db.items.get(message.itemId);
+      if (!existingItem) {
+        return;
+      }
+      const mediaBytes = existingItem.assets.reduce(
+        (sum, asset) => sum + (asset.downloaded ? (asset.sizeBytes ?? 0) : 0),
+        0,
+      );
+      // 严守同步状态机不变量：仅已落盘条目置为 meta_dirty 触发二次同步，opfs_staged / pending_download 保持原态
+      const nextSyncStatus =
+        existingItem.syncStatus === 'vault_synced'
+          ? 'meta_dirty'
+          : existingItem.syncStatus;
+
+      await db.items.put({
+        ...existingItem,
+        commentsRelativePath: message.commentsRelativePath,
+        savedCommentCount: message.savedCommentCount,
+        commentsSizeBytes: message.commentsSizeBytes,
+        totalSizeBytes: mediaBytes + message.commentsSizeBytes,
+        syncStatus: nextSyncStatus,
+        updatedAt: now,
+      });
+    });
+  } catch (error) {
+    console.error(
+      '[Collect+] Failed to handle OFFSCREEN_COMMENTS_COMPLETE:',
+      error,
+    );
+  } finally {
+    inFlightCommentItemIds.delete(message.itemId);
+  }
+
+  return { ok: true };
+}
+
+async function handleOffscreenCommentsError(
+  message: Extract<BackgroundMessage, { type: 'OFFSCREEN_COMMENTS_ERROR' }>,
+): Promise<BackgroundResponseMap['OFFSCREEN_COMMENTS_ERROR']> {
+  inFlightCommentItemIds.delete(message.itemId);
+  console.warn(
+    `[Collect+] Comment staging failed for item ${message.itemId}:`,
+    message.error,
+  );
+  return { ok: true };
+}
+
 async function routeBackgroundMessage(
   message: BackgroundMessage,
 ): Promise<BackgroundResponseMap[BackgroundMessage['type']]> {
@@ -1132,6 +1234,8 @@ async function routeBackgroundMessage(
       return handleCaptureItem(message);
     case 'CAPTURE_BATCH_ITEMS':
       return handleCaptureBatchItems(message);
+    case 'SAVE_ITEM_COMMENTS':
+      return handleSaveItemComments(message);
     case 'UNCOLLECT_ITEMS':
       return handleUncollectItems(message);
     case 'CHECK_ACCOUNT_SYNC_ACTION':
@@ -1160,6 +1264,10 @@ async function routeBackgroundMessage(
       return handleOffscreenComplete(message);
     case 'OFFSCREEN_ERROR':
       return handleOffscreenError(message);
+    case 'OFFSCREEN_COMMENTS_COMPLETE':
+      return handleOffscreenCommentsComplete(message);
+    case 'OFFSCREEN_COMMENTS_ERROR':
+      return handleOffscreenCommentsError(message);
   }
 }
 

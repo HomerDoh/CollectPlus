@@ -8,7 +8,10 @@
  */
 
 import { createRoot, type Root } from 'react-dom/client';
-import { douyinAdapter } from '../adapters/douyin/parser.ts';
+import {
+  douyinAdapter,
+  parseDouyinComments,
+} from '../adapters/douyin/parser.ts';
 import '../components/capture-overlay.css';
 import {
   CaptureOverlay,
@@ -25,9 +28,11 @@ import {
   type CollectionSyncBatchMessage,
   type CollectionSyncDoneMessage,
   type CurrentItemResponseMessage,
+  type ItemCommentsResponseMessage,
   type PassiveCollectionListCapturedMessage,
   type RequestCurrentItemMessage,
   type RequestFullCollectionSyncMessage,
+  type RequestItemCommentsMessage,
   type RequestLoginStateMessage,
 } from '../types/adapter.ts';
 import { isContentMessage, sendToBackground } from '../types/messages.ts';
@@ -36,11 +41,20 @@ import { isContentMessage, sendToBackground } from '../types/messages.ts';
 const MANUAL_CAPTURE_THROTTLE_MS = 600;
 /** 请求 Main World 当前活跃作品数据的超时时间（毫秒） */
 const REQUEST_CURRENT_ITEM_TIMEOUT_MS = 5000;
+/** 请求 Main World 拉取单条视频前 100 条评论的超时时间（毫秒） */
+const REQUEST_COMMENTS_TIMEOUT_MS = 15_000;
+/** 单条抖音视频同步保存的最大评论条数 */
+const DOUYIN_COMMENT_CAPTURE_LIMIT = 100;
 /** 同一作品短时间内重复原生收藏回调去重窗口（毫秒） */
 const NATIVE_CAPTURE_DEDUPE_WINDOW_MS = 2000;
 
 interface PendingItemRequest {
   resolve: (response: CurrentItemResponseMessage | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingCommentsRequest {
+  resolve: (response: ItemCommentsResponseMessage | null) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -155,11 +169,13 @@ export default defineContentScript({
     let bannerAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
     const pendingRequests = new Map<string, PendingItemRequest>();
+    const pendingCommentRequests = new Map<string, PendingCommentsRequest>();
     const recentNativeCaptures = new Map<string, number>();
 
     const postToMainWorld = (
       message:
         | RequestCurrentItemMessage
+        | RequestItemCommentsMessage
         | RequestLoginStateMessage
         | RequestFullCollectionSyncMessage
         | CancelFullCollectionSyncMessage,
@@ -318,18 +334,30 @@ export default defineContentScript({
         return { added: 0, deduplicated: 0 };
       }
 
-      const response = await sendToBackground({
-        target: 'background',
-        type: 'CAPTURE_BATCH_ITEMS',
-        payloads,
-      });
-      if (!response || !response.ok) {
-        return { added: 0, deduplicated: 0 };
+      // 容错：MV3 Service Worker 在多页同步间隙休眠/重启时瞬断通道，重试一次唤醒 SW
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const response = await sendToBackground({
+            target: 'background',
+            type: 'CAPTURE_BATCH_ITEMS',
+            payloads,
+          });
+          if (!response || !response.ok) {
+            return { added: 0, deduplicated: 0 };
+          }
+          return {
+            added: response.capturedCount,
+            deduplicated: response.deduplicatedCount,
+          };
+        } catch (error) {
+          if (attempt === 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 250));
+            continue;
+          }
+          console.warn('[Collect+] Batch ingest failed after retry:', error);
+        }
       }
-      return {
-        added: response.capturedCount,
-        deduplicated: response.deduplicatedCount,
-      };
+      return { added: 0, deduplicated: 0 };
     };
 
     const handleCollectionSyncBatch = (
@@ -504,6 +532,75 @@ export default defineContentScript({
       }
     };
 
+    const requestCommentsFromMainWorld = (
+      sourceId: string,
+      limit = DOUYIN_COMMENT_CAPTURE_LIMIT,
+    ): Promise<ItemCommentsResponseMessage | null> => {
+      requestCounter += 1;
+      const requestId = `cp-cmt-${Date.now()}-${requestCounter}`;
+
+      return new Promise<ItemCommentsResponseMessage | null>((resolve) => {
+        const timer = setTimeout(() => {
+          pendingCommentRequests.delete(requestId);
+          resolve(null);
+        }, REQUEST_COMMENTS_TIMEOUT_MS);
+
+        pendingCommentRequests.set(requestId, { resolve, timer });
+
+        const message: RequestItemCommentsMessage = {
+          channel: PAGE_BRIDGE_CHANNEL,
+          direction: 'content-to-main',
+          type: 'REQUEST_ITEM_COMMENTS',
+          requestId,
+          sourceId,
+          limit,
+        };
+
+        try {
+          window.postMessage(message, getBridgeTargetOrigin());
+        } catch {
+          clearTimeout(timer);
+          pendingCommentRequests.delete(requestId);
+          resolve(null);
+        }
+      });
+    };
+
+    const fetchAndSaveVideoComments = async (
+      itemId: string,
+      sourceId: string,
+    ): Promise<void> => {
+      try {
+        const response = await requestCommentsFromMainWorld(
+          sourceId,
+          DOUYIN_COMMENT_CAPTURE_LIMIT,
+        );
+        if (!response || response.rawComments.length === 0) {
+          return;
+        }
+
+        const comments = parseDouyinComments(
+          response.rawComments,
+          DOUYIN_COMMENT_CAPTURE_LIMIT,
+        );
+        if (comments.length === 0) {
+          return;
+        }
+
+        await sendToBackground({
+          target: 'background',
+          type: 'SAVE_ITEM_COMMENTS',
+          itemId,
+          platform: 'douyin',
+          sourceId,
+          comments,
+          limit: DOUYIN_COMMENT_CAPTURE_LIMIT,
+        });
+      } catch (error) {
+        console.warn('[Collect+] Failed to capture Douyin comments:', error);
+      }
+    };
+
     const submitCapturedPayload = async (
       payload: CapturedPayload,
     ): Promise<void> => {
@@ -520,6 +617,12 @@ export default defineContentScript({
             ? captureResponse.error
             : 'Background service did not acknowledge capture.',
         );
+        return;
+      }
+
+      // 收藏视频成功后异步拉取前 100 条评论并保存，不阻塞视频本身的即时收藏与下载
+      if (!captureResponse.deduplicated && payload.kind === 'video') {
+        void fetchAndSaveVideoComments(captureResponse.itemId, payload.sourceId);
       }
     };
 
@@ -727,6 +830,17 @@ export default defineContentScript({
           void handlePassiveCollectionListCaptured(event.data);
           break;
         }
+
+        case 'ITEM_COMMENTS_RESPONSE': {
+          isMainBridgeReady = true;
+          const pending = pendingCommentRequests.get(event.data.requestId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingCommentRequests.delete(event.data.requestId);
+            pending.resolve(event.data);
+          }
+          break;
+        }
       }
     });
 
@@ -813,6 +927,11 @@ export default defineContentScript({
         pending.resolve(null);
       }
       pendingRequests.clear();
+      for (const pending of pendingCommentRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.resolve(null);
+      }
+      pendingCommentRequests.clear();
     });
 
     // 4. 构造浮层交互动作并挂载 Shadow DOM UI

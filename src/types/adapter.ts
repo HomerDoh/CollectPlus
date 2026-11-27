@@ -60,6 +60,26 @@ export interface CapturedAssetInput {
   filenameHint?: string;
 }
 
+/** 适配器归一化后的单条原始评论输入（尚未离线下载评论者头像） */
+export interface CapturedCommentInput {
+  /** 平台侧评论唯一 ID */
+  id: string;
+  /** 评论者平台 ID（非敏感 uid/sec_uid，可选） */
+  authorId?: string;
+  /** 评论者昵称 */
+  authorName: string;
+  /** 评论者头像主远程地址 */
+  avatarUrl?: string;
+  /** 评论者头像备用远程地址列表 */
+  avatarFallbackUrls?: string[];
+  /** 评论正文内容 */
+  content: string;
+  /** 评论点赞数 */
+  likeCount: number;
+  /** 评论发布时间戳（毫秒，可选） */
+  createdAt?: number;
+}
+
 /** 经由平台适配器归一化后的跨平台统一采集载荷 */
 export interface CapturedPayload {
   /** 来源平台 */
@@ -254,6 +274,28 @@ export interface PassiveCollectionListCapturedMessage {
   hasMore: boolean;
 }
 
+/** Isolated Content Script 请求 Main World 获取指定作品的前 N 条原始评论 */
+export interface RequestItemCommentsMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'content-to-main';
+  type: 'REQUEST_ITEM_COMMENTS';
+  requestId: string;
+  sourceId: string;
+  limit: number;
+}
+
+/** Main World 返回指定作品的原始评论列表 */
+export interface ItemCommentsResponseMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'main-to-content';
+  type: 'ITEM_COMMENTS_RESPONSE';
+  requestId: string;
+  platform: PlatformId;
+  sourceId: string;
+  rawComments: unknown[];
+  error?: string;
+}
+
 /** Main World ↔ Isolated Content Script 强类型桥接消息判别联合 */
 export type PageBridgeMessage =
   | BridgeReadyMessage
@@ -267,7 +309,9 @@ export type PageBridgeMessage =
   | CancelFullCollectionSyncMessage
   | CollectionSyncBatchMessage
   | CollectionSyncDoneMessage
-  | PassiveCollectionListCapturedMessage;
+  | PassiveCollectionListCapturedMessage
+  | RequestItemCommentsMessage
+  | ItemCommentsResponseMessage;
 
 const COLLECTION_SYNC_DONE_STATUSES: ReadonlySet<string> = new Set<
   CollectionSyncDoneStatus
@@ -386,6 +430,27 @@ export function isPageBridgeMessage(data: unknown): data is PageBridgeMessage {
         isPlatformId(data.platform) &&
         Array.isArray(data.rawItems) &&
         typeof data.hasMore === 'boolean'
+      );
+
+    case 'REQUEST_ITEM_COMMENTS':
+      return (
+        direction === 'content-to-main' &&
+        typeof data.requestId === 'string' &&
+        typeof data.sourceId === 'string' &&
+        data.sourceId.trim().length > 0 &&
+        typeof data.limit === 'number' &&
+        Number.isFinite(data.limit) &&
+        data.limit > 0
+      );
+
+    case 'ITEM_COMMENTS_RESPONSE':
+      return (
+        direction === 'main-to-content' &&
+        typeof data.requestId === 'string' &&
+        isPlatformId(data.platform) &&
+        typeof data.sourceId === 'string' &&
+        Array.isArray(data.rawComments) &&
+        (data.error === undefined || typeof data.error === 'string')
       );
 
     default:

@@ -263,6 +263,163 @@ export async function removeItemFromOpfs(itemId: string): Promise<void> {
   }
 }
 
+async function collectRelativeFilePaths(
+  dir: FileSystemDirectoryHandle,
+  prefix: string,
+  out: string[],
+): Promise<void> {
+  for await (const [name, handle] of dir.entries()) {
+    const nextPath = prefix ? `${prefix}/${name}` : name;
+    if (handle.kind === 'file') {
+      out.push(nextPath);
+    } else if (handle.kind === 'directory') {
+      await collectRelativeFilePaths(handle, nextPath, out);
+    }
+  }
+}
+
+/** 递归列出指定条目在 OPFS 暂存区中的所有文件相对路径（不存在时返回空数组） */
+export async function listOpfsItemFilePaths(itemId: string): Promise<string[]> {
+  const safeItemId = assertValidItemId(itemId);
+  const stageRoot = await getOpfsStageRoot();
+
+  try {
+    const itemDir = await stageRoot.getDirectoryHandle(safeItemId, {
+      create: false,
+    });
+    const paths: string[] = [];
+    await collectRelativeFilePaths(itemDir, '', paths);
+    return paths;
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function isDirectoryEmpty(
+  dir: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  for await (const _entry of dir.entries()) {
+    void _entry;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 精准删除指定条目在 OPFS 中的部分文件，并自底向上清理已变空的子目录与条目目录。
+ * 避免与并发写入的评论/头像暂存任务发生目录删除竞态。
+ */
+export async function removeOpfsItemFiles(
+  itemId: string,
+  relativePaths: readonly string[],
+): Promise<void> {
+  const safeItemId = assertValidItemId(itemId);
+  const stageRoot = await getOpfsStageRoot();
+
+  let itemDir: FileSystemDirectoryHandle;
+  try {
+    itemDir = await stageRoot.getDirectoryHandle(safeItemId, { create: false });
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+
+  const dirsToCheck = new Set<string>();
+
+  for (const relPath of relativePaths) {
+    let segments: string[];
+    try {
+      segments = splitRelativePath(relPath);
+    } catch {
+      continue;
+    }
+    const fileName = segments[segments.length - 1];
+    if (!fileName) {
+      continue;
+    }
+
+    let currentDir = itemDir;
+    let missing = false;
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      const seg = segments[i];
+      if (!seg) {
+        continue;
+      }
+      try {
+        currentDir = await currentDir.getDirectoryHandle(seg, { create: false });
+      } catch (error) {
+        if (isNotFoundError(error)) {
+          missing = true;
+          break;
+        }
+        throw error;
+      }
+    }
+
+    if (missing) {
+      continue;
+    }
+
+    try {
+      await currentDir.removeEntry(fileName);
+    } catch (error) {
+      if (!isNotFoundError(error)) {
+        throw error;
+      }
+    }
+
+    for (let depth = segments.length - 1; depth >= 1; depth -= 1) {
+      dirsToCheck.add(segments.slice(0, depth).join('/'));
+    }
+  }
+
+  // 按深度降序自底向上回收空子目录
+  const sortedDirs = [...dirsToCheck].sort(
+    (a, b) => b.split('/').length - a.split('/').length,
+  );
+  for (const dirRelPath of sortedDirs) {
+    const segments = dirRelPath.split('/').filter(Boolean);
+    const leaf = segments[segments.length - 1];
+    if (!leaf) {
+      continue;
+    }
+    try {
+      let parentDir = itemDir;
+      for (let i = 0; i < segments.length - 1; i += 1) {
+        const seg = segments[i];
+        if (seg) {
+          parentDir = await parentDir.getDirectoryHandle(seg, { create: false });
+        }
+      }
+      const targetDir = await parentDir.getDirectoryHandle(leaf, {
+        create: false,
+      });
+      if (await isDirectoryEmpty(targetDir)) {
+        await parentDir.removeEntry(leaf);
+      }
+    } catch (error) {
+      if (!isNotFoundError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  if (await isDirectoryEmpty(itemDir)) {
+    try {
+      await stageRoot.removeEntry(safeItemId);
+    } catch (error) {
+      if (!isNotFoundError(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
 async function computeDirectoryBytes(
   dir: FileSystemDirectoryHandle,
 ): Promise<number> {

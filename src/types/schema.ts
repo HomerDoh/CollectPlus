@@ -103,6 +103,40 @@ export interface AuthorInfo {
 /** 平台扩展字段允许的 JSON 原始值类型 */
 export type PlatformExtraValue = string | number | boolean | null;
 
+/** 单条离线保存的评论记录（写入条目目录下的 comments.json） */
+export interface SavedComment {
+  /** 平台侧评论唯一 ID（如抖音 cid） */
+  id: string;
+  /** 评论者平台 ID（仅非敏感 uid/sec_uid，可选） */
+  authorId?: string;
+  /** 评论者昵称 */
+  authorName: string;
+  /** 评论者离线头像相对条目目录路径（如 'comments/avatars/001.jpg'） */
+  avatarRelativePath?: string;
+  /** 评论正文内容 */
+  content: string;
+  /** 评论点赞数 */
+  likeCount: number;
+  /** 评论发布时间戳（毫秒，可选） */
+  createdAt?: number;
+}
+
+/** 落盘到 `{item.relativeDir}/comments.json` 的离线评论快照文件结构 */
+export interface ItemCommentsFile {
+  /** Schema 版本号 */
+  schemaVersion: typeof SCHEMA_VERSION;
+  /** 来源平台 */
+  platform: PlatformId;
+  /** 平台侧内容唯一 ID */
+  sourceId: string;
+  /** 评论采集时间戳（毫秒） */
+  capturedAt: number;
+  /** 本次最多保存的评论上限（如 100） */
+  limit: number;
+  /** 离线保存的评论列表 */
+  comments: SavedComment[];
+}
+
 /**
  * 落盘到 `CollectVault/items/.../meta.json` 的标准收藏条目元数据。
  * 所有路径字段均为相对路径，不包含 Base64 缩略图。
@@ -144,6 +178,12 @@ export interface CollectionItemMeta {
   relativeDir: string;
   /** 封面相对条目目录路径（如 'cover.jpg'） */
   coverRelativePath?: string;
+  /** 离线评论快照相对条目目录路径（如 'comments.json'） */
+  commentsRelativePath?: string;
+  /** 已离线保存的评论条数 */
+  savedCommentCount?: number;
+  /** 评论快照与离线评论头像总字节数（独立记录，避免与主媒体资产大小相互覆盖） */
+  commentsSizeBytes?: number;
   /** 条目关联的全部媒体资产 */
   assets: MediaAsset[];
   /** 当前同步状态 */

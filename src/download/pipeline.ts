@@ -42,9 +42,16 @@ import {
   writeBlobToOpfs,
   writeStreamToOpfs,
 } from '../storage/opfs.ts';
-import { splitRelativePath } from '../storage/path.ts';
+import { inferExtensionFromMime, splitRelativePath } from '../storage/path.ts';
 import { generateThumbnailFromBlob } from '../storage/vault.ts';
-import type { MediaAsset } from '../types/schema.ts';
+import type { CapturedCommentInput } from '../types/adapter.ts';
+import {
+  SCHEMA_VERSION,
+  type ItemCommentsFile,
+  type MediaAsset,
+  type PlatformId,
+  type SavedComment,
+} from '../types/schema.ts';
 
 /** 单个 HTTP 请求等待响应头的超时阈值（毫秒） */
 const FETCH_HEADER_TIMEOUT_MS = 30_000;
@@ -54,6 +61,17 @@ const TRANSIENT_RETRY_DELAY_MS = 600;
 const MAX_TRANSIENT_RETRIES_PER_URL = 1;
 /** 图片类非视频资产的最大并发下载路数 */
 const MAX_CONCURRENT_IMAGE_DOWNLOADS = 3;
+/** 评论者小头像的最大并发下载路数 */
+const MAX_CONCURRENT_AVATAR_DOWNLOADS = 6;
+/** 评论快照固定文件名 */
+export const COMMENTS_FILENAME = 'comments.json' as const;
+const SAFE_AVATAR_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.jpg',
+  '.png',
+  '.webp',
+  '.gif',
+  '.avif',
+]);
 /** 进度回调最小节流间隔（毫秒） */
 const PROGRESS_THROTTLE_MS = 250;
 /** 离线封面缩略图默认最大宽度（像素） */
@@ -1783,4 +1801,224 @@ export async function executeDownloadJob(
   } finally {
     tracker.dispose();
   }
+}
+
+// ============================================================================
+// 5. 离线评论快照与评论者头像暂存（写入 OPFS comments/avatars/* + comments.json）
+// ============================================================================
+
+export interface StageCommentsJobInput {
+  itemId: string;
+  platform: PlatformId;
+  sourceId: string;
+  comments: readonly CapturedCommentInput[];
+  limit: number;
+  signal?: AbortSignal;
+}
+
+export interface StageCommentsJobResult {
+  commentsRelativePath: string;
+  savedCommentCount: number;
+  commentsSizeBytes: number;
+}
+
+function resolveAvatarExtension(
+  contentType: string | null,
+  sourceUrl: string,
+): string {
+  if (contentType) {
+    const extFromMime = inferExtensionFromMime(contentType, '');
+    if (SAFE_AVATAR_EXTENSIONS.has(extFromMime)) {
+      return extFromMime;
+    }
+  }
+
+  try {
+    const pathname = new URL(sourceUrl).pathname.toLowerCase();
+    const dotIdx = pathname.lastIndexOf('.');
+    if (dotIdx > 0) {
+      const rawExt = pathname.slice(dotIdx);
+      const normalized = rawExt === '.jpeg' ? '.jpg' : rawExt;
+      if (SAFE_AVATAR_EXTENSIONS.has(normalized)) {
+        return normalized;
+      }
+    }
+  } catch {
+    // 忽略异常 URL 并回退 .jpg
+  }
+
+  return '.jpg';
+}
+
+async function fetchAvatarBlobBestEffort(
+  urls: readonly string[],
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; ext: string } | null> {
+  for (const url of urls) {
+    throwIfAborted(signal);
+    for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES_PER_URL; attempt += 1) {
+      throwIfAborted(signal);
+      try {
+        const response = await fetchWithHeaderTimeout(
+          url,
+          { method: 'GET' },
+          signal,
+        );
+        if (!response.ok) {
+          throw new HttpFetchError(url, response.status, response.statusText);
+        }
+        const blob = await response.blob();
+        throwIfAborted(signal);
+        if (blob.size <= 0) {
+          break;
+        }
+        const ext = resolveAvatarExtension(
+          response.headers.get('content-type') || blob.type || null,
+          url,
+        );
+        return { blob, ext };
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) {
+          throw createAbortError(signal);
+        }
+        if (
+          error instanceof HttpFetchError &&
+          IMMEDIATE_FALLBACK_STATUS_CODES.has(error.status)
+        ) {
+          break;
+        }
+        if (attempt < MAX_TRANSIENT_RETRIES_PER_URL) {
+          await sleepWithSignal(TRANSIENT_RETRY_DELAY_MS, signal);
+          continue;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 下载并去重评论者头像到 OPFS `collect-plus-stage/{itemId}/comments/avatars/`，
+ * 随后原子写入 `comments.json`。单个头像下载失败不阻断整体评论归档。
+ */
+export async function stageItemCommentsToOpfs(
+  input: StageCommentsJobInput,
+): Promise<StageCommentsJobResult> {
+  const { itemId, platform, sourceId, signal } = input;
+  throwIfAborted(signal);
+
+  const safeLimit =
+    Number.isFinite(input.limit) && input.limit > 0
+      ? Math.floor(input.limit)
+      : 100;
+  const boundedComments = input.comments.slice(0, safeLimit);
+
+  // 按主头像 URL 去重，避免同一评论者多条评论重复下载与落盘
+  interface UniqueAvatarJob {
+    key: string;
+    slotIndex: number;
+    candidateUrls: string[];
+  }
+
+  const avatarJobByKey = new Map<string, UniqueAvatarJob>();
+  const avatarKeyByCommentIndex: Array<string | undefined> = [];
+
+  for (const comment of boundedComments) {
+    const primaryUrl = comment.avatarUrl?.trim();
+    if (!primaryUrl) {
+      avatarKeyByCommentIndex.push(undefined);
+      continue;
+    }
+
+    const dedupeKey = primaryUrl;
+    avatarKeyByCommentIndex.push(dedupeKey);
+
+    if (!avatarJobByKey.has(dedupeKey)) {
+      const seen = new Set<string>([primaryUrl]);
+      const candidateUrls = [primaryUrl];
+      for (const fallback of comment.avatarFallbackUrls ?? []) {
+        const trimmed = fallback.trim();
+        if (trimmed && !seen.has(trimmed)) {
+          seen.add(trimmed);
+          candidateUrls.push(trimmed);
+        }
+      }
+      avatarJobByKey.set(dedupeKey, {
+        key: dedupeKey,
+        slotIndex: avatarJobByKey.size + 1,
+        candidateUrls,
+      });
+    }
+  }
+
+  const stagedAvatarByKey = new Map<
+    string,
+    { relativePath: string; sizeBytes: number }
+  >();
+
+  await runWithConcurrency(
+    [...avatarJobByKey.values()],
+    MAX_CONCURRENT_AVATAR_DOWNLOADS,
+    signal,
+    async (job) => {
+      throwIfAborted(signal);
+      const fetched = await fetchAvatarBlobBestEffort(job.candidateUrls, signal);
+      if (!fetched) {
+        return;
+      }
+      const relativePath = `comments/avatars/${String(job.slotIndex).padStart(3, '0')}${fetched.ext}`;
+      const sizeBytes = await writeBlobToOpfs(itemId, relativePath, fetched.blob);
+      if (sizeBytes > 0) {
+        stagedAvatarByKey.set(job.key, { relativePath, sizeBytes });
+      }
+    },
+  );
+
+  throwIfAborted(signal);
+
+  const savedComments: SavedComment[] = boundedComments.map((comment, idx) => {
+    const avatarKey = avatarKeyByCommentIndex[idx];
+    const stagedAvatar = avatarKey ? stagedAvatarByKey.get(avatarKey) : undefined;
+    return {
+      id: comment.id,
+      ...(comment.authorId !== undefined ? { authorId: comment.authorId } : {}),
+      authorName: comment.authorName,
+      ...(stagedAvatar !== undefined
+        ? { avatarRelativePath: stagedAvatar.relativePath }
+        : {}),
+      content: comment.content,
+      likeCount:
+        Number.isFinite(comment.likeCount) && comment.likeCount > 0
+          ? Math.trunc(comment.likeCount)
+          : 0,
+      ...(comment.createdAt !== undefined
+        ? { createdAt: comment.createdAt }
+        : {}),
+    };
+  });
+
+  const commentsFile: ItemCommentsFile = {
+    schemaVersion: SCHEMA_VERSION,
+    platform,
+    sourceId,
+    capturedAt: Date.now(),
+    limit: safeLimit,
+    comments: savedComments,
+  };
+
+  const jsonBlob = new Blob([JSON.stringify(commentsFile, null, 2)], {
+    type: 'application/json; charset=utf-8',
+  });
+  const jsonBytes = await writeBlobToOpfs(itemId, COMMENTS_FILENAME, jsonBlob);
+
+  let avatarTotalBytes = 0;
+  for (const avatar of stagedAvatarByKey.values()) {
+    avatarTotalBytes += avatar.sizeBytes;
+  }
+
+  return {
+    commentsRelativePath: COMMENTS_FILENAME,
+    savedCommentCount: savedComments.length,
+    commentsSizeBytes: avatarTotalBytes + jsonBytes,
+  };
 }

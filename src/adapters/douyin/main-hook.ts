@@ -14,12 +14,14 @@ import {
   type CollectionSyncBatchMessage,
   type CollectionSyncDoneMessage,
   type CurrentItemResponseMessage,
+  type ItemCommentsResponseMessage,
   type LoginStateDetectedMessage,
   type NativeCollectCapturedMessage,
   type NativeUncollectCapturedMessage,
   type PageBridgeMessage,
   type PassiveCollectionListCapturedMessage,
   type RequestCurrentItemMessage,
+  type RequestItemCommentsMessage,
 } from '../../types/adapter.ts';
 
 type UnknownRecord = Record<string, unknown>;
@@ -36,6 +38,14 @@ const FULL_SYNC_MIN_DELAY_MS = 1500;
 const FULL_SYNC_JITTER_MS = 700;
 const DOUYIN_LIST_COLLECTION_ENDPOINT =
   '/aweme/v1/web/aweme/listcollection/?device_platform=webapp&aid=6383&channel=channel_pc_web&publish_video_strategy_type=2';
+const DOUYIN_COMMENT_LIST_BASE =
+  '/aweme/v1/web/comment/list/?device_platform=webapp&aid=6383&channel=channel_pc_web&item_type=0';
+const COMMENT_CACHE_CAPACITY = 30;
+const DEFAULT_COMMENT_LIMIT = 100;
+const COMMENT_PAGE_SIZE = 20;
+const MAX_COMMENT_FETCH_PAGES = 8;
+const COMMENT_PAGE_MIN_DELAY_MS = 300;
+const COMMENT_PAGE_JITTER_MS = 250;
 const DOUYIN_FALLBACK_COLLECTION_URL =
   'https://www.douyin.com/user/self?showTab=favorite_collection';
 
@@ -88,6 +98,101 @@ let lastEmittedAccountId: string | null = null;
 let activeSyncId: string | null = null;
 let activeSyncAbortController: AbortController | null = null;
 let internalSyncFetchInFlight = 0;
+let internalCommentFetchInFlight = 0;
+
+interface CachedAwemeComments {
+  comments: UnknownRecord[];
+  seenIds: Set<string>;
+  nextCursor: string | number;
+  hasMore: boolean;
+}
+
+class CommentLruCache {
+  private readonly capacity: number;
+  private readonly store = new Map<string, CachedAwemeComments>();
+
+  constructor(capacity = COMMENT_CACHE_CAPACITY) {
+    this.capacity = Math.max(1, capacity);
+  }
+
+  get(awemeId: string): CachedAwemeComments | undefined {
+    const key = awemeId.trim();
+    if (!key) {
+      return undefined;
+    }
+    const found = this.store.get(key);
+    if (!found) {
+      return undefined;
+    }
+    this.store.delete(key);
+    this.store.set(key, found);
+    return found;
+  }
+
+  mergePage(
+    awemeId: string,
+    pageComments: readonly UnknownRecord[],
+    nextCursor: string | number | null,
+    hasMore: boolean,
+  ): CachedAwemeComments {
+    const key = awemeId.trim();
+    const existing = this.store.get(key);
+    const entry: CachedAwemeComments = existing ?? {
+      comments: [],
+      seenIds: new Set<string>(),
+      nextCursor: 0,
+      hasMore: true,
+    };
+
+    for (const comment of pageComments) {
+      if (entry.comments.length >= DEFAULT_COMMENT_LIMIT) {
+        break;
+      }
+      const cid = extractCommentId(comment);
+      if (cid) {
+        if (entry.seenIds.has(cid)) {
+          continue;
+        }
+        entry.seenIds.add(cid);
+      }
+      entry.comments.push(comment);
+    }
+
+    if (nextCursor !== null) {
+      entry.nextCursor = nextCursor;
+    }
+    entry.hasMore = hasMore;
+
+    if (existing) {
+      this.store.delete(key);
+    }
+    this.store.set(key, entry);
+
+    while (this.store.size > this.capacity) {
+      const oldestKey = this.store.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      this.store.delete(oldestKey);
+    }
+
+    return entry;
+  }
+}
+
+const commentCache = new CommentLruCache(COMMENT_CACHE_CAPACITY);
+
+function extractCommentId(record: UnknownRecord): string | null {
+  const raw = record.cid ?? record.comment_id ?? record.commentId;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return String(Math.trunc(raw));
+  }
+  return null;
+}
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -352,6 +457,190 @@ function isCollectionListUrl(rawUrl: string): boolean {
     /\/aweme\/v1\/web\/aweme\/listcollection(?:\/|$)/.test(pathname) ||
     /\/aweme\/v1\/web\/collects\/video\/list(?:\/|$)/.test(pathname)
   );
+}
+
+function isCommentListUrl(rawUrl: string): boolean {
+  const parsed = resolveRequestUrl(rawUrl);
+  if (!parsed) {
+    return false;
+  }
+  return /\/aweme\/v1\/web\/comment\/list(?:\/|$)/.test(parsed.pathname);
+}
+
+function extractCommentPageFromPayload(payload: unknown): {
+  comments: UnknownRecord[];
+  hasMore: boolean;
+  nextCursor: string | number | null;
+} | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+  if (!isResponseStatusSuccess(payload)) {
+    return null;
+  }
+
+  const rawList = Array.isArray(payload.comments) ? payload.comments : null;
+  if (rawList === null) {
+    return null;
+  }
+
+  const comments: UnknownRecord[] = [];
+  for (const entry of rawList) {
+    if (isRecord(entry)) {
+      comments.push(entry);
+    }
+  }
+
+  const hasMoreRaw = payload.has_more ?? payload.hasMore;
+  const hasMore =
+    hasMoreRaw === 1 || hasMoreRaw === true || hasMoreRaw === '1';
+
+  const cursorRaw = payload.cursor;
+  const nextCursor =
+    typeof cursorRaw === 'string' ||
+    (typeof cursorRaw === 'number' && Number.isFinite(cursorRaw))
+      ? cursorRaw
+      : null;
+
+  return { comments, hasMore, nextCursor };
+}
+
+function harvestCommentListResponse(rawUrl: string, payload: unknown): void {
+  const parsedUrl = resolveRequestUrl(rawUrl);
+  const awemeId =
+    parsedUrl?.searchParams.get('aweme_id')?.trim() ||
+    parsedUrl?.searchParams.get('awemeId')?.trim();
+  if (!awemeId) {
+    return;
+  }
+  const page = extractCommentPageFromPayload(payload);
+  if (!page) {
+    return;
+  }
+  commentCache.mergePage(awemeId, page.comments, page.nextCursor, page.hasMore);
+}
+
+async function fetchCommentsForAweme(
+  awemeId: string,
+  limit = DEFAULT_COMMENT_LIMIT,
+): Promise<{ rawComments: UnknownRecord[]; error?: string }> {
+  const trimmedId = awemeId.trim();
+  const safeLimit = Math.max(
+    1,
+    Math.min(DEFAULT_COMMENT_LIMIT, Math.floor(limit || DEFAULT_COMMENT_LIMIT)),
+  );
+  if (!trimmedId) {
+    return { rawComments: [] };
+  }
+
+  const collected: UnknownRecord[] = [];
+  const seenIds = new Set<string>();
+  const appendUnique = (items: readonly UnknownRecord[]): void => {
+    for (const item of items) {
+      if (collected.length >= safeLimit) {
+        break;
+      }
+      const cid = extractCommentId(item);
+      if (cid) {
+        if (seenIds.has(cid)) {
+          continue;
+        }
+        seenIds.add(cid);
+      }
+      collected.push(item);
+    }
+  };
+
+  let cursor: string | number = 0;
+  let hasMore = true;
+
+  const cached = commentCache.get(trimmedId);
+  if (cached) {
+    appendUnique(cached.comments);
+    cursor = cached.nextCursor;
+    hasMore = cached.hasMore;
+  }
+
+  if (collected.length >= safeLimit || !hasMore) {
+    return { rawComments: collected };
+  }
+
+  const controller = new AbortController();
+  for (let pageIndex = 0; pageIndex < MAX_COMMENT_FETCH_PAGES; pageIndex += 1) {
+    if (collected.length >= safeLimit || !hasMore) {
+      break;
+    }
+
+    if (pageIndex > 0) {
+      const delayMs =
+        COMMENT_PAGE_MIN_DELAY_MS +
+        Math.floor(Math.random() * COMMENT_PAGE_JITTER_MS);
+      await sleepAbortable(delayMs, controller.signal);
+    }
+
+    const remaining = safeLimit - collected.length;
+    const count = Math.min(COMMENT_PAGE_SIZE, remaining);
+    const endpoint = `${DOUYIN_COMMENT_LIST_BASE}&aweme_id=${encodeURIComponent(trimmedId)}&cursor=${encodeURIComponent(String(cursor))}&count=${count}`;
+
+    let parsedJson: unknown;
+    internalCommentFetchInFlight += 1;
+    try {
+      // 复用宿主页 window.fetch 与已挂载的签名拦截/登录态，不逆向私有签名算法
+      const response = await window.fetch(endpoint, {
+        method: 'GET',
+        credentials: 'include',
+        signal: controller.signal,
+      });
+
+      if (response.status < 200 || response.status >= 300) {
+        return {
+          rawComments: collected,
+          error: `评论接口返回 HTTP ${response.status}，已保留已获取的 ${collected.length} 条评论。`,
+        };
+      }
+
+      const text = await response.text();
+      if (!text) {
+        return {
+          rawComments: collected,
+          error: '评论接口返回空响应，已安全中止后续分页。',
+        };
+      }
+      parsedJson = JSON.parse(text);
+    } catch (error) {
+      return {
+        rawComments: collected,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      internalCommentFetchInFlight = Math.max(0, internalCommentFetchInFlight - 1);
+    }
+
+    const page = extractCommentPageFromPayload(parsedJson);
+    if (!page) {
+      return {
+        rawComments: collected,
+        error: '评论接口响应未通过校验，已安全中止后续分页。',
+      };
+    }
+
+    commentCache.mergePage(trimmedId, page.comments, page.nextCursor, page.hasMore);
+    appendUnique(page.comments);
+
+    if (
+      !page.hasMore ||
+      page.comments.length === 0 ||
+      page.nextCursor === null ||
+      String(page.nextCursor) === String(cursor)
+    ) {
+      hasMore = false;
+      break;
+    }
+
+    cursor = page.nextCursor;
+  }
+
+  return { rawComments: collected };
 }
 
 function normalizeValidAccountId(value: unknown): string | null {
@@ -1366,6 +1655,8 @@ function installFetchHook(): void {
     const isProfileSelf = isApi && isUserProfileSelfUrl(requestUrl);
     const isCollectionList =
       isApi && internalSyncFetchInFlight === 0 && isCollectionListUrl(requestUrl);
+    const isCommentList =
+      isApi && internalCommentFetchInFlight === 0 && isCommentListUrl(requestUrl);
 
     let bodyParamsPromise: Promise<Map<string, string>> | null = null;
     if (collectKind !== null) {
@@ -1428,6 +1719,14 @@ function installFetchHook(): void {
               handlePassiveCollectionListResponse(parsedJson);
             } catch {
               // 静默吞掉被动收藏列表解析异常
+            }
+          }
+
+          if (isCommentList && internalCommentFetchInFlight === 0) {
+            try {
+              harvestCommentListResponse(requestUrl, parsedJson);
+            } catch {
+              // 静默吞掉被动评论列表解析异常
             }
           }
 
@@ -1555,6 +1854,13 @@ function installXhrHook(): void {
                 handlePassiveCollectionListResponse(parsedJson);
               }
 
+              if (
+                internalCommentFetchInFlight === 0 &&
+                isCommentListUrl(meta.url)
+              ) {
+                harvestCommentListResponse(meta.url, parsedJson);
+              }
+
               if (meta.collectKind !== null) {
                 handleNativeCollectSuccess(
                   meta.collectKind,
@@ -1631,6 +1937,26 @@ function installBridgeMessageListener(): void {
         if (activeSyncId === event.data.syncId && activeSyncAbortController) {
           activeSyncAbortController.abort();
         }
+        break;
+      }
+
+      case 'REQUEST_ITEM_COMMENTS': {
+        const request: RequestItemCommentsMessage = event.data;
+        void fetchCommentsForAweme(request.sourceId, request.limit).then(
+          ({ rawComments, error }) => {
+            const response: ItemCommentsResponseMessage = {
+              channel: PAGE_BRIDGE_CHANNEL,
+              direction: 'main-to-content',
+              type: 'ITEM_COMMENTS_RESPONSE',
+              requestId: request.requestId,
+              platform: 'douyin',
+              sourceId: request.sourceId,
+              rawComments,
+              ...(error !== undefined ? { error } : {}),
+            };
+            postBridgeMessage(response);
+          },
+        );
         break;
       }
     }

@@ -270,6 +270,13 @@ export interface DouyinMockOptions {
     cursor: string,
     requestIndex: number,
   ) => { status?: number; body: Record<string, unknown> };
+  /** 可选：自定义 `/aweme/v1/web/comment/list/` 评论分页响应 */
+  handleCommentList?: (
+    awemeId: string,
+    cursor: string,
+    count: number,
+    requestIndex: number,
+  ) => { status?: number; body: Record<string, unknown> };
 }
 
 /**
@@ -329,7 +336,65 @@ async function attachBrowserCdpCdnMock(
 export interface DouyinMockTracker {
   requestedMediaUrls: string[];
   listCollectionRequests: number;
+  commentListRequests: number;
   dispose: () => Promise<void>;
+}
+
+function buildDefaultMockCommentsResponse(awemeId: string): Record<string, unknown> {
+  return {
+    status_code: 0,
+    cursor: 3,
+    has_more: 0,
+    total: 3,
+    comments: [
+      {
+        cid: `${awemeId}001`,
+        text: '默认测试热评第一条：干货满满！',
+        digg_count: 1280,
+        create_time: 1_760_000_100,
+        user: {
+          uid: 'u-default-1',
+          nickname: '评论用户甲',
+          avatar_thumb: {
+            url_list: [
+              'https://p3-pc-sign.douyinpic.com/mock-avatar-default-1.heic',
+              'https://p3-pc-sign.douyinpic.com/mock-avatar-default-1.png',
+            ],
+          },
+        },
+      },
+      {
+        cid: `${awemeId}002`,
+        text: '默认测试热评第二条：已收藏慢慢看',
+        digg_count: 356,
+        create_time: 1_760_000_200,
+        user: {
+          uid: 'u-default-2',
+          nickname: '评论用户乙',
+          avatar_thumb: {
+            url_list: [
+              'https://p3-pc-sign.douyinpic.com/mock-avatar-default-2.png',
+            ],
+          },
+        },
+      },
+      {
+        cid: `${awemeId}003`,
+        text: '默认测试热评第三条：离线归档太实用了',
+        digg_count: 42,
+        create_time: 1_760_000_300,
+        user: {
+          uid: 'u-default-1',
+          nickname: '评论用户甲',
+          avatar_thumb: {
+            url_list: [
+              'https://p3-pc-sign.douyinpic.com/mock-avatar-default-1.png',
+            ],
+          },
+        },
+      },
+    ],
+  };
 }
 
 /**
@@ -343,6 +408,7 @@ export async function installDouyinMockRoutes(
   const tracker: DouyinMockTracker = {
     requestedMediaUrls: [],
     listCollectionRequests: 0,
+    commentListRequests: 0,
     dispose: async () => undefined,
   };
 
@@ -422,6 +488,27 @@ export async function installDouyinMockRoutes(
         status: 200,
         contentType: 'application/json; charset=utf-8',
         body: JSON.stringify({ status_code: 0 }),
+      });
+      return;
+    }
+
+    if (url.pathname.startsWith('/aweme/v1/web/comment/list')) {
+      tracker.commentListRequests += 1;
+      const awemeId = url.searchParams.get('aweme_id') ?? MOCK_VIDEO_AWEME_ID;
+      const cursor = url.searchParams.get('cursor') ?? '0';
+      const count = Number(url.searchParams.get('count') ?? '20') || 20;
+      const custom = options?.handleCommentList?.(
+        awemeId,
+        cursor,
+        count,
+        tracker.commentListRequests,
+      );
+      await route.fulfill({
+        status: custom?.status ?? 200,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify(
+          custom?.body ?? buildDefaultMockCommentsResponse(awemeId),
+        ),
       });
       return;
     }

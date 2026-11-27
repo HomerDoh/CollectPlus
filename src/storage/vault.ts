@@ -16,9 +16,11 @@ import {
   type CollectionItemRecord,
   type DownloadStrategy,
   type FolderNode,
+  type ItemCommentsFile,
   type MediaAsset,
   type MediaKind,
   type PlatformExtraValue,
+  type SavedComment,
   type TagMeta,
   type TaxonomyFile,
   type VaultConfig,
@@ -29,7 +31,11 @@ import {
   pickTagColor,
   setSetting,
 } from './db.ts';
-import { readFileFromOpfs, removeItemFromOpfs } from './opfs.ts';
+import {
+  listOpfsItemFilePaths,
+  readFileFromOpfs,
+  removeOpfsItemFiles,
+} from './opfs.ts';
 import {
   buildFallbackItemRelativeDir,
   buildItemRelativeDir,
@@ -171,7 +177,7 @@ Collect+ 本地离线收藏库（Local Offline Vault）
 - .collect-vault.json   收藏库标识与版本配置文件
 - taxonomy.json         文件夹树与标签体系配置
 - items/                按「平台 / 年月 / 日期_源ID_标题」归档的全部收藏条目与媒体文件
-                        （每个条目目录下包含 meta.json 及对应的视频/图片/封面）
+                        （每个条目目录下包含 meta.json、对应的视频/图片/封面，以及可选的 comments.json 与 comments/avatars/ 离线评论）
 - .trash/               回收站归档目录
 
 【重要警告 / IMPORTANT WARNING】
@@ -852,6 +858,114 @@ export async function readItemAssetFile(
   return readFileFromOpfs(item.id, assetRelativePath);
 }
 
+function parseSavedComment(raw: unknown): SavedComment | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  if (
+    typeof raw.id !== 'string' ||
+    !raw.id.trim() ||
+    typeof raw.authorName !== 'string' ||
+    typeof raw.content !== 'string'
+  ) {
+    return null;
+  }
+
+  let avatarRelativePath: string | undefined;
+  if (
+    typeof raw.avatarRelativePath === 'string' &&
+    raw.avatarRelativePath.trim()
+  ) {
+    try {
+      if (splitRelativePath(raw.avatarRelativePath).length > 0) {
+        avatarRelativePath = raw.avatarRelativePath;
+      }
+    } catch {
+      avatarRelativePath = undefined;
+    }
+  }
+
+  const likeCount =
+    typeof raw.likeCount === 'number' &&
+    Number.isFinite(raw.likeCount) &&
+    raw.likeCount >= 0
+      ? Math.trunc(raw.likeCount)
+      : 0;
+
+  return {
+    id: raw.id.trim(),
+    ...(typeof raw.authorId === 'string' && raw.authorId.trim()
+      ? { authorId: raw.authorId.trim() }
+      : {}),
+    authorName: raw.authorName.trim() || '匿名用户',
+    ...(avatarRelativePath !== undefined ? { avatarRelativePath } : {}),
+    content: raw.content,
+    likeCount,
+    ...(typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt)
+      ? { createdAt: Math.trunc(raw.createdAt) }
+      : {}),
+  };
+}
+
+function parseItemCommentsFile(raw: unknown): ItemCommentsFile | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  if (
+    !isPlatformId(raw.platform) ||
+    typeof raw.sourceId !== 'string' ||
+    !Array.isArray(raw.comments)
+  ) {
+    return null;
+  }
+
+  const comments: SavedComment[] = [];
+  for (const entry of raw.comments) {
+    const parsed = parseSavedComment(entry);
+    if (parsed) {
+      comments.push(parsed);
+    }
+  }
+
+  const capturedAt =
+    typeof raw.capturedAt === 'number' && Number.isFinite(raw.capturedAt)
+      ? Math.trunc(raw.capturedAt)
+      : 0;
+  const limit =
+    typeof raw.limit === 'number' && Number.isFinite(raw.limit) && raw.limit > 0
+      ? Math.trunc(raw.limit)
+      : 100;
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    platform: raw.platform,
+    sourceId: raw.sourceId,
+    capturedAt,
+    limit,
+    comments,
+  };
+}
+
+/**
+ * 100% 离线读取条目评论快照（优先 CollectVault，自动回退 OPFS）。
+ */
+export async function readItemComments(
+  item: CollectionItemRecord,
+  vaultHandle?: FileSystemDirectoryHandle | null,
+): Promise<ItemCommentsFile | null> {
+  const commentsPath = item.commentsRelativePath ?? 'comments.json';
+  const file = await readItemAssetFile(item, commentsPath, vaultHandle);
+  if (!file) {
+    return null;
+  }
+  try {
+    const raw: unknown = JSON.parse(await file.text());
+    return parseItemCommentsFile(raw);
+  } catch {
+    return null;
+  }
+}
+
 // ============================================================================
 // 3. 业务落盘与同步（VaultFlusher）
 // ============================================================================
@@ -929,17 +1043,45 @@ export async function writeItemMetaToVault(
   return withVaultIoLock(() => writeItemMetaToVaultUnlocked(root, item));
 }
 
+async function copyStagedCommentFilesToDir(
+  root: FileSystemDirectoryHandle,
+  item: CollectionItemRecord,
+  targetRelativeDir: string,
+  copiedPaths: string[],
+): Promise<void> {
+  if (!item.commentsRelativePath) {
+    return;
+  }
+
+  const allOpfsPaths = await listOpfsItemFilePaths(item.id);
+  const commentPaths = allOpfsPaths.filter(
+    (relPath) =>
+      relPath === item.commentsRelativePath || relPath.startsWith('comments/'),
+  );
+
+  for (const relPath of commentPaths) {
+    const opfsFile = await readFileFromOpfs(item.id, relPath);
+    if (opfsFile) {
+      await copyFileToVault(root, `${targetRelativeDir}/${relPath}`, opfsFile);
+      copiedPaths.push(relPath);
+    }
+  }
+}
+
 async function syncStagedItemToDir(
   root: FileSystemDirectoryHandle,
   item: CollectionItemRecord,
   targetRelativeDir: string,
-): Promise<void> {
+): Promise<string[]> {
+  const copiedPaths: string[] = [];
+
   for (const asset of item.assets) {
     const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
     const vaultAssetPath = `${targetRelativeDir}/${asset.relativePath}`;
 
     if (opfsFile) {
       await copyFileToVault(root, vaultAssetPath, opfsFile);
+      copiedPaths.push(asset.relativePath);
     } else if (asset.downloaded) {
       const alreadyInVault = await hasVaultFile(root, vaultAssetPath);
       if (!alreadyInVault) {
@@ -950,12 +1092,16 @@ async function syncStagedItemToDir(
     }
   }
 
+  await copyStagedCommentFilesToDir(root, item, targetRelativeDir, copiedPaths);
+
   const syncedSnapshot: CollectionItemRecord = {
     ...item,
     relativeDir: targetRelativeDir,
     syncStatus: 'vault_synced',
   };
   await writeItemMetaToVaultUnlocked(root, syncedSnapshot);
+
+  return copiedPaths;
 }
 
 async function flushToVaultUnlocked(
@@ -1002,8 +1148,9 @@ async function flushToVaultUnlocked(
             item.collectedAt,
           );
 
+      let copiedPaths: string[];
       try {
-        await syncStagedItemToDir(root, item, effectiveRelativeDir);
+        copiedPaths = await syncStagedItemToDir(root, item, effectiveRelativeDir);
       } catch (error) {
         if (!isNameNotAllowedError(error)) {
           throw error;
@@ -1019,7 +1166,7 @@ async function flushToVaultUnlocked(
           throw error;
         }
         effectiveRelativeDir = fallbackDir;
-        await syncStagedItemToDir(root, item, effectiveRelativeDir);
+        copiedPaths = await syncStagedItemToDir(root, item, effectiveRelativeDir);
       }
 
       await db.transaction('rw', db.items, async () => {
@@ -1037,7 +1184,7 @@ async function flushToVaultUnlocked(
         });
       });
 
-      await removeItemFromOpfs(item.id);
+      await removeOpfsItemFiles(item.id, copiedPaths);
       summary.syncedStagedCount += 1;
     } catch (error) {
       summary.failedCount += 1;
@@ -1063,7 +1210,7 @@ async function flushToVaultUnlocked(
     });
 
     try {
-      let copiedResidualFromOpfs = false;
+      const copiedPaths: string[] = [];
       for (const asset of item.assets) {
         const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
         if (opfsFile) {
@@ -1072,9 +1219,16 @@ async function flushToVaultUnlocked(
             `${item.relativeDir}/${asset.relativePath}`,
             opfsFile,
           );
-          copiedResidualFromOpfs = true;
+          copiedPaths.push(asset.relativePath);
         }
       }
+
+      await copyStagedCommentFilesToDir(
+        root,
+        item,
+        item.relativeDir,
+        copiedPaths,
+      );
 
       const syncedSnapshot: CollectionItemRecord = {
         ...item,
@@ -1095,8 +1249,8 @@ async function flushToVaultUnlocked(
         });
       });
 
-      if (copiedResidualFromOpfs) {
-        await removeItemFromOpfs(item.id);
+      if (copiedPaths.length > 0) {
+        await removeOpfsItemFiles(item.id, copiedPaths);
       }
 
       summary.syncedMetaCount += 1;
@@ -1486,6 +1640,34 @@ function parseCollectionItemMeta(
     }
   }
 
+  let commentsRelativePath: string | undefined;
+  if (
+    typeof raw.commentsRelativePath === 'string' &&
+    raw.commentsRelativePath.trim()
+  ) {
+    try {
+      if (splitRelativePath(raw.commentsRelativePath).length > 0) {
+        commentsRelativePath = raw.commentsRelativePath;
+      }
+    } catch {
+      commentsRelativePath = undefined;
+    }
+  }
+
+  const savedCommentCount =
+    typeof raw.savedCommentCount === 'number' &&
+    Number.isFinite(raw.savedCommentCount) &&
+    raw.savedCommentCount >= 0
+      ? Math.trunc(raw.savedCommentCount)
+      : undefined;
+
+  const commentsSizeBytes =
+    typeof raw.commentsSizeBytes === 'number' &&
+    Number.isFinite(raw.commentsSizeBytes) &&
+    raw.commentsSizeBytes >= 0
+      ? Math.trunc(raw.commentsSizeBytes)
+      : undefined;
+
   const platformExtra = parsePlatformExtra(raw.platformExtra);
 
   return {
@@ -1510,6 +1692,9 @@ function parseCollectionItemMeta(
     // 以实际扫描目录为准，确保目录迁移或重整后仍可精准定位同级媒体文件
     relativeDir: scannedRelativeDir,
     ...(coverRelativePath !== undefined ? { coverRelativePath } : {}),
+    ...(commentsRelativePath !== undefined ? { commentsRelativePath } : {}),
+    ...(savedCommentCount !== undefined ? { savedCommentCount } : {}),
+    ...(commentsSizeBytes !== undefined ? { commentsSizeBytes } : {}),
     assets,
     syncStatus: 'vault_synced',
     totalSizeBytes:

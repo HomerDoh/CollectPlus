@@ -453,4 +453,189 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
       await tracker.dispose();
     }
   });
+
+  test('收藏抖音视频同步分页保存前 100 条评论（含离线去重头像、昵称、内容、点赞数）并在详情页离线展示', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const TOTAL_MOCK_COMMENTS = 120;
+    const UNIQUE_AVATAR_COUNT = 25;
+
+    const tracker = await installDouyinMockRoutes(context, {
+      handleCommentList: (_awemeId, cursorRaw, count) => {
+        const start = Math.max(0, Number(cursorRaw) || 0);
+        const pageSize = Math.max(1, Math.min(20, count));
+        const end = Math.min(TOTAL_MOCK_COMMENTS, start + pageSize);
+        const comments = [];
+        for (let idx = start; idx < end; idx += 1) {
+          const seq = idx + 1;
+          const avatarSlot = ((idx % UNIQUE_AVATAR_COUNT) + 1)
+            .toString()
+            .padStart(2, '0');
+          comments.push({
+            cid: `900${seq.toString().padStart(4, '0')}`,
+            text: `第 ${seq} 条热门评论内容`,
+            digg_count: seq === 1 ? 15_200 : Math.max(1, 500 - seq),
+            create_time: 1_760_000_000 + seq * 60,
+            user: {
+              uid: `commenter-${avatarSlot}`,
+              nickname: `热评达人_${seq.toString().padStart(3, '0')}`,
+              avatar_thumb: {
+                url_list: [
+                  `https://p3-pc-sign.douyinpic.com/mock-avatar-${avatarSlot}.heic`,
+                  `https://p3-pc-sign.douyinpic.com/mock-avatar-${avatarSlot}.png`,
+                ],
+              },
+            },
+          });
+        }
+        return {
+          body: {
+            status_code: 0,
+            comments,
+            cursor: end,
+            has_more: end < TOTAL_MOCK_COMMENTS ? 1 : 0,
+            total: TOTAL_MOCK_COMMENTS,
+          },
+        };
+      },
+    });
+
+    try {
+      const douyinPage = await context.newPage();
+      await douyinPage.goto(
+        `https://www.douyin.com/video/${MOCK_VIDEO_AWEME_ID}`,
+        { waitUntil: 'domcontentloaded' },
+      );
+
+      await expect(douyinPage.locator('button.cp-fab-btn')).toBeVisible();
+      await douyinPage.click('#mock-load-detail');
+      await expect
+        .poll(async () =>
+          douyinPage.evaluate(() => {
+            const win = window as unknown as { __mockDetailLoaded?: boolean };
+            return Boolean(win.__mockDetailLoaded);
+          }),
+        )
+        .toBe(true);
+
+      await douyinPage.locator('button.cp-fab-btn').click();
+
+      const libraryPage = await context.newPage();
+      await libraryPage.goto(extensionUrl('library.html'));
+      await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible({
+        timeout: 20_000,
+      });
+      await expect(
+        libraryPage.locator('article').getByText('待同步'),
+      ).toBeVisible({ timeout: 20_000 });
+
+      // 等待 OPFS 暂存区生成 comments.json（严格截断至前 100 条）与 25 个去重离线头像
+      await expect
+        .poll(
+          async () =>
+            libraryPage.evaluate(async () => {
+              const root = await navigator.storage.getDirectory();
+              let stageRoot: FileSystemDirectoryHandle;
+              try {
+                stageRoot = await root.getDirectoryHandle('collect-plus-stage', {
+                  create: false,
+                });
+              } catch {
+                return null;
+              }
+              for await (const [, itemHandle] of stageRoot.entries()) {
+                if (itemHandle.kind !== 'directory') {
+                  continue;
+                }
+                try {
+                  const commentsFh = await itemHandle.getFileHandle(
+                    'comments.json',
+                    { create: false },
+                  );
+                  const parsed = JSON.parse(
+                    await (await commentsFh.getFile()).text(),
+                  ) as {
+                    comments?: Array<{
+                      id?: string;
+                      authorName?: string;
+                      content?: string;
+                      likeCount?: number;
+                      avatarRelativePath?: string;
+                    }>;
+                  };
+                  const commentsDir = await itemHandle.getDirectoryHandle(
+                    'comments',
+                    { create: false },
+                  );
+                  const avatarsDir = await commentsDir.getDirectoryHandle(
+                    'avatars',
+                    { create: false },
+                  );
+                  const avatarNames: string[] = [];
+                  for await (const [name] of avatarsDir.entries()) {
+                    avatarNames.push(name);
+                  }
+                  return {
+                    count: parsed.comments?.length ?? 0,
+                    first: parsed.comments?.[0] ?? null,
+                    last: parsed.comments?.[99] ?? null,
+                    avatarCount: avatarNames.length,
+                  };
+                } catch {
+                  return null;
+                }
+              }
+              return null;
+            }),
+          { timeout: 25_000 },
+        )
+        .toMatchObject({
+          count: 100,
+          avatarCount: UNIQUE_AVATAR_COUNT,
+          first: {
+            authorName: '热评达人_001',
+            content: '第 1 条热门评论内容',
+            likeCount: 15_200,
+          },
+          last: {
+            authorName: '热评达人_100',
+            content: '第 100 条热门评论内容',
+          },
+        });
+
+      // 确认避开 HEIC，仅请求了 PNG 头像，且 5 页拉满 100 条即停止分页（不请求第 6 页）
+      expect(tracker.commentListRequests).toBe(5);
+      expect(
+        tracker.requestedMediaUrls.some((u) => u.includes('.heic')),
+      ).toBe(false);
+
+      // 打开视频详情抽屉 -> 切换到「评论」标签 -> 验证离线头像、昵称、内容、点赞数渲染
+      await libraryPage.locator('article').first().click();
+      const dialog = libraryPage.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+
+      const commentsTab = dialog.getByRole('tab', { name: /评论/ });
+      await expect(commentsTab).toContainText('100');
+      await commentsTab.click();
+
+      await expect(dialog.getByText('已离线保存 100 条评论')).toBeVisible();
+      const rows = dialog.getByTestId('item-comment-row');
+      await expect(rows).toHaveCount(100);
+
+      const firstRow = rows.first();
+      await expect(firstRow).toContainText('热评达人_001');
+      await expect(firstRow).toContainText('第 1 条热门评论内容');
+      await expect(firstRow).toContainText('1.5万');
+      await expect(firstRow.locator('img')).toHaveAttribute(
+        'src',
+        /^blob:chrome-extension:\/\//,
+      );
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await tracker.dispose();
+    }
+  });
 });

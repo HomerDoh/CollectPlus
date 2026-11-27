@@ -15,6 +15,8 @@ interface VaultInspectionResult {
   metaFilesCount: number;
   metaHasThumbnailDataUrl: boolean;
   videoFileSize: number;
+  commentsCount: number;
+  commentAvatarFilesCount: number;
   stageStillExists: boolean;
 }
 
@@ -346,11 +348,17 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
           let metaFilesCount = 0;
           let metaHasThumbnailDataUrl = false;
           let videoFileSize = 0;
+          let commentsCount = 0;
+          let commentAvatarFilesCount = 0;
 
-          const walk = async (dir: FileSystemDirectoryHandle): Promise<void> => {
+          const walk = async (
+            dir: FileSystemDirectoryHandle,
+            relPrefix = '',
+          ): Promise<void> => {
             for await (const [name, handle] of dir.entries()) {
+              const nextRel = relPrefix ? `${relPrefix}/${name}` : name;
               if (handle.kind === 'directory') {
-                await walk(handle);
+                await walk(handle, nextRel);
               } else if (handle.kind === 'file') {
                 if (name === 'meta.json') {
                   metaFilesCount += 1;
@@ -366,6 +374,16 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
                 } else if (name === 'video.mp4') {
                   const file = await handle.getFile();
                   videoFileSize = file.size;
+                } else if (name === 'comments.json') {
+                  const file = await handle.getFile();
+                  const parsed = JSON.parse(await file.text()) as {
+                    comments?: unknown[];
+                  };
+                  if (Array.isArray(parsed.comments)) {
+                    commentsCount = parsed.comments.length;
+                  }
+                } else if (nextRel.includes('/comments/avatars/')) {
+                  commentAvatarFilesCount += 1;
                 }
               }
             }
@@ -403,6 +421,8 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
             metaFilesCount,
             metaHasThumbnailDataUrl,
             videoFileSize,
+            commentsCount,
+            commentAvatarFilesCount,
             stageStillExists,
           };
         },
@@ -415,6 +435,8 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       expect(inspection.metaFilesCount).toBe(1);
       expect(inspection.metaHasThumbnailDataUrl).toBe(false);
       expect(inspection.videoFileSize).toBeGreaterThan(0);
+      expect(inspection.commentsCount).toBe(3);
+      expect(inspection.commentAvatarFilesCount).toBe(2);
       expect(inspection.stageStillExists).toBe(false);
 
       // 5. 前往设置页清空浏览器缓存索引（确认不删硬盘文件且保留目录绑定，触发重建引导）
@@ -449,7 +471,7 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         libraryPage.locator('aside').getByText('容灾验证目录'),
       ).toBeVisible();
 
-      // 打开重建后的条目抽屉，验证直接从 CollectVault 离线读取视频生成 blob: URL
+      // 打开重建后的条目抽屉，验证直接从 CollectVault 离线读取视频生成 blob: URL 及离线评论恢复
       await libraryPage.locator('article').first().click();
       const dialog = libraryPage.getByRole('dialog');
       await expect(dialog).toBeVisible();
@@ -458,6 +480,18 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       expect(await videoEl.getAttribute('src')).toMatch(
         /^blob:chrome-extension:\/\//,
       );
+
+      const commentsTab = dialog.getByRole('tab', { name: /评论/ });
+      await expect(commentsTab).toContainText('3');
+      await commentsTab.click();
+      await expect(dialog.getByText('已离线保存 3 条评论')).toBeVisible();
+      await expect(dialog.getByTestId('item-comment-row')).toHaveCount(3);
+      await expect(dialog.getByTestId('item-comment-row').first()).toContainText(
+        '评论用户甲',
+      );
+      await expect(
+        dialog.getByTestId('item-comment-row').first().locator('img'),
+      ).toHaveAttribute('src', /^blob:chrome-extension:\/\//);
 
       expect(pageErrors).toEqual([]);
     } finally {
@@ -668,13 +702,17 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
           let metaFilesCount = 0;
           let metaHasThumbnailDataUrl = false;
           let videoFileSize = 0;
+          let commentsCount = 0;
+          let commentAvatarFilesCount = 0;
 
           const scanDir = async (
             dir: FileSystemDirectoryHandle,
+            relPrefix = '',
           ): Promise<void> => {
             for await (const [name, handle] of dir.entries()) {
+              const nextRel = relPrefix ? `${relPrefix}/${name}` : name;
               if (handle.kind === 'directory') {
-                await scanDir(handle);
+                await scanDir(handle, nextRel);
               } else if (handle.kind === 'file') {
                 if (name === 'meta.json') {
                   metaFilesCount += 1;
@@ -684,6 +722,15 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
                   }
                 } else if (name === 'video.mp4') {
                   videoFileSize = (await handle.getFile()).size;
+                } else if (name === 'comments.json') {
+                  const parsed = JSON.parse(
+                    await (await handle.getFile()).text(),
+                  ) as { comments?: unknown[] };
+                  if (Array.isArray(parsed.comments)) {
+                    commentsCount = parsed.comments.length;
+                  }
+                } else if (nextRel.includes('/comments/avatars/')) {
+                  commentAvatarFilesCount += 1;
                 }
               }
             }
@@ -712,6 +759,8 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
             metaFilesCount,
             metaHasThumbnailDataUrl,
             videoFileSize,
+            commentsCount,
+            commentAvatarFilesCount,
             stageStillExists,
           };
         },
@@ -724,6 +773,8 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       expect(inspection.metaFilesCount).toBe(1);
       expect(inspection.metaHasThumbnailDataUrl).toBe(false);
       expect(inspection.videoFileSize).toBeGreaterThan(0);
+      expect(inspection.commentsCount).toBe(3);
+      expect(inspection.commentAvatarFilesCount).toBe(2);
       expect(inspection.stageStillExists).toBe(false);
 
       // 5. 事后打开管理台，确认无「待同步」标记且可从 CollectVault 直接离线播放

@@ -205,6 +205,20 @@ export function mediaKindLabel(kind: MediaKind): string {
   }
 }
 
+/** 格式化点赞/评论等整数计数为紧凑可读文本（如 128、1.2万） */
+export function formatCompactCount(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) {
+    return '0';
+  }
+  const safe = Math.trunc(count);
+  if (safe < 10_000) {
+    return String(safe);
+  }
+  const wan = safe / 10_000;
+  const formatted = wan >= 100 ? String(Math.round(wan)) : wan.toFixed(1).replace(/\.0$/, '');
+  return `${formatted}万`;
+}
+
 /** 安全提取任意异常的人类可读错误信息 */
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
