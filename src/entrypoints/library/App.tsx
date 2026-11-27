@@ -967,13 +967,11 @@ export default function App() {
         return false;
       }
       if (
-        mediaKindFilter === 'gallery' &&
+        mediaKindFilter === 'image_text' &&
         item.kind !== 'gallery' &&
-        item.kind !== 'image'
+        item.kind !== 'image' &&
+        item.kind !== 'article'
       ) {
-        return false;
-      }
-      if (mediaKindFilter === 'article' && item.kind !== 'article') {
         return false;
       }
 

@@ -211,7 +211,7 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     }
   });
 
-  test('媒体类型「文章」与 5 平台筛选（抖音/B站/知乎/YouTube/X）及文章离线阅读', async ({
+  test('媒体类型三项（全部/视频/图文）与 5 平台筛选（抖音/B站/知乎/YouTube/X）及文章离线阅读', async ({
     context,
     extensionUrl,
     pageErrors,
@@ -305,13 +305,29 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     await libraryPage.reload();
     await expect(libraryPage.locator('article')).toHaveCount(5);
 
-    // 1. 媒体类型筛选：文章
-    await libraryPage.getByRole('button', { name: '文章', exact: true }).click();
-    await expect(libraryPage.locator('article')).toHaveCount(1);
+    // 1. 媒体类型筛选：三项（全部 / 视频 / 图文）
+    const mediaKindGroup = libraryPage.getByRole('group', {
+      name: '媒体类型筛选',
+    });
+    await expect(mediaKindGroup.getByRole('button')).toHaveText([
+      '全部',
+      '视频',
+      '图文',
+    ]);
+
+    await mediaKindGroup.getByRole('button', { name: '视频', exact: true }).click();
+    await expect(libraryPage.locator('article')).toHaveCount(3);
+
+    await mediaKindGroup.getByRole('button', { name: '图文', exact: true }).click();
+    await expect(libraryPage.locator('article')).toHaveCount(2);
     await expect(libraryPage.getByText('知乎深度专栏文章样本')).toBeVisible();
+    await expect(libraryPage.getByText('X 图文动态样本')).toBeVisible();
 
     // 打开文章详情抽屉，验证离线阅读预览正常渲染无报错
-    await libraryPage.locator('article').first().click();
+    await libraryPage
+      .locator('article')
+      .filter({ hasText: '知乎深度专栏文章样本' })
+      .click();
     const dialog = libraryPage.getByRole('dialog');
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText('离线文章阅读')).toBeVisible();
@@ -324,8 +340,7 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     await expect(dialog).toBeHidden();
 
     // 重置媒体类型为全部
-    await libraryPage
-      .getByRole('group', { name: '媒体类型筛选' })
+    await mediaKindGroup
       .getByRole('button', { name: '全部', exact: true })
       .click();
     await expect(libraryPage.locator('article')).toHaveCount(5);

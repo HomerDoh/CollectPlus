@@ -160,7 +160,7 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       await autoDialog.getByRole('button', { name: '关闭详情' }).click();
       await expect(autoDialog).toBeHidden();
 
-      // 3. 验证媒体类型筛选（全部 2 -> 仅视频 1 -> 仅图集 1 -> 全部 2）
+      // 3. 验证媒体类型筛选（全部 2 -> 仅视频 1 -> 仅图文 1 -> 全部 2）
       await expect(libraryPage.locator('article')).toHaveCount(2);
 
       const sidebar = libraryPage.locator('aside');
@@ -174,7 +174,7 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
 
       await mediaKindGroup
-        .getByRole('button', { name: '图集', exact: true })
+        .getByRole('button', { name: '图文', exact: true })
         .click();
       await expect(libraryPage.locator('article')).toHaveCount(1);
       await expect(libraryPage.getByText(MOCK_GALLERY_TITLE)).toBeVisible();

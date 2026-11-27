@@ -5,7 +5,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  FileText,
   Film,
   Folder,
   FolderOpen,
@@ -24,7 +23,7 @@ import type { CollectionItemRecord, FolderNode } from '@/types/schema.ts';
 
 export type QuickNavView = 'all' | 'uncategorized' | 'pending_sync' | 'trash';
 export type SidebarSyncStatus = 'syncing' | 'failed';
-export type MediaKindFilter = 'all' | 'video' | 'gallery' | 'article';
+export type MediaKindFilter = 'all' | 'video' | 'image_text';
 export type PlatformFilter =
   | 'all'
   | 'douyin'
@@ -601,7 +600,7 @@ export function SidebarTree({
             媒体类型
           </p>
           <div
-            className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1"
+            className="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1"
             role="group"
             aria-label="媒体类型筛选"
           >
@@ -609,8 +608,7 @@ export function SidebarTree({
               [
                 { value: 'all', label: '全部', icon: null },
                 { value: 'video', label: '视频', icon: Film },
-                { value: 'gallery', label: '图集', icon: Images },
-                { value: 'article', label: '文章', icon: FileText },
+                { value: 'image_text', label: '图文', icon: Images },
               ] as const
             ).map((opt) => {
               const Icon = opt.icon;
