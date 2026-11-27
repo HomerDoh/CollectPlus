@@ -1,4 +1,10 @@
-import type { MediaKind, PlatformId, SyncStatus } from '@/types/schema.ts';
+import { i18n } from '#i18n';
+import type {
+  AutoSyncExclusionReason,
+  MediaKind,
+  PlatformId,
+  SyncStatus,
+} from '@/types/schema.ts';
 
 /** 格式化字节数为人类可读体积（如 12.4 MB） */
 export function formatBytes(bytes: number): string {
@@ -70,22 +76,22 @@ export function formatRelativeTime(ts: number): string {
 
   const diffSec = Math.floor(diffMs / 1000);
   if (diffSec < 60) {
-    return '刚刚';
+    return i18n.t('format.justNow');
   }
 
   const diffMin = Math.floor(diffSec / 60);
   if (diffMin < 60) {
-    return `${diffMin} 分钟前`;
+    return i18n.t('format.minutesAgo', { count: diffMin });
   }
 
   const diffHour = Math.floor(diffMin / 60);
   if (diffHour < 24) {
-    return `${diffHour} 小时前`;
+    return i18n.t('format.hoursAgo', { count: diffHour });
   }
 
   const diffDay = Math.floor(diffHour / 24);
   if (diffDay < 30) {
-    return `${diffDay} 天前`;
+    return i18n.t('format.daysAgo', { count: diffDay });
   }
 
   const date = new Date(ts);
@@ -141,6 +147,61 @@ export function syncStatusMeta(status: SyncStatus): SyncStatusVisual {
         shortLabel: '失败',
         badgeClass: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200',
         dotClass: 'bg-rose-500',
+      };
+  }
+}
+
+export interface AutoSyncExclusionVisual {
+  label: string;
+  shortLabel: string;
+  badgeClass: string;
+  dotClass: string;
+}
+
+/** 返回「不自动同步」原因对应的中文文案与视觉样式 */
+export function autoSyncExclusionMeta(
+  reason: AutoSyncExclusionReason,
+): AutoSyncExclusionVisual {
+  switch (reason) {
+    case 'deleted_keep_remote':
+      return {
+        label: '管理台删除（保留原站收藏）',
+        shortLabel: '已删保留原站',
+        badgeClass:
+          'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200',
+        dotClass: 'bg-amber-500',
+      };
+    case 'sync_cancelled_by_user':
+      return {
+        label: '收藏时取消同步到插件',
+        shortLabel: '已取消同步',
+        badgeClass:
+          'bg-slate-100 text-slate-700 ring-1 ring-inset ring-slate-200',
+        dotClass: 'bg-slate-500',
+      };
+    case 'support_author':
+      return {
+        label: '支持作者 / 冲数据（未存本地）',
+        shortLabel: '支持作者',
+        badgeClass:
+          'bg-pink-50 text-pink-700 ring-1 ring-inset ring-pink-200',
+        dotClass: 'bg-pink-500',
+      };
+    case 'watch_later':
+      return {
+        label: '稍后观看（未存本地）',
+        shortLabel: '稍后观看',
+        badgeClass:
+          'bg-sky-50 text-sky-700 ring-1 ring-inset ring-sky-200',
+        dotClass: 'bg-sky-500',
+      };
+    case 'skip_local_save':
+      return {
+        label: '取消本地持久化（仅存元数据）',
+        shortLabel: '仅存元数据',
+        badgeClass:
+          'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200',
+        dotClass: 'bg-violet-500',
       };
   }
 }

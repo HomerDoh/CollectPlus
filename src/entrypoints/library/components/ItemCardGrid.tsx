@@ -1,7 +1,12 @@
 import {
   ArrowDownWideNarrow,
+  Check,
+  CheckSquare,
+  CloudOff,
   FileText,
   Film,
+  FolderMinus,
+  FolderPlus,
   HardDrive,
   Images,
   Inbox,
@@ -20,6 +25,7 @@ import type {
   TagMeta,
 } from '@/types/schema.ts';
 import {
+  autoSyncExclusionMeta,
   formatBytes,
   formatDuration,
   formatRelativeTime,
@@ -37,15 +43,32 @@ export interface ItemCardGridProps {
   sortBy: SortOption;
   viewMode: ViewMode;
   isTrashView: boolean;
+  isExcludedView: boolean;
+  currentFolderId: string | null;
   hasActiveFilters: boolean;
   contextTitle: string;
+  selectionMode: boolean;
+  selectedIds: ReadonlySet<string>;
   onSearchChange: (query: string) => void;
   onSortChange: (sort: SortOption) => void;
   onViewModeChange: (mode: ViewMode) => void;
   onResetFilters: () => void;
   onOpenItem: (item: CollectionItemRecord) => void;
-  onSoftDeleteItem: (item: CollectionItemRecord) => Promise<void>;
+  onToggleSelectionMode: () => void;
+  onToggleSelectItem: (itemId: string, shiftKey: boolean) => void;
+  onSelectAllVisible: () => void;
+  onClearSelection: () => void;
+  onOpenBatchFolderModal: () => void;
+  onBatchRemoveFromCurrentFolder: () => Promise<void>;
+  onRequestDeleteItems: (
+    items: CollectionItemRecord[],
+    mode: 'soft' | 'permanent',
+  ) => void;
+  onBatchRestoreItems: (items: CollectionItemRecord[]) => Promise<void>;
   onRestoreItem: (item: CollectionItemRecord) => Promise<void>;
+  onAllowAutoSyncAgain: (items: CollectionItemRecord[]) => Promise<void>;
+  onRemoteUncollectAndClear: (items: CollectionItemRecord[]) => Promise<void>;
+  onCancelItemSync: (item: CollectionItemRecord) => Promise<void>;
 }
 
 function getMediaBadgeText(item: CollectionItemRecord): string {
@@ -74,16 +97,34 @@ export function ItemCardGrid({
   sortBy,
   viewMode,
   isTrashView,
+  isExcludedView,
+  currentFolderId,
   hasActiveFilters,
   contextTitle,
+  selectionMode,
+  selectedIds,
   onSearchChange,
   onSortChange,
   onViewModeChange,
   onResetFilters,
   onOpenItem,
-  onSoftDeleteItem,
+  onToggleSelectionMode,
+  onToggleSelectItem,
+  onSelectAllVisible,
+  onClearSelection,
+  onOpenBatchFolderModal,
+  onBatchRemoveFromCurrentFolder,
+  onRequestDeleteItems,
+  onBatchRestoreItems,
   onRestoreItem,
+  onAllowAutoSyncAgain,
+  onRemoteUncollectAndClear,
+  onCancelItemSync,
 }: ItemCardGridProps) {
+  const selectedVisibleItems = items.filter((item) => selectedIds.has(item.id));
+  const selectedCount = selectedVisibleItems.length;
+  const allVisibleSelected = items.length > 0 && selectedCount === items.length;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 顶部工具栏 */}
@@ -117,7 +158,7 @@ export function ItemCardGrid({
           </div>
         </div>
 
-        {/* 右侧上下文统计 + 排序 + 视图切换 */}
+        {/* 右侧上下文统计 + 批量选择 + 排序 + 视图切换 */}
         <div className="flex items-center gap-2.5">
           <span className="hidden text-xs text-slate-500 xl:inline">
             {contextTitle} ·{' '}
@@ -126,6 +167,23 @@ export function ItemCardGrid({
             </strong>{' '}
             条
           </span>
+
+          {/* 批量选择切换按钮 */}
+          {items.length > 0 && (
+            <button
+              type="button"
+              onClick={onToggleSelectionMode}
+              data-testid="toggle-selection-mode"
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                selectionMode
+                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              <CheckSquare className="h-3.5 w-3.5" />
+              <span>{selectionMode ? '退出批量选择' : '批量选择'}</span>
+            </button>
+          )}
 
           {/* 排序选择器 */}
           <label className="relative inline-flex items-center">
@@ -172,6 +230,135 @@ export function ItemCardGrid({
         </div>
       </div>
 
+      {/* 批量操作吸顶工具条 */}
+      {selectionMode && (
+        <div
+          data-testid="batch-action-bar"
+          className="flex flex-wrap items-center justify-between gap-2.5 border-b border-indigo-200 bg-indigo-50/90 px-6 py-2.5 text-xs"
+        >
+          <div className="flex items-center gap-3">
+            <label className="inline-flex cursor-pointer items-center gap-2 font-medium text-indigo-900">
+              <input
+                type="checkbox"
+                checked={allVisibleSelected}
+                onChange={() =>
+                  allVisibleSelected ? onClearSelection() : onSelectAllVisible()
+                }
+                data-testid="batch-select-all"
+                className="h-4 w-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              <span>{allVisibleSelected ? '取消全选' : '全选当前'}</span>
+            </label>
+            <span className="text-indigo-800 tabular-nums">
+              已选{' '}
+              <strong data-testid="batch-selected-count" className="font-bold">
+                {selectedCount}
+              </strong>{' '}
+              / {items.length} 项
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {isExcludedView ? (
+              <>
+                <button
+                  type="button"
+                  disabled={selectedCount === 0}
+                  onClick={() => void onAllowAutoSyncAgain(selectedVisibleItems)}
+                  data-testid="batch-allow-sync-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>允许再次自动同步</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={selectedCount === 0}
+                  onClick={() =>
+                    void onRemoteUncollectAndClear(selectedVisibleItems)
+                  }
+                  data-testid="batch-remote-uncollect-clear-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>取消原站收藏并清除</span>
+                </button>
+              </>
+            ) : isTrashView ? (
+              <>
+                <button
+                  type="button"
+                  disabled={selectedCount === 0}
+                  onClick={() => void onBatchRestoreItems(selectedVisibleItems)}
+                  data-testid="batch-restore-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>批量恢复</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={selectedCount === 0}
+                  onClick={() =>
+                    onRequestDeleteItems(selectedVisibleItems, 'permanent')
+                  }
+                  data-testid="batch-permanent-delete-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>彻底删除</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={selectedCount === 0}
+                  onClick={onOpenBatchFolderModal}
+                  data-testid="batch-add-folder-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  <span>加入分类文件夹</span>
+                </button>
+                {currentFolderId !== null && (
+                  <button
+                    type="button"
+                    disabled={selectedCount === 0}
+                    onClick={() => void onBatchRemoveFromCurrentFolder()}
+                    data-testid="batch-remove-folder-btn"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    <FolderMinus className="h-3.5 w-3.5" />
+                    <span>移出当前文件夹</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={selectedCount === 0}
+                  onClick={() =>
+                    onRequestDeleteItems(selectedVisibleItems, 'soft')
+                  }
+                  data-testid="batch-delete-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>删除</span>
+                </button>
+              </>
+            )}
+
+            <button
+              type="button"
+              onClick={onToggleSelectionMode}
+              className="rounded-lg border border-indigo-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+            >
+              完成
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 内容展示区 */}
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {items.length === 0 ? (
@@ -179,6 +366,8 @@ export function ItemCardGrid({
             <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400">
               {isTrashView ? (
                 <Trash2 className="h-6 w-6" />
+              ) : isExcludedView ? (
+                <CloudOff className="h-6 w-6" />
               ) : (
                 <Inbox className="h-6 w-6" />
               )}
@@ -188,14 +377,18 @@ export function ItemCardGrid({
                 ? '没有符合当前筛选条件的收藏条目'
                 : isTrashView
                   ? '回收站为空'
-                  : '还没有收藏任何作品'}
+                  : isExcludedView
+                    ? '暂无不自动同步的内容'
+                    : '还没有收藏任何作品'}
             </h3>
             <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
               {hasActiveFilters
                 ? '尝试更换检索关键词，或清除文件夹、媒体类型与来源平台筛选条件。'
                 : isTrashView
-                  ? '移入回收站的条目会暂时保存在这里，随时可以一键恢复。'
-                  : '打开已支持的平台页面（抖音、B站、V2EX、小红书、知乎）并点击收藏按钮或按下 Alt+S，内容将自动静默下载并归档到本地。'}
+                  ? '移入回收站的条目会暂时保存在这里，自动同步不会重新拉回，随时可以恢复或彻底删除。'
+                  : isExcludedView
+                    ? '当你在管理台彻底删除媒体但保留原站账号收藏，或在收藏下载过程中取消同步到插件时，条目元数据与原因会保存在这里，避免重新打开网页时被自动采集。'
+                    : '打开已支持的平台页面（抖音、B站、V2EX、小红书、知乎）并点击收藏按钮或按下 Alt+S，内容将自动静默下载并归档到本地。'}
             </p>
             {hasActiveFilters && (
               <button
@@ -212,16 +405,30 @@ export function ItemCardGrid({
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
             {items.map((item) => {
               const platformInfo = platformMeta(item.platform);
-              const syncInfo = syncStatusMeta(item.syncStatus);
+              const exclusion = item.autoSyncExclusion ?? null;
+              const statusBadge = exclusion
+                ? autoSyncExclusionMeta(exclusion.reason)
+                : syncStatusMeta(item.syncStatus);
               const mediaBadge = getMediaBadgeText(item);
               const visibleTags = item.tags.slice(0, 3);
               const extraTagCount = item.tags.length - visibleTags.length;
+              const isSelected = selectedIds.has(item.id);
 
               return (
                 <article
                   key={item.id}
-                  onClick={() => onOpenItem(item)}
-                  className="group relative flex cursor-pointer flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xs transition duration-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md"
+                  onClick={(e) => {
+                    if (selectionMode) {
+                      onToggleSelectItem(item.id, e.shiftKey);
+                    } else {
+                      onOpenItem(item);
+                    }
+                  }}
+                  className={`group relative flex cursor-pointer flex-col overflow-hidden rounded-2xl border bg-white shadow-2xs transition duration-200 ${
+                    isSelected
+                      ? 'border-indigo-500 ring-2 ring-indigo-200 shadow-md'
+                      : 'border-slate-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md'
+                  }`}
                 >
                   {/* 封面预览区 */}
                   <div className="relative aspect-16/10 w-full overflow-hidden bg-slate-100">
@@ -234,7 +441,9 @@ export function ItemCardGrid({
                       />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200/70 text-slate-300">
-                        {item.kind === 'video' ? (
+                        {exclusion ? (
+                          <CloudOff className="h-10 w-10 text-slate-400" />
+                        ) : item.kind === 'video' ? (
                           <Film className="h-10 w-10" />
                         ) : item.kind === 'article' ? (
                           <FileText className="h-10 w-10" />
@@ -244,22 +453,46 @@ export function ItemCardGrid({
                       </div>
                     )}
 
-                    {/* 左上角平台徽标 */}
-                    <span
-                      className={`absolute top-2.5 left-2.5 rounded-md px-2 py-0.5 text-[10px] font-semibold ${platformInfo.badgeClass}`}
-                    >
-                      {platformInfo.label}
-                    </span>
+                    {/* 左上角：批量选择复选框 + 平台徽标（并排不重叠） */}
+                    <div className="absolute top-2.5 left-2.5 z-10 flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={isSelected}
+                        aria-label={`选择 ${item.title}`}
+                        data-testid="item-select-checkbox"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleSelectItem(item.id, e.shiftKey);
+                        }}
+                        className={`h-5 w-5 items-center justify-center rounded-md border shadow-xs transition ${
+                          selectionMode || isSelected
+                            ? 'inline-flex'
+                            : 'hidden group-hover:inline-flex'
+                        } ${
+                          isSelected
+                            ? 'border-indigo-600 bg-indigo-600 text-white'
+                            : 'border-white/90 bg-slate-900/55 text-transparent backdrop-blur-xs hover:border-indigo-300 hover:bg-slate-900/75'
+                        }`}
+                      >
+                        <Check className="h-3.5 w-3.5 stroke-[3]" />
+                      </button>
+                      <span
+                        className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${platformInfo.badgeClass}`}
+                      >
+                        {platformInfo.label}
+                      </span>
+                    </div>
 
-                    {/* 右上角同步状态角标 */}
+                    {/* 右上角状态 / 不自动同步原因角标 */}
                     <span
-                      title={syncInfo.label}
-                      className={`absolute top-2.5 right-2.5 inline-flex items-center gap-1 rounded-full bg-white/95 px-2 py-0.5 text-[10px] font-medium shadow-xs backdrop-blur-xs ${syncInfo.badgeClass}`}
+                      title={statusBadge.label}
+                      className={`absolute top-2.5 right-2.5 inline-flex items-center gap-1 rounded-full bg-white/95 px-2 py-0.5 text-[10px] font-medium shadow-xs backdrop-blur-xs ${statusBadge.badgeClass}`}
                     >
                       <span
-                        className={`h-1.5 w-1.5 rounded-full ${syncInfo.dotClass}`}
+                        className={`h-1.5 w-1.5 rounded-full ${statusBadge.dotClass}`}
                       />
-                      <span>{syncInfo.shortLabel}</span>
+                      <span>{statusBadge.shortLabel}</span>
                     </span>
 
                     {/* 左下角媒体时长 / 图集数 / 文章 */}
@@ -274,35 +507,95 @@ export function ItemCardGrid({
                       <span>{mediaBadge}</span>
                     </span>
 
-                    {/* 悬浮快捷动作（移入回收站 / 恢复） */}
-                    <div className="absolute right-2.5 bottom-2.5 opacity-0 transition group-hover:opacity-100">
-                      {isTrashView ? (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void onRestoreItem(item);
-                          }}
-                          title="从回收站恢复"
-                          className="inline-flex items-center gap-1 rounded-lg bg-emerald-600/95 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-emerald-700"
-                        >
-                          <RotateCcw className="h-3 w-3" />
-                          <span>恢复</span>
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void onSoftDeleteItem(item);
-                          }}
-                          title="移入回收站"
-                          className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/75 text-white shadow-sm backdrop-blur-xs transition hover:bg-rose-600"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </div>
+                    {/* 悬浮快捷动作（批量选择模式下隐藏避免误触） */}
+                    {!selectionMode && (
+                      <div className="absolute right-2.5 bottom-2.5 flex items-center gap-1.5 opacity-0 transition group-hover:opacity-100">
+                        {isExcludedView ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void onAllowAutoSyncAgain([item]);
+                              }}
+                              title="允许再次自动同步"
+                              className="inline-flex items-center gap-1 rounded-lg bg-indigo-600/95 px-2 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-indigo-700"
+                            >
+                              <RotateCcw className="h-3 w-3" />
+                              <span>允许同步</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void onRemoteUncollectAndClear([item]);
+                              }}
+                              title="取消原站收藏并清除"
+                              aria-label="取消原站收藏并清除"
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/75 text-white shadow-sm backdrop-blur-xs transition hover:bg-rose-600"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        ) : isTrashView ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void onRestoreItem(item);
+                              }}
+                              title="从回收站恢复"
+                              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600/95 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+                            >
+                              <RotateCcw className="h-3 w-3" />
+                              <span>恢复</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRequestDeleteItems([item], 'permanent');
+                              }}
+                              title="彻底删除"
+                              aria-label="彻底删除"
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/75 text-white shadow-sm backdrop-blur-xs transition hover:bg-rose-600"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            {item.syncStatus === 'pending_download' && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void onCancelItemSync(item);
+                                }}
+                                title="取消同步到插件"
+                                className="inline-flex items-center gap-1 rounded-lg bg-amber-600/95 px-2 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-amber-700"
+                              >
+                                <CloudOff className="h-3 w-3" />
+                                <span>取消同步</span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRequestDeleteItems([item], 'soft');
+                              }}
+                              title="移入回收站"
+                              aria-label="移入回收站"
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/75 text-white shadow-sm backdrop-blur-xs transition hover:bg-rose-600"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* 信息内容区 */}
@@ -315,6 +608,19 @@ export function ItemCardGrid({
                         <User className="h-3 w-3 shrink-0 text-slate-400" />
                         <span className="truncate">{item.author.name}</span>
                       </p>
+                      {exclusion && (
+                        <div
+                          data-testid="item-exclusion-reason"
+                          className="mt-2 rounded-lg border border-amber-200/80 bg-amber-50/70 px-2 py-1.5 text-[11px] leading-snug text-amber-900"
+                        >
+                          <p className="font-medium">{statusBadge.label}</p>
+                          {exclusion.detail && (
+                            <p className="mt-0.5 line-clamp-2 text-[10px] text-amber-800/90">
+                              {exclusion.detail}
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* 标签 pills */}
@@ -344,13 +650,25 @@ export function ItemCardGrid({
                       </div>
                     )}
 
-                    {/* 底部体积与收藏时间 */}
+                    {/* 底部体积与时间 */}
                     <div className="flex items-center justify-between border-t border-slate-100 pt-2 text-[11px] text-slate-400">
-                      <span className="inline-flex items-center gap-1 tabular-nums">
-                        <HardDrive className="h-3 w-3" />
-                        <span>{formatBytes(item.totalSizeBytes)}</span>
-                      </span>
-                      <span>{formatRelativeTime(item.collectedAt)}</span>
+                      {exclusion ? (
+                        <>
+                          <span className="inline-flex items-center gap-1 text-amber-700">
+                            <CloudOff className="h-3 w-3" />
+                            <span>仅元数据</span>
+                          </span>
+                          <span>{formatRelativeTime(exclusion.excludedAt)}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="inline-flex items-center gap-1 tabular-nums">
+                            <HardDrive className="h-3 w-3" />
+                            <span>{formatBytes(item.totalSizeBytes)}</span>
+                          </span>
+                          <span>{formatRelativeTime(item.collectedAt)}</span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </article>
@@ -362,15 +680,53 @@ export function ItemCardGrid({
           <div className="flex flex-col gap-2">
             {items.map((item) => {
               const platformInfo = platformMeta(item.platform);
-              const syncInfo = syncStatusMeta(item.syncStatus);
+              const exclusion = item.autoSyncExclusion ?? null;
+              const statusBadge = exclusion
+                ? autoSyncExclusionMeta(exclusion.reason)
+                : syncStatusMeta(item.syncStatus);
               const mediaBadge = getMediaBadgeText(item);
+              const isSelected = selectedIds.has(item.id);
 
               return (
                 <article
                   key={item.id}
-                  onClick={() => onOpenItem(item)}
-                  className="group flex cursor-pointer items-center gap-3.5 rounded-xl border border-slate-200 bg-white p-2.5 shadow-2xs transition hover:border-indigo-300 hover:shadow-xs"
+                  onClick={(e) => {
+                    if (selectionMode) {
+                      onToggleSelectItem(item.id, e.shiftKey);
+                    } else {
+                      onOpenItem(item);
+                    }
+                  }}
+                  className={`group flex cursor-pointer items-center gap-3.5 rounded-xl border bg-white p-2.5 shadow-2xs transition ${
+                    isSelected
+                      ? 'border-indigo-500 bg-indigo-50/25 ring-2 ring-indigo-200'
+                      : 'border-slate-200 hover:border-indigo-300 hover:shadow-xs'
+                  }`}
                 >
+                  {/* 左侧复选框 */}
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={isSelected}
+                    aria-label={`选择 ${item.title}`}
+                    data-testid="item-select-checkbox"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleSelectItem(item.id, e.shiftKey);
+                    }}
+                    className={`h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${
+                      selectionMode || isSelected
+                        ? 'inline-flex'
+                        : 'hidden group-hover:inline-flex'
+                    } ${
+                      isSelected
+                        ? 'border-indigo-600 bg-indigo-600 text-white'
+                        : 'border-slate-300 bg-white text-transparent hover:border-indigo-400'
+                    }`}
+                  >
+                    <Check className="h-3.5 w-3.5 stroke-[3]" />
+                  </button>
+
                   {/* 缩略图 */}
                   <div className="relative h-16 w-28 shrink-0 overflow-hidden rounded-lg bg-slate-100">
                     {item.thumbnailDataUrl ? (
@@ -382,7 +738,9 @@ export function ItemCardGrid({
                       />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center text-slate-300">
-                        {item.kind === 'video' ? (
+                        {exclusion ? (
+                          <CloudOff className="h-5 w-5 text-slate-400" />
+                        ) : item.kind === 'video' ? (
                           <Film className="h-5 w-5" />
                         ) : item.kind === 'article' ? (
                           <FileText className="h-5 w-5" />
@@ -414,10 +772,26 @@ export function ItemCardGrid({
                         <User className="h-3 w-3 text-slate-400" />
                         <span>{item.author.name}</span>
                       </span>
-                      <span className="tabular-nums">
-                        {formatBytes(item.totalSizeBytes)}
-                      </span>
-                      <span>{formatRelativeTime(item.collectedAt)}</span>
+                      {exclusion ? (
+                        <>
+                          <span className="font-medium text-amber-800">
+                            {statusBadge.label}
+                          </span>
+                          {exclusion.detail && (
+                            <span className="truncate text-[11px] text-amber-700">
+                              {exclusion.detail}
+                            </span>
+                          )}
+                          <span>{formatRelativeTime(exclusion.excludedAt)}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="tabular-nums">
+                            {formatBytes(item.totalSizeBytes)}
+                          </span>
+                          <span>{formatRelativeTime(item.collectedAt)}</span>
+                        </>
+                      )}
                       {item.tags.slice(0, 4).map((tagName) => {
                         const tagColor =
                           tagsByName.get(tagName)?.color ?? '#6366f1';
@@ -440,40 +814,100 @@ export function ItemCardGrid({
                   {/* 右侧状态与悬浮操作 */}
                   <div className="flex shrink-0 items-center gap-2">
                     <span
-                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${syncInfo.badgeClass}`}
+                      title={statusBadge.label}
+                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${statusBadge.badgeClass}`}
                     >
                       <span
-                        className={`h-1.5 w-1.5 rounded-full ${syncInfo.dotClass}`}
+                        className={`h-1.5 w-1.5 rounded-full ${statusBadge.dotClass}`}
                       />
-                      <span>{syncInfo.shortLabel}</span>
+                      <span>{statusBadge.shortLabel}</span>
                     </span>
 
-                    {isTrashView ? (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void onRestoreItem(item);
-                        }}
-                        title="从回收站恢复"
-                        className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100"
-                      >
-                        <RotateCcw className="h-3.5 w-3.5" />
-                        <span>恢复</span>
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void onSoftDeleteItem(item);
-                        }}
-                        title="移入回收站"
-                        className="rounded-lg p-1.5 text-slate-400 opacity-0 transition hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    )}
+                    {!selectionMode &&
+                      (isExcludedView ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void onAllowAutoSyncAgain([item]);
+                            }}
+                            title="允许再次自动同步"
+                            className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            <span>允许同步</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void onRemoteUncollectAndClear([item]);
+                            }}
+                            title="取消原站收藏并清除"
+                            aria-label="取消原站收藏并清除"
+                            className="rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      ) : isTrashView ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void onRestoreItem(item);
+                            }}
+                            title="从回收站恢复"
+                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            <span>恢复</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onRequestDeleteItems([item], 'permanent');
+                            }}
+                            title="彻底删除"
+                            aria-label="彻底删除"
+                            className="rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          {item.syncStatus === 'pending_download' && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void onCancelItemSync(item);
+                              }}
+                              title="取消同步到插件"
+                              className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-100"
+                            >
+                              <CloudOff className="h-3.5 w-3.5" />
+                              <span>取消同步</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onRequestDeleteItems([item], 'soft');
+                            }}
+                            title="移入回收站"
+                            aria-label="移入回收站"
+                            className="rounded-lg p-1.5 text-slate-400 opacity-0 transition hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      ))}
                   </div>
                 </article>
               );

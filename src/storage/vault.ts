@@ -7,11 +7,16 @@
 
 import { ulid } from 'ulid';
 import {
+  getItemFolderIds,
+  isAutoSyncExcluded,
+  isAutoSyncExclusionReason,
   isPlatformId,
+  normalizeFolderIds,
   SCHEMA_VERSION,
   stripRecordToMeta,
   type AssetKind,
   type AuthorInfo,
+  type AutoSyncExclusion,
   type CollectionItemMeta,
   type CollectionItemRecord,
   type DownloadStrategy,
@@ -34,6 +39,7 @@ import {
 import {
   listOpfsItemFilePaths,
   readFileFromOpfs,
+  removeItemFromOpfs,
   removeOpfsItemFiles,
 } from './opfs.ts';
 import {
@@ -1043,6 +1049,140 @@ export async function writeItemMetaToVault(
   return withVaultIoLock(() => writeItemMetaToVaultUnlocked(root, item));
 }
 
+/**
+ * 彻底删除本地 `CollectVault` 中指定条目的归档目录（仅允许删除 `items/` 下的子目录）。
+ */
+export async function removeItemDirFromVault(
+  root: FileSystemDirectoryHandle,
+  relativeDir: string,
+): Promise<void> {
+  const segments = splitRelativePath(relativeDir);
+  if (segments.length < 2 || segments[0] !== ITEMS_DIRNAME) {
+    throw new Error(`Refusing to delete non-item vault path: "${relativeDir}"`);
+  }
+  return withVaultIoLock(() => removeRelativeDirectory(root, relativeDir));
+}
+
+async function purgeItemMediaFilesFromVaultUnlocked(
+  root: FileSystemDirectoryHandle,
+  relativeDir: string,
+): Promise<void> {
+  const segments = splitRelativePath(relativeDir);
+  if (segments.length < 2 || segments[0] !== ITEMS_DIRNAME) {
+    throw new Error(
+      `Refusing to purge media outside items/ vault path: "${relativeDir}"`,
+    );
+  }
+
+  let itemDir = root;
+  try {
+    for (const seg of segments) {
+      if (!seg) {
+        continue;
+      }
+      itemDir = await itemDir.getDirectoryHandle(seg, { create: false });
+    }
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+
+  const entriesToRemove: Array<{ name: string; kind: 'file' | 'directory' }> =
+    [];
+  for await (const [name, entry] of itemDir.entries()) {
+    if (name === 'meta.json') {
+      continue;
+    }
+    entriesToRemove.push({ name, kind: entry.kind });
+  }
+
+  for (const entry of entriesToRemove) {
+    try {
+      await itemDir.removeEntry(entry.name, {
+        recursive: entry.kind === 'directory',
+      });
+    } catch (error) {
+      if (!isNotFoundError(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
+/**
+ * 删除本地 `CollectVault` 中指定条目目录下的所有媒体与评论文件，仅保留 `meta.json`
+ * （用于「不自动同步」条目释放本地硬盘空间）。
+ */
+export async function purgeItemMediaFilesFromVault(
+  root: FileSystemDirectoryHandle,
+  relativeDir: string,
+): Promise<void> {
+  return withVaultIoLock(() =>
+    purgeItemMediaFilesFromVaultUnlocked(root, relativeDir),
+  );
+}
+
+async function syncExcludedItemToVaultUnlocked(
+  root: FileSystemDirectoryHandle,
+  item: CollectionItemRecord,
+): Promise<void> {
+  let effectiveRelativeDir = isSafeVaultRelativeDir(item.relativeDir)
+    ? item.relativeDir
+    : buildItemRelativeDir(
+        item.platform,
+        item.sourceId,
+        item.title,
+        item.collectedAt,
+      );
+
+  const writeCleanExcludedMeta = async (targetDir: string): Promise<void> => {
+    await purgeItemMediaFilesFromVaultUnlocked(root, targetDir);
+    const syncedSnapshot: CollectionItemRecord = {
+      ...item,
+      relativeDir: targetDir,
+      syncStatus: 'vault_synced',
+    };
+    await writeItemMetaToVaultUnlocked(root, syncedSnapshot);
+  };
+
+  try {
+    await writeCleanExcludedMeta(effectiveRelativeDir);
+  } catch (error) {
+    if (!isNameNotAllowedError(error)) {
+      throw error;
+    }
+    const fallbackDir = buildFallbackItemRelativeDir(
+      item.platform,
+      item.sourceId,
+      item.collectedAt,
+      item.id,
+    );
+    if (fallbackDir === effectiveRelativeDir) {
+      throw error;
+    }
+    effectiveRelativeDir = fallbackDir;
+    await writeCleanExcludedMeta(effectiveRelativeDir);
+  }
+
+  await db.transaction('rw', db.items, async () => {
+    const latest = await db.items.get(item.id);
+    if (!latest) {
+      return;
+    }
+    const nextStatus =
+      latest.updatedAt > item.updatedAt ? 'meta_dirty' : 'vault_synced';
+    await db.items.put({
+      ...latest,
+      relativeDir: effectiveRelativeDir,
+      syncStatus: nextStatus,
+    });
+  });
+
+  await removeItemFromOpfs(item.id).catch(() => undefined);
+}
+
 async function copyStagedCommentFilesToDir(
   root: FileSystemDirectoryHandle,
   item: CollectionItemRecord,
@@ -1138,6 +1278,12 @@ async function flushToVaultUnlocked(
     });
 
     try {
+      if (isAutoSyncExcluded(item)) {
+        await syncExcludedItemToVaultUnlocked(root, item);
+        summary.syncedMetaCount += 1;
+        continue;
+      }
+
       // 存量自愈：对尚未落盘但含非法目录段（如旧版保留的 ~ / . / 零宽字符）的暂存条目按最新规则重算路径
       let effectiveRelativeDir = isSafeVaultRelativeDir(item.relativeDir)
         ? item.relativeDir
@@ -1210,6 +1356,12 @@ async function flushToVaultUnlocked(
     });
 
     try {
+      if (isAutoSyncExcluded(item)) {
+        await syncExcludedItemToVaultUnlocked(root, item);
+        summary.syncedMetaCount += 1;
+        continue;
+      }
+
       const copiedPaths: string[] = [];
       for (const asset of item.assets) {
         const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
@@ -1584,6 +1736,25 @@ function parsePlatformExtra(
   return count > 0 ? result : undefined;
 }
 
+function parseAutoSyncExclusion(raw: unknown): AutoSyncExclusion | undefined {
+  if (!isRecord(raw) || !isAutoSyncExclusionReason(raw.reason)) {
+    return undefined;
+  }
+  const excludedAt =
+    typeof raw.excludedAt === 'number' && Number.isFinite(raw.excludedAt)
+      ? raw.excludedAt
+      : Date.now();
+  const detail =
+    typeof raw.detail === 'string' && raw.detail.trim()
+      ? raw.detail.trim()
+      : undefined;
+  return {
+    reason: raw.reason,
+    ...(detail !== undefined ? { detail } : {}),
+    excludedAt,
+  };
+}
+
 function parseCollectionItemMeta(
   raw: unknown,
   scannedRelativeDir: string,
@@ -1675,6 +1846,13 @@ function parseCollectionItemMeta(
       : undefined;
 
   const platformExtra = parsePlatformExtra(raw.platformExtra);
+  const autoSyncExclusion = parseAutoSyncExclusion(raw.autoSyncExclusion);
+  const folderIds = Array.isArray(raw.folderIds)
+    ? normalizeFolderIds(parseStringArray(raw.folderIds))
+    : normalizeFolderIds(
+        undefined,
+        typeof raw.folderId === 'string' ? raw.folderId : null,
+      );
 
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -1692,7 +1870,8 @@ function parseCollectionItemMeta(
       : {}),
     collectedAt,
     updatedAt,
-    folderId: typeof raw.folderId === 'string' ? raw.folderId : null,
+    folderId: folderIds[0] ?? null,
+    folderIds,
     tags: parseStringArray(raw.tags),
     note: typeof raw.note === 'string' ? raw.note : '',
     // 以实际扫描目录为准，确保目录迁移或重整后仍可精准定位同级媒体文件
@@ -1711,6 +1890,9 @@ function parseCollectionItemMeta(
     ...(typeof raw.deletedAt === 'number' && Number.isFinite(raw.deletedAt)
       ? { deletedAt: raw.deletedAt }
       : { deletedAt: null }),
+    ...(autoSyncExclusion !== undefined
+      ? { autoSyncExclusion }
+      : { autoSyncExclusion: null }),
     ...(platformExtra !== undefined ? { platformExtra } : {}),
   };
 }
@@ -1899,13 +2081,12 @@ export async function rebuildIndexFromVault(
         continue;
       }
 
-      // 若 folderId 不存在于恢复出的文件夹中，回退为未归类
-      if (
-        parsedMeta.folderId !== null &&
-        !folderMap.has(parsedMeta.folderId)
-      ) {
-        parsedMeta.folderId = null;
-      }
+      // 清理不存在于恢复文件夹树中的悬空 folderIds 引用
+      const validFolderIds = getItemFolderIds(parsedMeta).filter((fid) =>
+        folderMap.has(fid),
+      );
+      parsedMeta.folderIds = validFolderIds;
+      parsedMeta.folderId = validFolderIds[0] ?? null;
 
       // 去重冲突处理：同一 id 或 dedupeKey 保留 updatedAt 较新的记录
       const existingById = recordsById.get(parsedMeta.id);
@@ -1970,12 +2151,13 @@ export async function rebuildIndexFromVault(
       if (recordsById.has(staged.id) || idByDedupeKey.has(staged.dedupeKey)) {
         continue;
       }
+      const validStagedFolderIds = getItemFolderIds(staged).filter((fid) =>
+        folderMap.has(fid),
+      );
       preservedStagedRecords.push({
         ...staged,
-        folderId:
-          staged.folderId !== null && folderMap.has(staged.folderId)
-            ? staged.folderId
-            : null,
+        folderIds: validStagedFolderIds,
+        folderId: validStagedFolderIds[0] ?? null,
       });
     }
   }

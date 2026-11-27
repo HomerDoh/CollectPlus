@@ -9,13 +9,24 @@ import type {
   CapturedCommentInput,
   CapturedPayload,
   CaptureTriggerSource,
+  RemoteUncollectTargetInput,
+  RemoteUncollectTargetOutcome,
 } from './adapter.ts';
 import type {
+  AutoSyncExclusionReason,
   CollectionItemRecord,
   MediaAsset,
+  OversizedVideoNotifyMode,
+  PlatformExtraValue,
   PlatformId,
   UserPreferences,
 } from './schema.ts';
+
+/** 跳过本地持久化、仅保存元数据时的原因载荷 */
+export interface CaptureAutoSyncExclusionInput {
+  reason: AutoSyncExclusionReason;
+  detail?: string;
+}
 
 /** 消息目标上下文标识 */
 export type MessageTarget = 'background' | 'offscreen' | 'content';
@@ -43,6 +54,10 @@ export interface CaptureItemMessage {
   payload: CapturedPayload;
   folderId?: string | null;
   tags?: string[];
+  /** 为 true 时跳过“视频过大取消自动保存”拦截（用于弹窗点击继续保存） */
+  forceSave?: boolean;
+  /** 非空时取消/跳过本地媒体持久化，仅保留轻量元数据并归入「不自动同步」 */
+  autoSyncExclusion?: CaptureAutoSyncExclusionInput;
 }
 
 export interface CaptureBatchItemsMessage {
@@ -56,6 +71,31 @@ export interface UncollectItemsMessage {
   type: 'UNCOLLECT_ITEMS';
   platform: PlatformId;
   sourceIds: string[];
+}
+
+export interface RemoteUncollectTarget {
+  platform: PlatformId;
+  sourceId: string;
+  platformExtra?: Record<string, PlatformExtraValue>;
+}
+
+export interface RemoteUncollectItemResult {
+  platform: PlatformId;
+  sourceId: string;
+  ok: boolean;
+  reason?: string;
+}
+
+export interface RemoteUncollectItemsMessage {
+  target: 'background';
+  type: 'REMOTE_UNCOLLECT_ITEMS';
+  items: RemoteUncollectTarget[];
+}
+
+export interface CancelItemDownloadTasksMessage {
+  target: 'background';
+  type: 'CANCEL_ITEM_DOWNLOAD_TASKS';
+  itemIds: string[];
 }
 
 export interface CheckAccountSyncActionMessage {
@@ -97,6 +137,8 @@ export interface TriggerActiveTabCaptureMessage {
   target: 'background';
   type: 'TRIGGER_ACTIVE_TAB_CAPTURE';
   tabId?: number;
+  /** 非空时取消当前页面作品的本地持久化，仅保存元数据与原因 */
+  autoSyncExclusion?: CaptureAutoSyncExclusionInput;
 }
 
 export interface RetryDownloadTaskMessage {
@@ -191,6 +233,8 @@ export type BackgroundMessage =
   | CaptureBatchItemsMessage
   | SaveItemCommentsMessage
   | UncollectItemsMessage
+  | RemoteUncollectItemsMessage
+  | CancelItemDownloadTasksMessage
   | CheckAccountSyncActionMessage
   | BeginManualAccountSyncMessage
   | ReportAccountSyncResultMessage
@@ -215,10 +259,19 @@ export interface BackgroundResponseMap {
   CAPTURE_ITEM:
     | {
         ok: true;
+        skippedOversized?: false;
         itemId: string;
         taskId?: string;
         deduplicated: boolean;
+        skippedReason?: 'in_trash' | 'auto_sync_excluded';
         item: CollectionItemRecord;
+      }
+    | {
+        ok: true;
+        skippedOversized: true;
+        videoSizeBytes: number;
+        thresholdMb: number;
+        notifyMode: OversizedVideoNotifyMode;
       }
     | ErrorResult;
   CAPTURE_BATCH_ITEMS:
@@ -226,6 +279,7 @@ export interface BackgroundResponseMap {
         ok: true;
         capturedCount: number;
         deduplicatedCount: number;
+        skippedOversizedCount: number;
       }
     | ErrorResult;
   UNCOLLECT_ITEMS:
@@ -233,6 +287,18 @@ export interface BackgroundResponseMap {
         ok: true;
         removedItemIds: string[];
         skipped: boolean;
+      }
+    | ErrorResult;
+  REMOTE_UNCOLLECT_ITEMS:
+    | {
+        ok: true;
+        results: RemoteUncollectItemResult[];
+      }
+    | ErrorResult;
+  CANCEL_ITEM_DOWNLOAD_TASKS:
+    | {
+        ok: true;
+        cancelledCount: number;
       }
     | ErrorResult;
   CHECK_ACCOUNT_SYNC_ACTION:
@@ -308,6 +374,12 @@ export interface OffscreenAbortDownloadMessage {
   taskId: string;
 }
 
+export interface OffscreenProbeMediaSizeMessage {
+  target: 'offscreen';
+  type: 'OFFSCREEN_PROBE_MEDIA_SIZE';
+  assets: MediaAsset[];
+}
+
 export interface OffscreenPingMessage {
   target: 'offscreen';
   type: 'OFFSCREEN_PING';
@@ -318,6 +390,7 @@ export type OffscreenMessage =
   | OffscreenStartDownloadMessage
   | OffscreenStageCommentsMessage
   | OffscreenAbortDownloadMessage
+  | OffscreenProbeMediaSizeMessage
   | OffscreenPingMessage;
 
 /** Offscreen 消息类型名联合 */
@@ -328,6 +401,9 @@ export interface OffscreenResponseMap {
   OFFSCREEN_START_DOWNLOAD: { ok: true } | ErrorResult;
   OFFSCREEN_STAGE_COMMENTS: { ok: true } | ErrorResult;
   OFFSCREEN_ABORT_DOWNLOAD: { ok: true };
+  OFFSCREEN_PROBE_MEDIA_SIZE:
+    | { ok: true; totalSizeBytes?: number }
+    | ErrorResult;
   OFFSCREEN_PING: { ok: true; ready: true };
 }
 
@@ -339,20 +415,30 @@ export interface ContentTriggerCaptureMessage {
   target: 'content';
   type: 'CONTENT_TRIGGER_CAPTURE';
   triggerSource: CaptureTriggerSource;
+  /** 非空时仅保存当前作品元数据并标记为不自动同步（跳过本地持久化） */
+  autoSyncExclusion?: CaptureAutoSyncExclusionInput;
 }
 
 export interface ContentPreferencesUpdatedMessage {
   target: 'content';
   type: 'CONTENT_PREFERENCES_UPDATED';
   floatingButtonEnabled: boolean;
+  nativeCollectToastEnabled: boolean;
   autoSyncAllCollections: boolean;
   syncUncollectToPlugin: boolean;
+}
+
+export interface ContentRemoteUncollectMessage {
+  target: 'content';
+  type: 'CONTENT_REMOTE_UNCOLLECT';
+  items: RemoteUncollectTargetInput[];
 }
 
 /** 所有发往 Content Script 的消息判别联合 */
 export type ContentMessage =
   | ContentTriggerCaptureMessage
-  | ContentPreferencesUpdatedMessage;
+  | ContentPreferencesUpdatedMessage
+  | ContentRemoteUncollectMessage;
 
 /** Content Script 消息类型名联合 */
 export type ContentRequestType = ContentMessage['type'];
@@ -361,6 +447,12 @@ export type ContentRequestType = ContentMessage['type'];
 export interface ContentResponseMap {
   CONTENT_TRIGGER_CAPTURE: { ok: true } | ErrorResult;
   CONTENT_PREFERENCES_UPDATED: { ok: true };
+  CONTENT_REMOTE_UNCOLLECT:
+    | {
+        ok: true;
+        results: RemoteUncollectTargetOutcome[];
+      }
+    | ErrorResult;
 }
 
 /** Extension 内部所有跨上下文消息总联合类型 */
@@ -380,6 +472,8 @@ const BACKGROUND_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   'CAPTURE_BATCH_ITEMS',
   'SAVE_ITEM_COMMENTS',
   'UNCOLLECT_ITEMS',
+  'REMOTE_UNCOLLECT_ITEMS',
+  'CANCEL_ITEM_DOWNLOAD_TASKS',
   'CHECK_ACCOUNT_SYNC_ACTION',
   'BEGIN_MANUAL_ACCOUNT_SYNC',
   'REPORT_ACCOUNT_SYNC_RESULT',
@@ -403,12 +497,14 @@ const OFFSCREEN_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   'OFFSCREEN_START_DOWNLOAD',
   'OFFSCREEN_STAGE_COMMENTS',
   'OFFSCREEN_ABORT_DOWNLOAD',
+  'OFFSCREEN_PROBE_MEDIA_SIZE',
   'OFFSCREEN_PING',
 ]);
 
 const CONTENT_MESSAGE_TYPES: ReadonlySet<string> = new Set<ContentRequestType>([
   'CONTENT_TRIGGER_CAPTURE',
   'CONTENT_PREFERENCES_UPDATED',
+  'CONTENT_REMOTE_UNCOLLECT',
 ]);
 
 function isMessageObject(

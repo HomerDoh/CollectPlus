@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Download } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, X } from 'lucide-react';
 import {
+  addItemsToFolders,
   createFolder,
   db,
   DEFAULT_USER_PREFERENCES,
@@ -9,12 +10,17 @@ import {
   getSetting,
   getUserPreferences,
   getVaultSyncPendingCounts,
+  hardDeleteItemsFromDb,
+  markItemsAutoSyncExcluded,
+  removeItemsFromFolder,
   renameFolder,
   restoreItem,
-  softDeleteItem,
+  restoreItems,
+  softDeleteItems,
   updateItemClassification,
   updateUserPreferences,
 } from '@/storage/db.ts';
+import { removeItemFromOpfs } from '@/storage/opfs.ts';
 import { sendToBackground } from '@/types/messages.ts';
 import { CollectionSearchEngine } from '@/storage/search.ts';
 import {
@@ -25,8 +31,10 @@ import {
   isFilesystemWriteDeniedError,
   migrateVaultDirectory,
   pickAndValidateVaultDirectory,
+  purgeItemMediaFilesFromVault,
   queryVaultPermission,
   rebuildIndexFromVault,
+  removeItemDirFromVault,
   requestVaultPermission,
   VAULT_PERMISSION_HELP_URL,
   VaultDirectoryValidationError,
@@ -43,12 +51,20 @@ import {
   type VaultMigrationMode,
   type VaultPermissionStatus,
 } from '@/storage/vault.ts';
-import type {
-  CollectionItemRecord,
-  FolderNode,
-  TagMeta,
-  UserPreferences,
+import {
+  getItemFolderIds,
+  isAutoSyncExcluded,
+  type AutoSyncExclusionReason,
+  type CollectionItemRecord,
+  type FolderNode,
+  type TagMeta,
+  type UserPreferences,
 } from '@/types/schema.ts';
+import {
+  DeleteConfirmModal,
+  type DeleteConfirmMode,
+} from './components/DeleteConfirmModal.tsx';
+import { FolderAssignModal } from './components/FolderAssignModal.tsx';
 import {
   ItemCardGrid,
   type SortOption,
@@ -238,6 +254,23 @@ export default function App() {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(() =>
     parseItemIdFromHash(window.location.hash),
   );
+
+  // 3b. 批量选择、统一删除弹窗与多文件夹分配弹窗状态
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedItemIds, setSelectedItemIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const lastSelectedAnchorRef = useRef<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{
+    items: CollectionItemRecord[];
+    mode: DeleteConfirmMode;
+  } | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showFolderAssignModal, setShowFolderAssignModal] = useState(false);
+  const [actionNotice, setActionNotice] = useState<{
+    type: 'success' | 'warning' | 'error';
+    text: string;
+  } | null>(null);
 
   // 首次加载持久化偏好时同步默认视图与默认排序
   useEffect(() => {
@@ -758,9 +791,10 @@ export default function App() {
   }, [vaultHandle, permissionState]);
 
   const handleCreateFolder = useCallback(
-    async (name: string, parentId: string | null) => {
-      await createFolder(name, parentId);
+    async (name: string, parentId: string | null): Promise<FolderNode> => {
+      const created = await createFolder(name, parentId);
       await syncTaxonomyIfPermitted();
+      return created;
     },
     [syncTaxonomyIfPermitted],
   );
@@ -829,21 +863,26 @@ export default function App() {
     [vaultHandle, permissionState],
   );
 
-  // 15. 软删除 / 恢复条目（已授权且已落盘条目同步回写 meta.json）
-  const syncItemMetaAfterTrashToggle = useCallback(
-    async (itemId: string) => {
+  // 15. 软删除 / 彻底删除 / 恢复 / 批量分类（已授权且已落盘条目同步回写 meta.json）
+  const syncItemMetasIfPermitted = useCallback(
+    async (itemIds: readonly string[], includeTaxonomy = false) => {
       if (!vaultHandle || permissionState !== 'granted') {
         return;
       }
       try {
-        const latest = await db.items.get(itemId);
-        if (latest && latest.syncStatus === 'meta_dirty') {
-          const synced: CollectionItemRecord = {
-            ...latest,
-            syncStatus: 'vault_synced',
-          };
-          await writeItemMetaToVault(vaultHandle, synced);
-          await db.items.put(synced);
+        if (includeTaxonomy) {
+          await writeTaxonomyToVault(vaultHandle);
+        }
+        for (const itemId of itemIds) {
+          const latest = await db.items.get(itemId);
+          if (latest && latest.syncStatus === 'meta_dirty') {
+            const synced: CollectionItemRecord = {
+              ...latest,
+              syncStatus: 'vault_synced',
+            };
+            await writeItemMetaToVault(vaultHandle, synced);
+            await db.items.put(synced);
+          }
         }
       } catch (error) {
         setVaultError(
@@ -854,20 +893,468 @@ export default function App() {
     [vaultHandle, permissionState],
   );
 
-  const handleSoftDeleteItem = useCallback(
-    async (item: CollectionItemRecord) => {
-      await softDeleteItem(item.id);
-      await syncItemMetaAfterTrashToggle(item.id);
+  const handleRequestDeleteItems = useCallback(
+    (targetItems: CollectionItemRecord[], mode: DeleteConfirmMode) => {
+      if (targetItems.length === 0) {
+        return;
+      }
+      setPendingDelete({ items: targetItems, mode });
     },
-    [syncItemMetaAfterTrashToggle],
+    [],
+  );
+
+  const handleConfirmDelete = useCallback(
+    async (syncPlatformUncollect: boolean) => {
+      if (!pendingDelete || isDeleting) {
+        return;
+      }
+      const { items: targets, mode } = pendingDelete;
+      const targetIds = targets.map((t) => t.id);
+      const targetIdSet = new Set(targetIds);
+
+      setIsDeleting(true);
+      try {
+        // 1. 先取消关联的进行中/排队下载任务，防止删后下载完成写回状态
+        await sendToBackground({
+          target: 'background',
+          type: 'CANCEL_ITEM_DOWNLOAD_TASKS',
+          itemIds: targetIds,
+        }).catch(() => undefined);
+
+        // 2. 若用户勾选了「同步取消账号的收藏」，先执行远程取消以决定彻底删除条目是否需要保留「不自动同步」记录
+        const remoteOutcomeByKey = new Map<
+          string,
+          { ok: boolean; reason?: string }
+        >();
+        let remoteTransportError: string | null = null;
+
+        if (syncPlatformUncollect) {
+          const remoteRes = await sendToBackground({
+            target: 'background',
+            type: 'REMOTE_UNCOLLECT_ITEMS',
+            items: targets.map((item) => ({
+              platform: item.platform,
+              sourceId: item.sourceId,
+              ...(item.platformExtra !== undefined
+                ? { platformExtra: item.platformExtra }
+                : {}),
+            })),
+          }).catch((error: unknown) => ({
+            ok: false as const,
+            error: getErrorMessage(error),
+          }));
+
+          if (remoteRes && remoteRes.ok) {
+            for (const entry of remoteRes.results) {
+              remoteOutcomeByKey.set(`${entry.platform}:${entry.sourceId}`, {
+                ok: entry.ok,
+                ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+              });
+            }
+          } else {
+            remoteTransportError = remoteRes?.error ?? '通信失败';
+          }
+        }
+
+        // 3. 执行本地删除（软删除 / 彻底删除：未取消原站收藏或取消失败时仅删媒体并转入「不自动同步」）
+        let vaultDeleteErrors = 0;
+        let fullyRemovedCount = 0;
+        let excludedCount = 0;
+
+        if (mode === 'soft') {
+          await softDeleteItems(targetIds);
+          await syncItemMetasIfPermitted(targetIds);
+        } else {
+          const fullyRemovedItems: CollectionItemRecord[] = [];
+          const excludedSpecs: Array<{
+            itemId: string;
+            reason: 'deleted_keep_remote';
+            detail: string;
+          }> = [];
+
+          for (const item of targets) {
+            const key = `${item.platform}:${item.sourceId}`;
+            const outcome = remoteOutcomeByKey.get(key);
+            if (syncPlatformUncollect && outcome?.ok === true) {
+              fullyRemovedItems.push(item);
+            } else {
+              const detail = syncPlatformUncollect
+                ? `管理台已删除本地媒体，但取消原站收藏失败：${outcome?.reason ?? remoteTransportError ?? '未知原因'}`
+                : '管理台彻底删除本地媒体，保留原平台账号收藏';
+              excludedSpecs.push({
+                itemId: item.id,
+                reason: 'deleted_keep_remote',
+                detail,
+              });
+            }
+          }
+
+          for (const item of targets) {
+            await removeItemFromOpfs(item.id).catch(() => undefined);
+          }
+
+          if (fullyRemovedItems.length > 0) {
+            if (vaultHandle && permissionState === 'granted') {
+              for (const item of fullyRemovedItems) {
+                try {
+                  await removeItemDirFromVault(vaultHandle, item.relativeDir);
+                } catch {
+                  vaultDeleteErrors += 1;
+                }
+              }
+            }
+            await hardDeleteItemsFromDb(fullyRemovedItems.map((i) => i.id));
+            fullyRemovedCount = fullyRemovedItems.length;
+          }
+
+          if (excludedSpecs.length > 0) {
+            const updatedExcluded = await markItemsAutoSyncExcluded(excludedSpecs);
+            excludedCount = updatedExcluded.length;
+
+            if (vaultHandle && permissionState === 'granted') {
+              for (const rec of updatedExcluded) {
+                try {
+                  await purgeItemMediaFilesFromVault(
+                    vaultHandle,
+                    rec.relativeDir,
+                  );
+                  const synced: CollectionItemRecord = {
+                    ...rec,
+                    syncStatus: 'vault_synced',
+                  };
+                  await writeItemMetaToVault(vaultHandle, synced);
+                  await db.items.put(synced);
+                } catch {
+                  vaultDeleteErrors += 1;
+                }
+              }
+            }
+          }
+        }
+
+        // 若当前打开的详情抽屉对应条目已被删除或转入「不自动同步」，自动关闭抽屉
+        if (selectedItemId && targetIdSet.has(selectedItemId)) {
+          closeItemDrawer();
+        }
+
+        let remoteSummaryText = '';
+        let noticeType: 'success' | 'warning' | 'error' =
+          vaultDeleteErrors > 0 ? 'warning' : 'success';
+
+        if (syncPlatformUncollect) {
+          if (remoteTransportError !== null) {
+            noticeType = 'warning';
+            remoteSummaryText = `；原平台同步取消收藏未完成（${remoteTransportError}）`;
+          } else {
+            const outcomes = Array.from(remoteOutcomeByKey.values());
+            const okCount = outcomes.filter((r) => r.ok).length;
+            const failedList = outcomes.filter((r) => !r.ok);
+            if (failedList.length === 0 && okCount > 0) {
+              remoteSummaryText = `；已同步取消原平台账号收藏 ${okCount} 项`;
+            } else if (failedList.length > 0) {
+              noticeType = 'warning';
+              const firstReason = failedList[0]?.reason ?? '未知原因';
+              remoteSummaryText = `；原平台取消收藏成功 ${okCount} 项，失败 ${failedList.length} 项（${firstReason}）`;
+            }
+          }
+        }
+
+        let localActionLabel: string;
+        if (mode === 'permanent') {
+          if (excludedCount > 0 && fullyRemovedCount > 0) {
+            localActionLabel = `已彻底清除 ${fullyRemovedCount} 项，另有 ${excludedCount} 项已删除本地媒体并转入「不自动同步」`;
+          } else if (excludedCount > 0) {
+            localActionLabel = `已删除 ${excludedCount} 项本地媒体并转入「不自动同步」（保留轻量元数据防止重复同步）`;
+          } else {
+            localActionLabel = `已彻底删除 ${fullyRemovedCount} 项收藏`;
+          }
+        } else {
+          localActionLabel = `已将 ${targets.length} 项移入回收站`;
+        }
+
+        const vaultWarnText =
+          vaultDeleteErrors > 0
+            ? `（其中 ${vaultDeleteErrors} 项本地目录清理失败）`
+            : '';
+
+        setActionNotice({
+          type: noticeType,
+          text: `${localActionLabel}${vaultWarnText}${remoteSummaryText}`,
+        });
+        setPendingDelete(null);
+        setSelectionMode(false);
+        setSelectedItemIds(new Set());
+        lastSelectedAnchorRef.current = null;
+      } catch (error) {
+        setActionNotice({
+          type: 'error',
+          text: `删除失败：${getErrorMessage(error)}`,
+        });
+      } finally {
+        setIsDeleting(false);
+      }
+    },
+    [
+      pendingDelete,
+      isDeleting,
+      syncItemMetasIfPermitted,
+      vaultHandle,
+      permissionState,
+      selectedItemId,
+      closeItemDrawer,
+    ],
+  );
+
+  const handleAllowAutoSyncAgain = useCallback(
+    async (targets: CollectionItemRecord[]) => {
+      if (targets.length === 0) {
+        return;
+      }
+      let writableVault: FileSystemDirectoryHandle | null =
+        vaultHandle && permissionState === 'granted' ? vaultHandle : null;
+
+      if (
+        !writableVault &&
+        vaultHandle &&
+        targets.some((item) => item.syncStatus === 'vault_synced')
+      ) {
+        const granted = await requestVaultPermission(vaultHandle, 'readwrite');
+        setPermissionState(
+          granted
+            ? 'granted'
+            : await queryVaultPermission(vaultHandle, 'readwrite'),
+        );
+        if (!granted) {
+          setActionNotice({
+            type: 'warning',
+            text: '需要授权本地 CollectVault 写权限以清理磁盘上的忽略元数据文件，请授权后重试。',
+          });
+          return;
+        }
+        writableVault = vaultHandle;
+      }
+
+      const targetIds = targets.map((t) => t.id);
+      const targetIdSet = new Set(targetIds);
+      let vaultRemoveErrors = 0;
+
+      for (const item of targets) {
+        await removeItemFromOpfs(item.id).catch(() => undefined);
+        if (writableVault) {
+          try {
+            await removeItemDirFromVault(writableVault, item.relativeDir);
+          } catch {
+            vaultRemoveErrors += 1;
+          }
+        }
+      }
+
+      await hardDeleteItemsFromDb(targetIds);
+      if (selectedItemId && targetIdSet.has(selectedItemId)) {
+        closeItemDrawer();
+      }
+      setSelectionMode(false);
+      setSelectedItemIds(new Set());
+      lastSelectedAnchorRef.current = null;
+      setActionNotice({
+        type: vaultRemoveErrors > 0 ? 'warning' : 'success',
+        text:
+          vaultRemoveErrors > 0
+            ? `已移除 ${targets.length} 项不自动同步限制（其中 ${vaultRemoveErrors} 项本地目录清理失败）`
+            : `已移除 ${targets.length} 项「不自动同步」限制，下次同步或重新采集时将正常入库`,
+      });
+    },
+    [vaultHandle, permissionState, selectedItemId, closeItemDrawer],
+  );
+
+  const handleRemoteUncollectAndClear = useCallback(
+    async (targets: CollectionItemRecord[]) => {
+      if (targets.length === 0) {
+        return;
+      }
+      const remoteRes = await sendToBackground({
+        target: 'background',
+        type: 'REMOTE_UNCOLLECT_ITEMS',
+        items: targets.map((item) => ({
+          platform: item.platform,
+          sourceId: item.sourceId,
+          ...(item.platformExtra !== undefined
+            ? { platformExtra: item.platformExtra }
+            : {}),
+        })),
+      }).catch((error: unknown) => ({
+        ok: false as const,
+        error: getErrorMessage(error),
+      }));
+
+      if (!remoteRes || !remoteRes.ok) {
+        setActionNotice({
+          type: 'warning',
+          text: `取消原站收藏失败：${remoteRes?.error ?? '通信失败'}，已保留「不自动同步」记录。`,
+        });
+        return;
+      }
+
+      const outcomeByKey = new Map<string, { ok: boolean; reason?: string }>();
+      for (const entry of remoteRes.results) {
+        outcomeByKey.set(`${entry.platform}:${entry.sourceId}`, {
+          ok: entry.ok,
+          ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+        });
+      }
+
+      const succeeded: CollectionItemRecord[] = [];
+      const failedSpecs: Array<{
+        itemId: string;
+        reason: AutoSyncExclusionReason;
+        detail: string;
+      }> = [];
+
+      for (const item of targets) {
+        const outcome = outcomeByKey.get(`${item.platform}:${item.sourceId}`);
+        if (outcome?.ok) {
+          succeeded.push(item);
+        } else {
+          failedSpecs.push({
+            itemId: item.id,
+            reason: item.autoSyncExclusion?.reason ?? 'deleted_keep_remote',
+            detail: `取消原站收藏失败：${outcome?.reason ?? '未知原因'}`,
+          });
+        }
+      }
+
+      if (succeeded.length > 0) {
+        const succeededIds = succeeded.map((i) => i.id);
+        const succeededIdSet = new Set(succeededIds);
+        for (const item of succeeded) {
+          await removeItemFromOpfs(item.id).catch(() => undefined);
+          if (vaultHandle && permissionState === 'granted') {
+            await removeItemDirFromVault(vaultHandle, item.relativeDir).catch(
+              () => undefined,
+            );
+          }
+        }
+        await hardDeleteItemsFromDb(succeededIds);
+        if (selectedItemId && succeededIdSet.has(selectedItemId)) {
+          closeItemDrawer();
+        }
+      }
+
+      if (failedSpecs.length > 0) {
+        const updatedFailed = await markItemsAutoSyncExcluded(failedSpecs);
+        if (vaultHandle && permissionState === 'granted') {
+          for (const rec of updatedFailed) {
+            const synced: CollectionItemRecord = {
+              ...rec,
+              syncStatus: 'vault_synced',
+            };
+            await writeItemMetaToVault(vaultHandle, synced).catch(
+              () => undefined,
+            );
+            await db.items.put(synced);
+          }
+        }
+      }
+
+      setSelectionMode(false);
+      setSelectedItemIds(new Set());
+      lastSelectedAnchorRef.current = null;
+      setActionNotice({
+        type: failedSpecs.length > 0 ? 'warning' : 'success',
+        text:
+          failedSpecs.length === 0
+            ? `已同步取消原站收藏并彻底清除 ${succeeded.length} 项记录`
+            : `已取消原站收藏并清除 ${succeeded.length} 项，另有 ${failedSpecs.length} 项取消失败已继续保留在「不自动同步」`,
+      });
+    },
+    [vaultHandle, permissionState, selectedItemId, closeItemDrawer],
+  );
+
+  const handleCancelItemSync = useCallback(
+    async (item: CollectionItemRecord) => {
+      const relatedTasks = await db.tasks
+        .where('itemId')
+        .equals(item.id)
+        .toArray();
+      const activeTask = relatedTasks.find(
+        (task) =>
+          task.status === 'queued' ||
+          task.status === 'downloading' ||
+          task.status === 'processing',
+      );
+
+      if (activeTask) {
+        await sendToBackground({
+          target: 'background',
+          type: 'CANCEL_DOWNLOAD_TASK',
+          taskId: activeTask.id,
+        }).catch(() => undefined);
+      }
+
+      const latest = await db.items.get(item.id);
+      if (latest && !isAutoSyncExcluded(latest)) {
+        await removeItemFromOpfs(item.id).catch(() => undefined);
+        await markItemsAutoSyncExcluded([
+          {
+            itemId: item.id,
+            reason: 'sync_cancelled_by_user',
+            detail: '下载同步过程中已手动取消同步到插件',
+          },
+        ]);
+      }
+
+      if (vaultHandle && permissionState === 'granted') {
+        const updated = await db.items.get(item.id);
+        if (updated && isAutoSyncExcluded(updated)) {
+          await purgeItemMediaFilesFromVault(
+            vaultHandle,
+            updated.relativeDir,
+          ).catch(() => undefined);
+          const synced: CollectionItemRecord = {
+            ...updated,
+            syncStatus: 'vault_synced',
+          };
+          await writeItemMetaToVault(vaultHandle, synced).catch(
+            () => undefined,
+          );
+          await db.items.put(synced);
+        }
+      }
+
+      if (selectedItemId === item.id) {
+        closeItemDrawer();
+      }
+      setActionNotice({
+        type: 'success',
+        text: `已取消「${item.title}」同步到插件，并移入「不自动同步」列表`,
+      });
+    },
+    [vaultHandle, permissionState, selectedItemId, closeItemDrawer],
   );
 
   const handleRestoreItem = useCallback(
     async (item: CollectionItemRecord) => {
       await restoreItem(item.id);
-      await syncItemMetaAfterTrashToggle(item.id);
+      await syncItemMetasIfPermitted([item.id]);
     },
-    [syncItemMetaAfterTrashToggle],
+    [syncItemMetasIfPermitted],
+  );
+
+  const handleBatchRestoreItems = useCallback(
+    async (targets: CollectionItemRecord[]) => {
+      if (targets.length === 0) {
+        return;
+      }
+      const ids = targets.map((t) => t.id);
+      await restoreItems(ids);
+      await syncItemMetasIfPermitted(ids);
+      setSelectedItemIds(new Set());
+      setActionNotice({
+        type: 'success',
+        text: `已从回收站恢复 ${targets.length} 项收藏`,
+      });
+    },
+    [syncItemMetasIfPermitted],
   );
 
   // 16. 派生统计、标签映射、筛选与排序结果
@@ -923,40 +1410,48 @@ export default function App() {
 
     const list = items.filter((item) => {
       const isDeleted = item.deletedAt != null;
+      const isExcluded = isAutoSyncExcluded(item);
 
       if (selectedFolderId !== null) {
-        if (isDeleted) {
+        if (isDeleted || isExcluded) {
           return false;
         }
+        const itemFolderIds = getItemFolderIds(item);
         if (
-          item.folderId === null ||
-          !allowedFolderIds?.has(item.folderId)
+          itemFolderIds.length === 0 ||
+          !itemFolderIds.some((fid) => allowedFolderIds?.has(fid))
         ) {
           return false;
         }
       } else {
         switch (activeView) {
           case 'all':
-            if (isDeleted) {
+            if (isDeleted || isExcluded) {
               return false;
             }
             break;
           case 'uncategorized':
-            if (isDeleted || item.folderId !== null) {
+            if (isDeleted || isExcluded || getItemFolderIds(item).length > 0) {
               return false;
             }
             break;
           case 'pending_sync':
             if (
               isDeleted ||
+              isExcluded ||
               (item.syncStatus !== 'opfs_staged' &&
                 item.syncStatus !== 'meta_dirty')
             ) {
               return false;
             }
             break;
+          case 'excluded':
+            if (!isExcluded) {
+              return false;
+            }
+            break;
           case 'trash':
-            if (!isDeleted) {
+            if (!isDeleted || isExcluded) {
               return false;
             }
             break;
@@ -1042,6 +1537,8 @@ export default function App() {
         return '未分类';
       case 'pending_sync':
         return '待同步';
+      case 'excluded':
+        return '不自动同步';
       case 'trash':
         return '回收站';
     }
@@ -1060,13 +1557,15 @@ export default function App() {
     setMediaKindFilter('all');
     setPlatformFilter('all');
     setSelectedFolderId(null);
-    if (activeView !== 'trash') {
+    if (activeView !== 'trash' && activeView !== 'excluded') {
       setActiveView('all');
     }
   }, [activeView]);
 
   const activeItemCount = useMemo(
-    () => items.filter((item) => item.deletedAt == null).length,
+    () =>
+      items.filter((item) => item.deletedAt == null && !isAutoSyncExcluded(item))
+        .length,
     [items],
   );
 
@@ -1082,6 +1581,186 @@ export default function App() {
     setActivePage('settings');
     setVaultSectionFocusTick((n) => n + 1);
   }, []);
+
+  // 17. 批量选择交互、安全裁剪与批量文件夹操作
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedItemIds(new Set());
+    lastSelectedAnchorRef.current = null;
+  }, []);
+
+  // 切换主视图/文件夹/设置页时退出批量选择并清空选中项，避免误操作不可见条目
+  useEffect(() => {
+    setSelectionMode(false);
+    setSelectedItemIds(new Set());
+    lastSelectedAnchorRef.current = null;
+  }, [activeView, selectedFolderId, activePage]);
+
+  // 筛选结果变化时自动裁剪不在当前视图的选中 ID
+  useEffect(() => {
+    setSelectedItemIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const visibleIds = new Set(filteredItems.map((item) => item.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (visibleIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [filteredItems]);
+
+  // 批量选择模式下按 Esc 退出（无弹窗/详情抽屉打开时）
+  useEffect(() => {
+    if (
+      !selectionMode ||
+      pendingDelete !== null ||
+      showFolderAssignModal ||
+      selectedItem !== null
+    ) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        exitSelectionMode();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    selectionMode,
+    pendingDelete,
+    showFolderAssignModal,
+    selectedItem,
+    exitSelectionMode,
+  ]);
+
+  const handleToggleSelectionMode = useCallback(() => {
+    if (selectionMode) {
+      exitSelectionMode();
+    } else {
+      setSelectionMode(true);
+    }
+  }, [selectionMode, exitSelectionMode]);
+
+  const handleToggleSelectItem = useCallback(
+    (itemId: string, shiftKey: boolean) => {
+      if (!selectionMode) {
+        setSelectionMode(true);
+      }
+
+      if (shiftKey && lastSelectedAnchorRef.current) {
+        const orderedIds = filteredItems.map((item) => item.id);
+        const startIdx = orderedIds.indexOf(lastSelectedAnchorRef.current);
+        const endIdx = orderedIds.indexOf(itemId);
+        if (startIdx !== -1 && endIdx !== -1) {
+          const [from, to] =
+            startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+          setSelectedItemIds((prev) => {
+            const next = new Set(prev);
+            for (let i = from; i <= to; i += 1) {
+              const id = orderedIds[i];
+              if (id) {
+                next.add(id);
+              }
+            }
+            return next;
+          });
+          lastSelectedAnchorRef.current = itemId;
+          return;
+        }
+      }
+
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(itemId)) {
+          next.delete(itemId);
+        } else {
+          next.add(itemId);
+        }
+        return next;
+      });
+      lastSelectedAnchorRef.current = itemId;
+    },
+    [selectionMode, filteredItems],
+  );
+
+  const handleSelectAllVisible = useCallback(() => {
+    setSelectedItemIds(new Set(filteredItems.map((item) => item.id)));
+  }, [filteredItems]);
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedItemIds(new Set());
+    lastSelectedAnchorRef.current = null;
+  }, []);
+
+  const selectedVisibleItems = useMemo(
+    () => filteredItems.filter((item) => selectedItemIds.has(item.id)),
+    [filteredItems, selectedItemIds],
+  );
+
+  const handleBatchAddToFolders = useCallback(
+    async (targetFolderIds: string[]) => {
+      const itemIds = selectedVisibleItems.map((item) => item.id);
+      if (itemIds.length === 0 || targetFolderIds.length === 0) {
+        setShowFolderAssignModal(false);
+        return;
+      }
+
+      const updated = await addItemsToFolders(itemIds, targetFolderIds);
+      if (updated.length > 0) {
+        await syncItemMetasIfPermitted(
+          updated.map((u) => u.id),
+          true,
+        );
+      }
+
+      const folderNames = targetFolderIds
+        .map((fid) => foldersById.get(fid)?.name)
+        .filter((name): name is string => Boolean(name));
+      setShowFolderAssignModal(false);
+      exitSelectionMode();
+      setActionNotice({
+        type: 'success',
+        text: `已将 ${itemIds.length} 项加入文件夹：${folderNames.join('、')}`,
+      });
+    },
+    [
+      selectedVisibleItems,
+      syncItemMetasIfPermitted,
+      foldersById,
+      exitSelectionMode,
+    ],
+  );
+
+  const handleBatchRemoveFromCurrentFolder = useCallback(async () => {
+    if (selectedFolderId === null || selectedVisibleItems.length === 0) {
+      return;
+    }
+    const itemIds = selectedVisibleItems.map((item) => item.id);
+    const updated = await removeItemsFromFolder(itemIds, selectedFolderId);
+    if (updated.length > 0) {
+      await syncItemMetasIfPermitted(updated.map((u) => u.id));
+    }
+    const folderName = foldersById.get(selectedFolderId)?.name ?? '当前文件夹';
+    setSelectedItemIds(new Set());
+    setActionNotice({
+      type: 'success',
+      text: `已将 ${updated.length} 项从「${folderName}」移出`,
+    });
+  }, [
+    selectedFolderId,
+    selectedVisibleItems,
+    syncItemMetasIfPermitted,
+    foldersById,
+  ]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 text-slate-900">
@@ -1131,6 +1810,37 @@ export default function App() {
               当前有 <strong>{activeDownloadCount}</strong>{' '}
               个作品正在后台下载中，完成后会自动进入暂存队列并可一键落盘。
             </span>
+          </div>
+        )}
+
+        {/* 批量操作 / 删除同步结果轻提示条 */}
+        {actionNotice && (
+          <div
+            data-testid="library-action-notice"
+            className={`flex items-center justify-between gap-2 border-b px-6 py-2 text-xs ${
+              actionNotice.type === 'success'
+                ? 'border-emerald-200 bg-emerald-50/90 text-emerald-800'
+                : actionNotice.type === 'warning'
+                  ? 'border-amber-200 bg-amber-50/90 text-amber-900'
+                  : 'border-rose-200 bg-rose-50/90 text-rose-800'
+            }`}
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              {actionNotice.type === 'success' ? (
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+              ) : (
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              )}
+              <span className="truncate font-medium">{actionNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionNotice(null)}
+              aria-label="关闭提示"
+              className="rounded p-0.5 opacity-70 transition hover:opacity-100"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
         )}
 
@@ -1195,15 +1905,31 @@ export default function App() {
             sortBy={sortBy}
             viewMode={viewMode}
             isTrashView={selectedFolderId === null && activeView === 'trash'}
+            isExcludedView={
+              selectedFolderId === null && activeView === 'excluded'
+            }
+            currentFolderId={selectedFolderId}
             hasActiveFilters={hasActiveFilters}
             contextTitle={contextTitle}
+            selectionMode={selectionMode}
+            selectedIds={selectedItemIds}
             onSearchChange={setSearchQuery}
             onSortChange={setSortBy}
             onViewModeChange={setViewMode}
             onResetFilters={handleResetFilters}
             onOpenItem={openItemDrawer}
-            onSoftDeleteItem={handleSoftDeleteItem}
+            onToggleSelectionMode={handleToggleSelectionMode}
+            onToggleSelectItem={handleToggleSelectItem}
+            onSelectAllVisible={handleSelectAllVisible}
+            onClearSelection={handleClearSelection}
+            onOpenBatchFolderModal={() => setShowFolderAssignModal(true)}
+            onBatchRemoveFromCurrentFolder={handleBatchRemoveFromCurrentFolder}
+            onRequestDeleteItems={handleRequestDeleteItems}
+            onBatchRestoreItems={handleBatchRestoreItems}
             onRestoreItem={handleRestoreItem}
+            onAllowAutoSyncAgain={handleAllowAutoSyncAgain}
+            onRemoteUncollectAndClear={handleRemoteUncollectAndClear}
+            onCancelItemSync={handleCancelItemSync}
           />
         )}
       </main>
@@ -1216,11 +1942,39 @@ export default function App() {
           tags={tags}
           vaultHandle={vaultHandle}
           permissionState={permissionState}
+          disableEscapeClose={pendingDelete !== null}
           onClose={closeItemDrawer}
           onRequestVaultAccess={handleRequestPermissionAndSync}
           onSaveItem={handleSaveItem}
-          onSoftDeleteItem={handleSoftDeleteItem}
+          onRequestDeleteItem={(item, mode) =>
+            handleRequestDeleteItems([item], mode)
+          }
           onRestoreItem={handleRestoreItem}
+          onAllowAutoSyncAgain={handleAllowAutoSyncAgain}
+          onRemoteUncollectAndClear={handleRemoteUncollectAndClear}
+          onCancelItemSync={handleCancelItemSync}
+        />
+      )}
+
+      {/* 统一删除二次确认弹窗（含同步取消账号收藏勾选框，默认勾选） */}
+      {pendingDelete && (
+        <DeleteConfirmModal
+          items={pendingDelete.items}
+          mode={pendingDelete.mode}
+          submitting={isDeleting}
+          onCancel={() => !isDeleting && setPendingDelete(null)}
+          onConfirm={handleConfirmDelete}
+        />
+      )}
+
+      {/* 批量加入分类文件夹弹窗（支持多选） */}
+      {showFolderAssignModal && (
+        <FolderAssignModal
+          selectedItems={selectedVisibleItems}
+          folders={folders}
+          onClose={() => setShowFolderAssignModal(false)}
+          onCreateFolder={handleCreateFolder}
+          onConfirm={handleBatchAddToFolders}
         />
       )}
     </div>

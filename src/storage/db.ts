@@ -6,17 +6,23 @@
 
 import Dexie, { type Table } from 'dexie';
 import { ulid } from 'ulid';
-import type {
-  CollectionItemRecord,
-  DownloadTask,
-  FolderNode,
-  PlatformAccountSyncEntry,
-  PlatformId,
-  SettingKey,
-  SettingRecord,
-  SettingValueMap,
-  TagMeta,
-  UserPreferences,
+import {
+  getItemFolderIds,
+  isAutoSyncExcluded,
+  normalizeFolderIds,
+  type AutoSyncExclusion,
+  type AutoSyncExclusionReason,
+  type CollectionItemRecord,
+  type DownloadTask,
+  type FolderNode,
+  type MediaAsset,
+  type PlatformAccountSyncEntry,
+  type PlatformId,
+  type SettingKey,
+  type SettingRecord,
+  type SettingValueMap,
+  type TagMeta,
+  type UserPreferences,
 } from '../types/schema.ts';
 
 /** Collect+ IndexedDB 数据库定义 */
@@ -38,18 +44,66 @@ export class CollectPlusDB extends Dexie {
       tasks: 'id, itemId, dedupeKey, status, createdAt, updatedAt',
       settings: 'key',
     });
+
+    this.version(2)
+      .stores({
+        items:
+          'id, &dedupeKey, platform, folderId, *folderIds, syncStatus, collectedAt, updatedAt, deletedAt, [platform+collectedAt], [folderId+collectedAt], *tags',
+        folders: 'id, parentId, sortOrder, name',
+        tags: '&name, createdAt',
+        tasks: 'id, itemId, dedupeKey, status, createdAt, updatedAt',
+        settings: 'key',
+      })
+      .upgrade((tx) =>
+        tx
+          .table('items')
+          .toCollection()
+          .modify((item: CollectionItemRecord) => {
+            const normalized = getItemFolderIds(item);
+            item.folderIds = normalized;
+            item.folderId = normalized[0] ?? null;
+          }),
+      );
   }
 }
 
 /** 全局数据库单例 */
 export const db = new CollectPlusDB();
 
+/** 取消自动保存的默认视频体积阈值（MB） */
+export const DEFAULT_OVERSIZED_VIDEO_THRESHOLD_MB = 200;
+/** 取消自动保存视频体积阈值的最小合法值（MB） */
+export const MIN_OVERSIZED_VIDEO_THRESHOLD_MB = 1;
+/** 取消自动保存视频体积阈值的最大合法值（MB） */
+export const MAX_OVERSIZED_VIDEO_THRESHOLD_MB = 10240;
+
+/** 钳位并规范化视频体积阈值（MB），异常值回退默认 200MB */
+export function clampOversizedVideoThresholdMb(value: unknown): number {
+  const num =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isFinite(num)) {
+    return DEFAULT_OVERSIZED_VIDEO_THRESHOLD_MB;
+  }
+  return Math.max(
+    MIN_OVERSIZED_VIDEO_THRESHOLD_MB,
+    Math.min(MAX_OVERSIZED_VIDEO_THRESHOLD_MB, Math.round(num)),
+  );
+}
+
 /** 默认用户偏好设置 */
 export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   autoSyncOnLibraryOpen: true,
   floatingButtonEnabled: true,
+  nativeCollectToastEnabled: true,
   autoSyncAllCollections: false,
   syncUncollectToPlugin: false,
+  skipOversizedVideoAutoSave: false,
+  oversizedVideoThresholdMb: DEFAULT_OVERSIZED_VIDEO_THRESHOLD_MB,
+  oversizedVideoNotifyMode: 'popup',
   defaultFolderId: null,
   maxConcurrentDownloads: 2,
   defaultViewMode: 'grid',
@@ -147,9 +201,17 @@ export async function getUserPreferences(): Promise<UserPreferences> {
   if (!saved) {
     return { ...DEFAULT_USER_PREFERENCES };
   }
-  return {
+  const merged: UserPreferences = {
     ...DEFAULT_USER_PREFERENCES,
     ...saved,
+  };
+  return {
+    ...merged,
+    oversizedVideoThresholdMb: clampOversizedVideoThresholdMb(
+      merged.oversizedVideoThresholdMb,
+    ),
+    oversizedVideoNotifyMode:
+      merged.oversizedVideoNotifyMode === 'silent' ? 'silent' : 'popup',
   };
 }
 
@@ -352,30 +414,44 @@ export async function deleteFolder(id: string): Promise<void> {
 
     await db.folders.bulkDelete(idsToDelete);
 
-    const affectedItems = await db.items
-      .where('folderId')
-      .anyOf(idsToDelete)
-      .toArray();
+    const deletedSet = new Set(idsToDelete);
+    const [byFolderIds, byLegacyFolderId] = await Promise.all([
+      db.items.where('folderIds').anyOf(idsToDelete).toArray(),
+      db.items.where('folderId').anyOf(idsToDelete).toArray(),
+    ]);
 
-    if (affectedItems.length > 0) {
+    const affectedById = new Map<string, CollectionItemRecord>();
+    for (const item of [...byFolderIds, ...byLegacyFolderId]) {
+      affectedById.set(item.id, item);
+    }
+
+    if (affectedById.size > 0) {
       const now = Date.now();
-      const updatedItems: CollectionItemRecord[] = affectedItems.map((item) => ({
-        ...item,
-        folderId: null,
-        updatedAt: now,
-        syncStatus:
-          item.syncStatus === 'vault_synced' ? 'meta_dirty' : item.syncStatus,
-      }));
+      const updatedItems: CollectionItemRecord[] = [];
+      for (const item of affectedById.values()) {
+        const nextFolderIds = getItemFolderIds(item).filter(
+          (fid) => !deletedSet.has(fid),
+        );
+        updatedItems.push({
+          ...item,
+          folderIds: nextFolderIds,
+          folderId: nextFolderIds[0] ?? null,
+          updatedAt: now,
+          syncStatus:
+            item.syncStatus === 'vault_synced' ? 'meta_dirty' : item.syncStatus,
+        });
+      }
       await db.items.bulkPut(updatedItems);
     }
   });
 }
 
-/** 更新条目的分类、标签、备注或标题，自动 upsert 标签并在必要时标记 `meta_dirty` */
+/** 更新条目的分类（支持多文件夹）、标签、备注或标题，自动 upsert 标签并在必要时标记 `meta_dirty` */
 export async function updateItemClassification(
   itemId: string,
   patch: {
     folderId?: string | null;
+    folderIds?: string[];
     tags?: string[];
     note?: string;
     title?: string;
@@ -396,10 +472,17 @@ export async function updateItemClassification(
     const nextTitle =
       patch.title !== undefined ? patch.title.trim() || existing.title : existing.title;
 
+    let nextFolderIds = getItemFolderIds(existing);
+    if (patch.folderIds !== undefined) {
+      nextFolderIds = normalizeFolderIds(patch.folderIds);
+    } else if (patch.folderId !== undefined) {
+      nextFolderIds = normalizeFolderIds(undefined, patch.folderId);
+    }
+
     const updated: CollectionItemRecord = {
       ...existing,
-      folderId:
-        patch.folderId !== undefined ? patch.folderId : existing.folderId,
+      folderIds: nextFolderIds,
+      folderId: nextFolderIds[0] ?? null,
       tags: nextTags,
       note: patch.note !== undefined ? patch.note : existing.note,
       title: nextTitle,
@@ -415,45 +498,324 @@ export async function updateItemClassification(
   });
 }
 
-/** 软删除条目（移入回收站），已同步条目自动置为 `meta_dirty` */
-export async function softDeleteItem(itemId: string): Promise<void> {
-  await db.transaction('rw', db.items, async () => {
-    const existing = await db.items.get(itemId);
-    if (!existing) {
-      return;
+/** 批量将条目加入一个或多个分类文件夹（并集追加，保留既有文件夹归属） */
+export async function addItemsToFolders(
+  itemIds: readonly string[],
+  folderIdsToAdd: readonly string[],
+): Promise<CollectionItemRecord[]> {
+  const uniqueItemIds = Array.from(new Set(itemIds.filter(Boolean)));
+  const normalizedTargetFolders = normalizeFolderIds(folderIdsToAdd);
+  if (uniqueItemIds.length === 0 || normalizedTargetFolders.length === 0) {
+    return [];
+  }
+
+  return db.transaction('rw', db.items, db.folders, async () => {
+    const existingFolders = await db.folders.bulkGet(normalizedTargetFolders);
+    const validFolderIds = normalizedTargetFolders.filter(
+      (_, idx) => existingFolders[idx] !== undefined,
+    );
+    if (validFolderIds.length === 0) {
+      return [];
     }
 
+    const records = await db.items.bulkGet(uniqueItemIds);
     const now = Date.now();
-    await db.items.put({
-      ...existing,
-      deletedAt: now,
-      updatedAt: now,
-      syncStatus:
-        existing.syncStatus === 'vault_synced'
-          ? 'meta_dirty'
-          : existing.syncStatus,
-    });
+    const updatedList: CollectionItemRecord[] = [];
+
+    for (const existing of records) {
+      if (!existing) {
+        continue;
+      }
+      const currentFolderIds = getItemFolderIds(existing);
+      const mergedFolderIds = normalizeFolderIds([
+        ...currentFolderIds,
+        ...validFolderIds,
+      ]);
+      const unchanged =
+        mergedFolderIds.length === currentFolderIds.length &&
+        Array.isArray(existing.folderIds) &&
+        existing.folderId === (mergedFolderIds[0] ?? null);
+      if (unchanged) {
+        continue;
+      }
+
+      updatedList.push({
+        ...existing,
+        folderIds: mergedFolderIds,
+        folderId: mergedFolderIds[0] ?? null,
+        updatedAt: now,
+        syncStatus:
+          existing.syncStatus === 'vault_synced'
+            ? 'meta_dirty'
+            : existing.syncStatus,
+      });
+    }
+
+    if (updatedList.length > 0) {
+      await db.items.bulkPut(updatedList);
+    }
+    return updatedList;
   });
 }
 
-/** 从回收站恢复软删除条目，已同步条目自动置为 `meta_dirty` */
-export async function restoreItem(itemId: string): Promise<void> {
-  await db.transaction('rw', db.items, async () => {
-    const existing = await db.items.get(itemId);
-    if (!existing) {
-      return;
+/** 批量将条目从指定分类文件夹移出（保留条目在其他文件夹中的归属） */
+export async function removeItemsFromFolder(
+  itemIds: readonly string[],
+  folderIdToRemove: string,
+): Promise<CollectionItemRecord[]> {
+  const uniqueItemIds = Array.from(new Set(itemIds.filter(Boolean)));
+  const targetFolderId = folderIdToRemove.trim();
+  if (uniqueItemIds.length === 0 || !targetFolderId) {
+    return [];
+  }
+
+  return db.transaction('rw', db.items, async () => {
+    const records = await db.items.bulkGet(uniqueItemIds);
+    const now = Date.now();
+    const updatedList: CollectionItemRecord[] = [];
+
+    for (const existing of records) {
+      if (!existing) {
+        continue;
+      }
+      const currentFolderIds = getItemFolderIds(existing);
+      if (!currentFolderIds.includes(targetFolderId)) {
+        continue;
+      }
+      const nextFolderIds = currentFolderIds.filter(
+        (fid) => fid !== targetFolderId,
+      );
+      updatedList.push({
+        ...existing,
+        folderIds: nextFolderIds,
+        folderId: nextFolderIds[0] ?? null,
+        updatedAt: now,
+        syncStatus:
+          existing.syncStatus === 'vault_synced'
+            ? 'meta_dirty'
+            : existing.syncStatus,
+      });
     }
 
+    if (updatedList.length > 0) {
+      await db.items.bulkPut(updatedList);
+    }
+    return updatedList;
+  });
+}
+
+/** 批量软删除条目（移入回收站），已同步条目自动置为 `meta_dirty` */
+export async function softDeleteItems(
+  itemIds: readonly string[],
+): Promise<CollectionItemRecord[]> {
+  const uniqueIds = Array.from(new Set(itemIds.filter(Boolean)));
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+
+  return db.transaction('rw', db.items, async () => {
+    const records = await db.items.bulkGet(uniqueIds);
     const now = Date.now();
-    await db.items.put({
-      ...existing,
-      deletedAt: null,
-      updatedAt: now,
-      syncStatus:
-        existing.syncStatus === 'vault_synced'
-          ? 'meta_dirty'
-          : existing.syncStatus,
+    const updatedList: CollectionItemRecord[] = [];
+
+    for (const existing of records) {
+      if (!existing || existing.deletedAt != null || isAutoSyncExcluded(existing)) {
+        continue;
+      }
+      updatedList.push({
+        ...existing,
+        deletedAt: now,
+        updatedAt: now,
+        syncStatus:
+          existing.syncStatus === 'vault_synced'
+            ? 'meta_dirty'
+            : existing.syncStatus,
+      });
+    }
+
+    if (updatedList.length > 0) {
+      await db.items.bulkPut(updatedList);
+    }
+    return updatedList;
+  });
+}
+
+/** 软删除单个条目（移入回收站），已同步条目自动置为 `meta_dirty` */
+export async function softDeleteItem(itemId: string): Promise<void> {
+  await softDeleteItems([itemId]);
+}
+
+/** 批量从回收站恢复软删除条目，已同步条目自动置为 `meta_dirty` */
+export async function restoreItems(
+  itemIds: readonly string[],
+): Promise<CollectionItemRecord[]> {
+  const uniqueIds = Array.from(new Set(itemIds.filter(Boolean)));
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+
+  return db.transaction('rw', db.items, async () => {
+    const records = await db.items.bulkGet(uniqueIds);
+    const now = Date.now();
+    const updatedList: CollectionItemRecord[] = [];
+
+    for (const existing of records) {
+      if (!existing || existing.deletedAt == null || isAutoSyncExcluded(existing)) {
+        continue;
+      }
+      updatedList.push({
+        ...existing,
+        deletedAt: null,
+        updatedAt: now,
+        syncStatus:
+          existing.syncStatus === 'vault_synced'
+            ? 'meta_dirty'
+            : existing.syncStatus,
+      });
+    }
+
+    if (updatedList.length > 0) {
+      await db.items.bulkPut(updatedList);
+    }
+    return updatedList;
+  });
+}
+
+/** 从回收站恢复单个软删除条目，已同步条目自动置为 `meta_dirty` */
+export async function restoreItem(itemId: string): Promise<void> {
+  await restoreItems([itemId]);
+}
+
+/** 批量将条目转入「不自动同步」特殊分类（清空媒体下载标记与文件夹归属，保留轻量元数据，并将未完成任务置为取消） */
+export async function markItemsAutoSyncExcluded(
+  entries: ReadonlyArray<{
+    itemId: string;
+    reason: AutoSyncExclusionReason;
+    detail?: string;
+  }>,
+): Promise<CollectionItemRecord[]> {
+  const entryById = new Map<
+    string,
+    { reason: AutoSyncExclusionReason; detail?: string }
+  >();
+  for (const entry of entries) {
+    const id = entry.itemId.trim();
+    if (!id) {
+      continue;
+    }
+    entryById.set(id, {
+      reason: entry.reason,
+      ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
     });
+  }
+
+  const uniqueIds = Array.from(entryById.keys());
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+
+  return db.transaction('rw', db.items, db.tasks, async () => {
+    const records = await db.items.bulkGet(uniqueIds);
+    const now = Date.now();
+    const updatedList: CollectionItemRecord[] = [];
+
+    for (const existing of records) {
+      if (!existing) {
+        continue;
+      }
+      const spec = entryById.get(existing.id);
+      if (!spec) {
+        continue;
+      }
+
+      const trimmedDetail = spec.detail?.trim();
+      const exclusion: AutoSyncExclusion = {
+        reason: spec.reason,
+        ...(trimmedDetail ? { detail: trimmedDetail } : {}),
+        excludedAt: now,
+      };
+
+      const resetAssets: MediaAsset[] = existing.assets.map((asset) => {
+        const { sizeBytes: _sizeBytes, ...rest } = asset;
+        void _sizeBytes;
+        return {
+          ...rest,
+          downloaded: false,
+        };
+      });
+
+      const {
+        commentsRelativePath: _commentsRelativePath,
+        savedCommentCount: _savedCommentCount,
+        commentsSizeBytes: _commentsSizeBytes,
+        ...baseRecord
+      } = existing;
+      void _commentsRelativePath;
+      void _savedCommentCount;
+      void _commentsSizeBytes;
+
+      updatedList.push({
+        ...baseRecord,
+        folderId: null,
+        folderIds: [],
+        deletedAt: null,
+        autoSyncExclusion: exclusion,
+        assets: resetAssets,
+        totalSizeBytes: 0,
+        syncStatus: 'meta_dirty',
+        updatedAt: now,
+      });
+    }
+
+    if (updatedList.length > 0) {
+      await db.items.bulkPut(updatedList);
+    }
+
+    const relatedTasks = await db.tasks
+      .where('itemId')
+      .anyOf(uniqueIds)
+      .toArray();
+    const cancelledTasks: DownloadTask[] = [];
+    for (const task of relatedTasks) {
+      if (
+        task.status === 'queued' ||
+        task.status === 'downloading' ||
+        task.status === 'processing'
+      ) {
+        cancelledTasks.push({
+          ...task,
+          status: 'cancelled',
+          errorMessage: '条目已设为不自动同步，下载任务已取消。',
+          updatedAt: now,
+        });
+      }
+    }
+    if (cancelledTasks.length > 0) {
+      await db.tasks.bulkPut(cancelledTasks);
+    }
+
+    return updatedList;
+  });
+}
+
+/** 从 IndexedDB 彻底移除指定条目及其关联下载任务记录 */
+export async function hardDeleteItemsFromDb(
+  itemIds: readonly string[],
+): Promise<void> {
+  const uniqueIds = Array.from(new Set(itemIds.filter(Boolean)));
+  if (uniqueIds.length === 0) {
+    return;
+  }
+
+  await db.transaction('rw', db.items, db.tasks, async () => {
+    const relatedTasks = await db.tasks
+      .where('itemId')
+      .anyOf(uniqueIds)
+      .primaryKeys();
+    if (relatedTasks.length > 0) {
+      await db.tasks.bulkDelete(relatedTasks);
+    }
+    await db.items.bulkDelete(uniqueIds);
   });
 }
 

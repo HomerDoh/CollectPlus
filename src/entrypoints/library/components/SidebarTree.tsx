@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CloudOff,
   Film,
   Folder,
   FolderOpen,
@@ -19,9 +20,19 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { CollectionItemRecord, FolderNode } from '@/types/schema.ts';
+import {
+  getItemFolderIds,
+  isAutoSyncExcluded,
+  type CollectionItemRecord,
+  type FolderNode,
+} from '@/types/schema.ts';
 
-export type QuickNavView = 'all' | 'uncategorized' | 'pending_sync' | 'trash';
+export type QuickNavView =
+  | 'all'
+  | 'uncategorized'
+  | 'pending_sync'
+  | 'excluded'
+  | 'trash';
 export type SidebarSyncStatus = 'syncing' | 'failed';
 export type MediaKindFilter = 'all' | 'video' | 'image_text';
 export type PlatformFilter =
@@ -49,7 +60,10 @@ export interface SidebarTreeProps {
   onSelectPlatform: (platform: PlatformFilter) => void;
   onOpenSettings: () => void;
   onOpenVaultSettings: () => void;
-  onCreateFolder: (name: string, parentId: string | null) => Promise<void>;
+  onCreateFolder: (
+    name: string,
+    parentId: string | null,
+  ) => Promise<void | FolderNode>;
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;
 }
@@ -118,33 +132,44 @@ export function SidebarTree({
   const [submitting, setSubmitting] = useState(false);
   const [syncTipOpen, setSyncTipOpen] = useState(false);
 
-  // 计算快捷视图计数与每个文件夹含子级计数
+  // 计算快捷视图计数与每个文件夹含子级去重计数（支持单条目同时属于多个文件夹）
   const {
     allCount,
     uncategorizedCount,
     pendingSyncCount,
+    excludedCount,
     trashCount,
-    folderDirectCounts,
+    folderDirectItemIds,
   } = useMemo(() => {
     let all = 0;
     let uncategorized = 0;
     let pendingSync = 0;
+    let excluded = 0;
     let trash = 0;
-    const directFolderMap = new Map<string, number>();
+    const directMap = new Map<string, Set<string>>();
 
     for (const item of items) {
+      if (isAutoSyncExcluded(item)) {
+        excluded += 1;
+        continue;
+      }
       if (item.deletedAt != null) {
         trash += 1;
         continue;
       }
       all += 1;
-      if (item.folderId === null) {
+      const itemFolderIds = getItemFolderIds(item);
+      if (itemFolderIds.length === 0) {
         uncategorized += 1;
       } else {
-        directFolderMap.set(
-          item.folderId,
-          (directFolderMap.get(item.folderId) ?? 0) + 1,
-        );
+        for (const fid of itemFolderIds) {
+          let bucket = directMap.get(fid);
+          if (!bucket) {
+            bucket = new Set<string>();
+            directMap.set(fid, bucket);
+          }
+          bucket.add(item.id);
+        }
       }
       if (
         item.syncStatus === 'opfs_staged' ||
@@ -158,8 +183,9 @@ export function SidebarTree({
       allCount: all,
       uncategorizedCount: uncategorized,
       pendingSyncCount: pendingSync,
+      excludedCount: excluded,
       trashCount: trash,
-      folderDirectCounts: directFolderMap,
+      folderDirectItemIds: directMap,
     };
   }, [items]);
 
@@ -167,19 +193,21 @@ export function SidebarTree({
 
   const folderTotalCounts = useMemo(() => {
     const totals = new Map<string, number>();
-    const dfs = (node: FolderTreeNode): number => {
-      let sum = folderDirectCounts.get(node.folder.id) ?? 0;
+    const dfs = (node: FolderTreeNode): Set<string> => {
+      const merged = new Set<string>(folderDirectItemIds.get(node.folder.id));
       for (const child of node.children) {
-        sum += dfs(child);
+        for (const itemId of dfs(child)) {
+          merged.add(itemId);
+        }
       }
-      totals.set(node.folder.id, sum);
-      return sum;
+      totals.set(node.folder.id, merged.size);
+      return merged;
     };
     for (const root of folderTree) {
       dfs(root);
     }
     return totals;
-  }, [folderTree, folderDirectCounts]);
+  }, [folderTree, folderDirectItemIds]);
 
   const toggleExpand = (folderId: string) => {
     setExpandedIds((prev) => {
@@ -465,6 +493,12 @@ export function SidebarTree({
       count: pendingSyncCount,
       icon: FolderSync,
       highlightAmber: pendingSyncCount > 0,
+    },
+    {
+      key: 'excluded',
+      label: '不自动同步',
+      count: excludedCount,
+      icon: CloudOff,
     },
     { key: 'trash', label: '回收站', count: trashCount, icon: Trash2 },
   ];
@@ -753,7 +787,7 @@ export function SidebarTree({
                   删除文件夹「{deletingFolder.name}」？
                 </h3>
                 <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                  该文件夹及其所有子文件夹将被移除；其中的收藏条目不会被删除，而是自动移至「未分类」。
+                  该文件夹及其所有子文件夹将被移除；其中的收藏条目不会被删除，仅从该文件夹移出（若未归属其他文件夹将进入「未分类」）。
                 </p>
               </div>
             </div>

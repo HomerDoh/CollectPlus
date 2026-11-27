@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  CloudOff,
   ExternalLink,
   FileText,
   Film,
@@ -28,13 +29,17 @@ import {
   readItemAssetFile,
   type VaultPermissionStatus,
 } from '@/storage/vault.ts';
-import type {
-  CollectionItemRecord,
-  FolderNode,
-  MediaAsset,
-  TagMeta,
+import {
+  getItemFolderIds,
+  isAutoSyncExcluded,
+  normalizeFolderIds,
+  type CollectionItemRecord,
+  type FolderNode,
+  type MediaAsset,
+  type TagMeta,
 } from '@/types/schema.ts';
 import {
+  autoSyncExclusionMeta,
   formatBytes,
   formatDateTime,
   formatDuration,
@@ -46,7 +51,7 @@ import { ItemCommentsPanel } from './ItemCommentsPanel.tsx';
 
 export interface ItemEditPatch {
   title: string;
-  folderId: string | null;
+  folderIds: string[];
   tags: string[];
   note: string;
 }
@@ -62,14 +67,21 @@ export interface ItemDetailDrawerProps {
   tags: readonly TagMeta[];
   vaultHandle: FileSystemDirectoryHandle | null;
   permissionState: VaultPermissionStatus;
+  disableEscapeClose?: boolean;
   onClose: () => void;
   onRequestVaultAccess: () => Promise<boolean>;
   onSaveItem: (
     itemId: string,
     patch: ItemEditPatch,
   ) => Promise<SaveItemResult>;
-  onSoftDeleteItem: (item: CollectionItemRecord) => Promise<void>;
+  onRequestDeleteItem: (
+    item: CollectionItemRecord,
+    mode: 'soft' | 'permanent',
+  ) => void;
   onRestoreItem: (item: CollectionItemRecord) => Promise<void>;
+  onAllowAutoSyncAgain: (items: CollectionItemRecord[]) => Promise<void>;
+  onRemoteUncollectAndClear: (items: CollectionItemRecord[]) => Promise<void>;
+  onCancelItemSync: (item: CollectionItemRecord) => Promise<void>;
 }
 
 interface LoadedSlide {
@@ -141,17 +153,37 @@ function areTagListsEqual(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
+function areStringSetsEqual(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const setB = new Set(b);
+  for (const val of a) {
+    if (!setB.has(val)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function ItemDetailDrawer({
   item,
   folders,
   tags,
   vaultHandle,
   permissionState,
+  disableEscapeClose = false,
   onClose,
   onRequestVaultAccess,
   onSaveItem,
-  onSoftDeleteItem,
+  onRequestDeleteItem,
   onRestoreItem,
+  onAllowAutoSyncAgain,
+  onRemoteUncollectAndClear,
+  onCancelItemSync,
 }: ItemDetailDrawerProps) {
   // 离线媒体加载状态
   const [mediaLoading, setMediaLoading] = useState(true);
@@ -168,14 +200,14 @@ export function ItemDetailDrawer({
   );
 
   // 元数据编辑表单状态
+  const itemFolderIds = useMemo(() => getItemFolderIds(item), [item]);
   const [draftTitle, setDraftTitle] = useState(item.title);
-  const [draftFolderId, setDraftFolderId] = useState<string | null>(
-    item.folderId,
-  );
+  const [draftFolderIds, setDraftFolderIds] = useState<string[]>(itemFolderIds);
   const [draftTags, setDraftTags] = useState<string[]>(item.tags);
   const [draftNote, setDraftNote] = useState(item.note);
   const [tagInput, setTagInput] = useState('');
   const [saving, setSaving] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<{
     type: 'success' | 'error';
     text: string;
@@ -184,11 +216,11 @@ export function ItemDetailDrawer({
   // 切换条目或条目外部刷新时同步表单状态
   useEffect(() => {
     setDraftTitle(item.title);
-    setDraftFolderId(item.folderId);
+    setDraftFolderIds(itemFolderIds);
     setDraftTags(item.tags);
     setDraftNote(item.note);
     setTagInput('');
-  }, [item.id, item.updatedAt, item.title, item.folderId, item.tags, item.note]);
+  }, [item.id, item.updatedAt, item.title, itemFolderIds, item.tags, item.note]);
 
   // 仅在切换不同条目时重置图集页码、右侧标签页与保存反馈提示，避免保存后 liveQuery 刷新把成功提示瞬间擦除
   useEffect(() => {
@@ -209,7 +241,8 @@ export function ItemDetailDrawer({
       item.syncStatus === 'pending_download' || item.syncStatus === 'failed'
         ? item.syncStatus
         : 'ready';
-    return `${item.id}|${item.kind}|${item.relativeDir}|${item.coverRelativePath ?? ''}|${assetSig}|${availabilityPhase}`;
+    const excludedFlag = isAutoSyncExcluded(item) ? 'excluded' : 'normal';
+    return `${item.id}|${item.kind}|${item.relativeDir}|${item.coverRelativePath ?? ''}|${assetSig}|${availabilityPhase}|${excludedFlag}`;
   }, [
     item.id,
     item.kind,
@@ -217,6 +250,7 @@ export function ItemDetailDrawer({
     item.coverRelativePath,
     item.assets,
     item.syncStatus,
+    item.autoSyncExclusion,
   ]);
 
   // 100% 离线媒体读取与严格的 Object URL 生命周期管理
@@ -224,6 +258,16 @@ export function ItemDetailDrawer({
     let cancelled = false;
     const createdUrls: string[] = [];
     const currentItem = itemRef.current;
+
+    if (isAutoSyncExcluded(currentItem)) {
+      setMediaLoading(false);
+      setMediaError(null);
+      setNeedsVaultAuth(false);
+      setLoadedVideo(null);
+      setCoverUrl(undefined);
+      setLoadedSlides([]);
+      return;
+    }
 
     const createTrackedUrl = (file: File): string => {
       const url = URL.createObjectURL(file);
@@ -371,6 +415,9 @@ export function ItemDetailDrawer({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        if (disableEscapeClose) {
+          return;
+        }
         event.preventDefault();
         onClose();
         return;
@@ -404,9 +451,16 @@ export function ItemDetailDrawer({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, loadedSlides.length]);
+  }, [onClose, loadedSlides.length, disableEscapeClose]);
 
   const folderOptions = useMemo(() => flattenFolderOptions(folders), [folders]);
+  const foldersById = useMemo(() => {
+    const map = new Map<string, FolderNode>();
+    for (const f of folders) {
+      map.set(f.id, f);
+    }
+    return map;
+  }, [folders]);
   const tagsByName = useMemo(() => {
     const map = new Map<string, TagMeta>();
     for (const tag of tags) {
@@ -423,11 +477,20 @@ export function ItemDetailDrawer({
   const isDirty = useMemo(() => {
     return (
       draftTitle.trim() !== item.title ||
-      draftFolderId !== item.folderId ||
+      !areStringSetsEqual(normalizeFolderIds(draftFolderIds), itemFolderIds) ||
       draftNote !== item.note ||
       !areTagListsEqual(draftTags, item.tags)
     );
-  }, [draftTitle, draftFolderId, draftNote, draftTags, item]);
+  }, [draftTitle, draftFolderIds, itemFolderIds, draftNote, draftTags, item]);
+
+  const handleToggleFolder = useCallback((folderId: string) => {
+    setDraftFolderIds((prev) =>
+      prev.includes(folderId)
+        ? prev.filter((id) => id !== folderId)
+        : [...prev, folderId],
+    );
+    setSaveFeedback(null);
+  }, []);
 
   const handleAddTag = useCallback(
     (rawValue: string) => {
@@ -458,7 +521,7 @@ export function ItemDetailDrawer({
     try {
       const result = await onSaveItem(item.id, {
         title: draftTitle.trim() || item.title,
-        folderId: draftFolderId,
+        folderIds: normalizeFolderIds(draftFolderIds),
         tags: draftTags,
         note: draftNote,
       });
@@ -491,11 +554,29 @@ export function ItemDetailDrawer({
   const currentSlide = loadedSlides[activeSlideIndex];
   const platformInfo = platformMeta(item.platform);
   const syncInfo = syncStatusMeta(item.syncStatus);
+  const exclusion = item.autoSyncExclusion ?? null;
+  const isExcluded = exclusion !== null;
+  const exclusionInfo = exclusion
+    ? autoSyncExclusionMeta(exclusion.reason)
+    : null;
   const isDeleted = item.deletedAt != null;
   const showCommentsTab =
-    item.kind === 'video' ||
-    Boolean(item.commentsRelativePath) ||
-    (item.savedCommentCount ?? 0) > 0;
+    !isExcluded &&
+    (item.kind === 'video' ||
+      Boolean(item.commentsRelativePath) ||
+      (item.savedCommentCount ?? 0) > 0);
+
+  const runFooterAction = async (fn: () => Promise<void>) => {
+    if (actionBusy) {
+      return;
+    }
+    setActionBusy(true);
+    try {
+      await fn();
+    } finally {
+      setActionBusy(false);
+    }
+  };
 
   return (
     <div
@@ -520,7 +601,12 @@ export function ItemDetailDrawer({
                 {platformInfo.label}
               </span>
               <span className="inline-flex items-center gap-1 text-slate-300">
-                {item.kind === 'video' ? (
+                {isExcluded ? (
+                  <>
+                    <CloudOff className="h-3.5 w-3.5 text-amber-400" />
+                    <span>不自动同步（仅保留元数据）</span>
+                  </>
+                ) : item.kind === 'video' ? (
                   <>
                     <Film className="h-3.5 w-3.5 text-indigo-400" />
                     <span>离线视频播放</span>
@@ -559,7 +645,55 @@ export function ItemDetailDrawer({
 
           {/* 主媒体画布 */}
           <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-3">
-            {mediaLoading ? (
+            {isExcluded && exclusion && exclusionInfo ? (
+              <div
+                data-testid="excluded-detail-panel"
+                className="flex max-w-md flex-col items-center gap-3.5 rounded-2xl border border-amber-400/25 bg-white/5 px-6 py-7 text-center"
+              >
+                {item.thumbnailDataUrl ? (
+                  <img
+                    src={item.thumbnailDataUrl}
+                    alt={item.title}
+                    className="max-h-36 w-full rounded-xl object-cover opacity-85 ring-1 ring-white/15"
+                  />
+                ) : (
+                  <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/20 text-amber-300">
+                    <CloudOff className="h-6 w-6" />
+                  </span>
+                )}
+                <h4 className="text-sm font-semibold text-white">
+                  此内容已设为不自动同步
+                </h4>
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${exclusionInfo.badgeClass}`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${exclusionInfo.dotClass}`}
+                  />
+                  <span>{exclusionInfo.label}</span>
+                </span>
+                {exclusion.detail && (
+                  <p className="w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs leading-relaxed text-amber-100">
+                    {exclusion.detail}
+                  </p>
+                )}
+                <p className="text-[11px] text-slate-400">
+                  标记时间：{formatDateTime(exclusion.excludedAt)}
+                </p>
+                <p className="text-xs leading-relaxed text-slate-300">
+                  本地媒体文件已清理释放空间，仅保留轻量元数据以防止下次打开网页时被自动重新同步。如需重新离线保存，可在原网页手动采集（悬浮按钮 / Alt+S / 重新收藏）或在下方点击「允许再次自动同步」。
+                </p>
+                <a
+                  href={item.sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  <span>前往原网页查看</span>
+                </a>
+              </div>
+            ) : mediaLoading ? (
               <div className="flex flex-col items-center gap-2.5 text-xs text-slate-300">
                 <Loader2 className="h-7 w-7 animate-spin text-indigo-400" />
                 <span>正在从本地存储读取离线媒体...</span>
@@ -773,14 +907,25 @@ export function ItemDetailDrawer({
           {/* 头部栏 */}
           <header className="flex items-center justify-between gap-2 border-b border-slate-200 px-5 py-3.5">
             <div className="flex items-center gap-2">
-              <span
-                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${syncInfo.badgeClass}`}
-              >
+              {exclusionInfo ? (
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${syncInfo.dotClass}`}
-                />
-                <span>{syncInfo.label}</span>
-              </span>
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${exclusionInfo.badgeClass}`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${exclusionInfo.dotClass}`}
+                  />
+                  <span>不自动同步</span>
+                </span>
+              ) : (
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${syncInfo.badgeClass}`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${syncInfo.dotClass}`}
+                  />
+                  <span>{syncInfo.label}</span>
+                </span>
+              )}
               {isDeleted && (
                 <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-medium text-rose-700">
                   回收站中
@@ -850,6 +995,29 @@ export function ItemDetailDrawer({
           ) : (
           /* 可滚动编辑表单与详情区 */
           <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
+            {/* 不自动同步原因摘要卡 */}
+            {isExcluded && exclusion && exclusionInfo && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-950">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-semibold text-amber-900">
+                    <CloudOff className="h-3.5 w-3.5 text-amber-600" />
+                    <span>不自动同步原因</span>
+                  </span>
+                  <span className="text-[11px] tabular-nums text-amber-700">
+                    {formatDateTime(exclusion.excludedAt)}
+                  </span>
+                </div>
+                <p className="mt-1 font-medium text-amber-900">
+                  {exclusionInfo.label}
+                </p>
+                {exclusion.detail && (
+                  <p className="mt-1 leading-relaxed text-amber-800">
+                    {exclusion.detail}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* 标题编辑 */}
             <div>
               <label
@@ -870,31 +1038,80 @@ export function ItemDetailDrawer({
               />
             </div>
 
-            {/* 所属文件夹 */}
+            {/* 所属文件夹（支持多选） */}
             <div>
-              <label
-                htmlFor="detail-folder-select"
-                className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-slate-700"
-              >
-                <Folder className="h-3.5 w-3.5 text-slate-400" />
-                <span>所属文件夹</span>
-              </label>
-              <select
-                id="detail-folder-select"
-                value={draftFolderId ?? ''}
-                onChange={(e) => {
-                  setDraftFolderId(e.target.value || null);
-                  setSaveFeedback(null);
-                }}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 transition focus:border-indigo-400 focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:outline-none"
-              >
-                <option value="">未分类</option>
-                {folderOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+                  <Folder className="h-3.5 w-3.5 text-slate-400" />
+                  <span>所属文件夹</span>
+                </span>
+                <span className="text-[11px] text-slate-400">
+                  {draftFolderIds.length > 0
+                    ? `已选 ${draftFolderIds.length} 个（支持多选）`
+                    : '未分类'}
+                </span>
+              </div>
+
+              {draftFolderIds.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {draftFolderIds.map((fid) => {
+                    const folderName = foldersById.get(fid)?.name;
+                    if (!folderName) {
+                      return null;
+                    }
+                    return (
+                      <span
+                        key={fid}
+                        className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800"
+                      >
+                        <Folder className="h-3 w-3 text-amber-500" />
+                        <span>{folderName}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleFolder(fid)}
+                          aria-label={`移出文件夹 ${folderName}`}
+                          className="rounded-full p-0.5 text-amber-600 hover:bg-amber-100 hover:text-amber-900"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+
+              {folderOptions.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-400">
+                  暂无文件夹，可在左侧侧边栏点击「新建」创建分类目录
+                </p>
+              ) : (
+                <div
+                  data-testid="detail-folder-list"
+                  className="max-h-36 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-1.5"
+                >
+                  {folderOptions.map((opt) => {
+                    const checked = draftFolderIds.includes(opt.id);
+                    return (
+                      <label
+                        key={opt.id}
+                        className={`flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-xs transition ${
+                          checked
+                            ? 'bg-indigo-50 font-medium text-indigo-800'
+                            : 'text-slate-700 hover:bg-white'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => handleToggleFolder(opt.id)}
+                          className="h-3.5 w-3.5 shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span className="truncate">{opt.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* 标签编辑 */}
@@ -1026,7 +1243,7 @@ export function ItemDetailDrawer({
                     type="button"
                     onClick={() => {
                       setDraftTitle(item.title);
-                      setDraftFolderId(item.folderId);
+                      setDraftFolderIds(itemFolderIds);
                       setDraftTags(item.tags);
                       setDraftNote(item.note);
                       setSaveFeedback(null);
@@ -1153,24 +1370,74 @@ export function ItemDetailDrawer({
               <span>打开原链接</span>
             </a>
 
-            {isDeleted ? (
-              <button
-                type="button"
-                onClick={() => void onRestoreItem(item)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                <span>从回收站恢复</span>
-              </button>
+            {isExcluded ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() =>
+                    void runFooterAction(() => onAllowAutoSyncAgain([item]))
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>允许再次自动同步</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() =>
+                    void runFooterAction(() => onRemoteUncollectAndClear([item]))
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50 disabled:opacity-60"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>取消原站收藏并清除</span>
+                </button>
+              </div>
+            ) : isDeleted ? (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void onRestoreItem(item)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>从回收站恢复</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onRequestDeleteItem(item, 'permanent')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>彻底删除</span>
+                </button>
+              </div>
             ) : (
-              <button
-                type="button"
-                onClick={() => void onSoftDeleteItem(item)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                <span>移入回收站</span>
-              </button>
+              <div className="flex items-center gap-2">
+                {item.syncStatus === 'pending_download' && (
+                  <button
+                    type="button"
+                    disabled={actionBusy}
+                    onClick={() =>
+                      void runFooterAction(() => onCancelItemSync(item))
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 transition hover:bg-amber-100 disabled:opacity-60"
+                  >
+                    <CloudOff className="h-3.5 w-3.5" />
+                    <span>取消同步</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onRequestDeleteItem(item, 'soft')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>移入回收站</span>
+                </button>
+              </div>
             )}
           </footer>
         </section>

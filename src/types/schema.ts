@@ -31,6 +31,39 @@ export function isPlatformId(value: unknown): value is PlatformId {
   );
 }
 
+/** 不自动同步（忽略自动采集）的原因枚举 */
+export const AUTO_SYNC_EXCLUSION_REASONS = [
+  'deleted_keep_remote',
+  'sync_cancelled_by_user',
+  'support_author',
+  'watch_later',
+  'skip_local_save',
+] as const;
+
+/** 不自动同步原因类型 */
+export type AutoSyncExclusionReason =
+  (typeof AUTO_SYNC_EXCLUSION_REASONS)[number];
+
+/** 运行时校验是否为合法的 AutoSyncExclusionReason */
+export function isAutoSyncExclusionReason(
+  value: unknown,
+): value is AutoSyncExclusionReason {
+  return (
+    typeof value === 'string' &&
+    (AUTO_SYNC_EXCLUSION_REASONS as readonly string[]).includes(value)
+  );
+}
+
+/** 条目被排除自动同步的轻量元数据记录（随 meta.json 落盘，支持重建索引与目录迁移） */
+export interface AutoSyncExclusion {
+  /** 不自动同步的原因分类 */
+  reason: AutoSyncExclusionReason;
+  /** 可选补充说明（如取消原站收藏失败时的具体原因） */
+  detail?: string;
+  /** 标记为不自动同步的时间戳（毫秒） */
+  excludedAt: number;
+}
+
 /** 收藏条目的媒体形态分类 */
 export type MediaKind = 'video' | 'gallery' | 'image' | 'article';
 
@@ -171,8 +204,10 @@ export interface CollectionItemMeta {
   collectedAt: number;
   /** 最后更新时间戳（毫秒） */
   updatedAt: number;
-  /** 所属文件夹 ID，null 表示未归类/根目录 */
+  /** 主所属文件夹 ID（兼容字段，始终同步为 `folderIds[0] ?? null`） */
   folderId: string | null;
+  /** 所属分类文件夹 ID 列表（去重；空数组表示未分类，支持单条目同时归属多个文件夹） */
+  folderIds: string[];
   /** 标签名称列表 */
   tags: string[];
   /** 用户备注 */
@@ -195,8 +230,17 @@ export interface CollectionItemMeta {
   totalSizeBytes: number;
   /** 软删除时间戳（毫秒），null 或 undefined 表示未删除 */
   deletedAt?: number | null;
+  /** 不自动同步标记：非空表示网页账号仍可能收藏，但插件不再自动同步，仅保留轻量元数据 */
+  autoSyncExclusion?: AutoSyncExclusion | null;
   /** 平台特有的轻量结构化扩展字段 */
   platformExtra?: Record<string, PlatformExtraValue>;
+}
+
+/** 判断条目是否处于「不自动同步」特殊分类 */
+export function isAutoSyncExcluded(
+  item: Pick<CollectionItemMeta, 'autoSyncExclusion'>,
+): boolean {
+  return item.autoSyncExclusion != null;
 }
 
 /**
@@ -219,6 +263,44 @@ export function stripRecordToMeta(
   const { thumbnailDataUrl: _thumbnailDataUrl, ...meta } = record;
   void _thumbnailDataUrl;
   return meta;
+}
+
+/** 规范化并去重文件夹 ID 列表；若未提供数组则回退兼容单值 `fallbackFolderId` */
+export function normalizeFolderIds(
+  folderIds?: readonly string[] | null,
+  fallbackFolderId?: string | null,
+): string[] {
+  const rawList: readonly (string | null | undefined)[] = Array.isArray(
+    folderIds,
+  )
+    ? folderIds
+    : fallbackFolderId
+      ? [fallbackFolderId]
+      : [];
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of rawList) {
+    if (typeof raw !== 'string') {
+      continue;
+    }
+    const trimmed = raw.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+/** 安全读取条目归属的全部文件夹 ID（兼容旧版仅有 `folderId` 的索引记录） */
+export function getItemFolderIds(
+  item: Pick<CollectionItemMeta, 'folderId'> & {
+    folderIds?: readonly string[] | null;
+  },
+): string[] {
+  return normalizeFolderIds(item.folderIds, item.folderId);
 }
 
 /** 树形文件夹节点 */
@@ -313,16 +395,27 @@ export type LibraryViewMode = 'grid' | 'list';
 /** 控制台默认排序方式 */
 export type LibrarySortOption = 'collectedAt' | 'publishedAt' | 'totalSizeBytes';
 
+/** 视频过大取消自动保存时的通知方式 */
+export type OversizedVideoNotifyMode = 'popup' | 'silent';
+
 /** 用户可配置的偏好设置 */
 export interface UserPreferences {
   /** 打开管理库页面且已获目录权限时自动同步 OPFS 暂存内容 */
   autoSyncOnLibraryOpen: boolean;
   /** 是否在支持的平台页面显示右下角浮动收藏按钮 */
   floatingButtonEnabled: boolean;
+  /** 原站原生收藏时是否显示 5 秒取消本地持久化提示 Toast（默认开启） */
+  nativeCollectToastEnabled: boolean;
   /** 自动同步全部收藏（默认关闭，跨平台全量同步总开关） */
   autoSyncAllCollections: boolean;
   /** 取消收藏时同步至插件（默认关闭，开启后原站取消收藏自动移入回收站） */
   syncUncollectToPlugin: boolean;
+  /** 视频体积超过阈值时取消自动保存（默认关闭） */
+  skipOversizedVideoAutoSave: boolean;
+  /** 取消自动保存的视频体积阈值（MB，默认 200） */
+  oversizedVideoThresholdMb: number;
+  /** 视频过大取消自动保存时的通知方式（弹窗 / 静默，默认弹窗） */
+  oversizedVideoNotifyMode: OversizedVideoNotifyMode;
   /** 快捷收藏默认归属的文件夹 ID */
   defaultFolderId: string | null;
   /** 最大并发下载任务数 */

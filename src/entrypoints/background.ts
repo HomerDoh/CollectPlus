@@ -25,16 +25,21 @@ import {
 } from '../download/offscreen-manager.ts';
 import {
   buildPlatformAccountKey,
+  clampOversizedVideoThresholdMb,
   db,
   getPlatformAccountSyncState,
   getUserPreferences,
+  markItemsAutoSyncExcluded,
   setPlatformAccountSyncState,
   upsertTags,
 } from '../storage/db.ts';
+import { removeItemFromOpfs } from '../storage/opfs.ts';
 import {
   buildItemRelativeDir,
   buildMediaAssetsFromPayload,
+  isSafeVaultRelativeDir,
 } from '../storage/path.ts';
+import type { CaptureTriggerSource } from '../types/adapter.ts';
 import {
   isBackgroundMessage,
   sendToOffscreen,
@@ -42,12 +47,17 @@ import {
   type BackgroundMessage,
   type BackgroundResponseMap,
 } from '../types/messages.ts';
+import type {
+  CollectionItemRecord,
+  DownloadTask,
+  MediaAsset,
+  PlatformId,
+} from '../types/schema.ts';
 import {
+  isAutoSyncExcluded,
+  isAutoSyncExclusionReason,
   PIN_HINT_PENDING_KEY,
   SCHEMA_VERSION,
-  type CollectionItemRecord,
-  type DownloadTask,
-  type MediaAsset,
 } from '../types/schema.ts';
 
 /** 快捷键命令 ID（与 wxt.config.ts manifest.commands 保持一致） */
@@ -325,11 +335,11 @@ async function pumpDownloadQueue(): Promise<void> {
         }
 
         const item = await db.items.get(task.itemId);
-        if (!item || item.deletedAt != null) {
+        if (!item || item.deletedAt != null || isAutoSyncExcluded(item)) {
           await db.tasks.put({
             ...task,
             status: 'cancelled',
-            errorMessage: '关联收藏条目不存在或已移入回收站。',
+            errorMessage: '关联收藏条目不存在、已移入回收站或已设为不自动同步。',
             updatedAt: Date.now(),
           });
           void scheduleActionIconSync();
@@ -392,14 +402,227 @@ async function pumpDownloadQueue(): Promise<void> {
 // BackgroundMessage 处理器实现
 // ============================================================================
 
+const BYTES_PER_MIB = 1024 * 1024;
+
+function isAutoSaveTrigger(source: CaptureTriggerSource): boolean {
+  return source === 'native_collect' || source === 'auto_sync';
+}
+
+async function resolveVideoAssetsSizeBytes(
+  videoAssets: readonly MediaAsset[],
+): Promise<number | undefined> {
+  if (videoAssets.length === 0) {
+    return undefined;
+  }
+
+  // 快路径：平台接口元数据已提供全部视频资产的精确字节数，无需唤醒 Offscreen
+  const allKnownInMeta = videoAssets.every(
+    (asset) =>
+      typeof asset.sizeBytes === 'number' &&
+      Number.isFinite(asset.sizeBytes) &&
+      asset.sizeBytes > 0,
+  );
+  if (allKnownInMeta) {
+    return videoAssets.reduce(
+      (sum, asset) => sum + Math.floor(asset.sizeBytes ?? 0),
+      0,
+    );
+  }
+
+  try {
+    await ensureDnrReady();
+    await ensureOffscreenDocument();
+    const probeRes = await sendToOffscreen({
+      target: 'offscreen',
+      type: 'OFFSCREEN_PROBE_MEDIA_SIZE',
+      assets: [...videoAssets],
+    });
+    if (probeRes && probeRes.ok && probeRes.totalSizeBytes !== undefined) {
+      return probeRes.totalSizeBytes;
+    }
+  } catch (error) {
+    console.warn('[Collect+] Failed to probe video size before auto-save:', error);
+  }
+
+  return undefined;
+}
+
 async function handleCaptureItem(
   message: Extract<BackgroundMessage, { type: 'CAPTURE_ITEM' }>,
 ): Promise<BackgroundResponseMap['CAPTURE_ITEM']> {
   const { payload } = message;
   const dedupeKey = `${payload.platform}:${payload.sourceId}`;
+  const isAutoSync = payload.triggerSource === 'auto_sync';
 
   const existing = await db.items.where('dedupeKey').equals(dedupeKey).first();
-  if (
+
+  // 0. 显式取消/跳过本地持久化：仅记录轻量元数据与原因，中止已有下载并清理 OPFS，防止后续自动同步
+  if (message.autoSyncExclusion) {
+    const { reason, detail } = message.autoSyncExclusion;
+    if (!isAutoSyncExclusionReason(reason)) {
+      return { ok: false, error: '无效的取消本地持久化原因。' };
+    }
+
+    const trimmedDetail = detail?.trim();
+
+    if (existing) {
+      const relatedTasks = await db.tasks
+        .where('itemId')
+        .equals(existing.id)
+        .toArray();
+      const activeTaskIdsToAbort = relatedTasks
+        .filter(
+          (task) =>
+            task.status === 'downloading' || task.status === 'processing',
+        )
+        .map((task) => task.id);
+
+      const updatedList = await markItemsAutoSyncExcluded([
+        {
+          itemId: existing.id,
+          reason,
+          ...(trimmedDetail ? { detail: trimmedDetail } : {}),
+        },
+      ]);
+
+      if (activeTaskIdsToAbort.length > 0 && (await hasOffscreenDocument())) {
+        await Promise.all(
+          activeTaskIdsToAbort.map((taskId) =>
+            sendToOffscreen({
+              target: 'offscreen',
+              type: 'OFFSCREEN_ABORT_DOWNLOAD',
+              taskId,
+            }).catch(() => undefined),
+          ),
+        );
+      }
+
+      await removeItemFromOpfs(existing.id).catch(() => undefined);
+      void scheduleActionIconSync();
+      void pumpDownloadQueue();
+
+      const updatedItem = updatedList[0] ?? existing;
+      return {
+        ok: true,
+        itemId: updatedItem.id,
+        deduplicated: false,
+        skippedReason: 'auto_sync_excluded',
+        item: updatedItem,
+      };
+    }
+
+    const now = Date.now();
+    const itemId = ulid();
+    const relativeDir = buildItemRelativeDir(
+      payload.platform,
+      payload.sourceId,
+      payload.title,
+      now,
+    );
+    const { assets, coverRelativePath } = buildMediaAssetsFromPayload(payload);
+    const resetAssets: MediaAsset[] = assets.map((asset) => {
+      const { sizeBytes: _sizeBytes, ...rest } = asset;
+      void _sizeBytes;
+      return { ...rest, downloaded: false };
+    });
+
+    const mergedRawTags = [...payload.hashtags, ...(message.tags ?? [])];
+    const upsertedTags = await upsertTags(mergedRawTags);
+    const tagNames = upsertedTags.map((tag) => tag.name);
+
+    const itemRecord: CollectionItemRecord = {
+      schemaVersion: SCHEMA_VERSION,
+      id: itemId,
+      dedupeKey,
+      platform: payload.platform,
+      sourceId: payload.sourceId,
+      sourceUrl: payload.sourceUrl,
+      kind: payload.kind,
+      title: payload.title,
+      description: payload.description,
+      author: payload.author,
+      ...(payload.publishedAt !== undefined
+        ? { publishedAt: payload.publishedAt }
+        : {}),
+      collectedAt: now,
+      updatedAt: now,
+      folderId: null,
+      folderIds: [],
+      tags: tagNames,
+      note: '',
+      relativeDir,
+      ...(coverRelativePath !== undefined ? { coverRelativePath } : {}),
+      assets: resetAssets,
+      syncStatus: 'meta_dirty',
+      totalSizeBytes: 0,
+      deletedAt: null,
+      autoSyncExclusion: {
+        reason,
+        ...(trimmedDetail ? { detail: trimmedDetail } : {}),
+        excludedAt: now,
+      },
+      ...(payload.platformExtra !== undefined
+        ? { platformExtra: payload.platformExtra }
+        : {}),
+    };
+
+    await db.items.put(itemRecord);
+    return {
+      ok: true,
+      itemId,
+      deduplicated: false,
+      skippedReason: 'auto_sync_excluded',
+      item: itemRecord,
+    };
+  }
+
+  // 1. 已处于「不自动同步」分类：自动同步严格跳过；手动触发（悬浮按钮/Alt+S/Popup/原站重收藏）允许解除忽略并重新下载
+  if (existing && isAutoSyncExcluded(existing)) {
+    if (isAutoSync) {
+      return {
+        ok: true,
+        itemId: existing.id,
+        deduplicated: true,
+        skippedReason: 'auto_sync_excluded',
+        item: existing,
+      };
+    }
+  } else if (existing && existing.deletedAt != null) {
+    // 2. 回收站中的条目：自动同步不得错误恢复；手动触发沿用原地恢复或重下载逻辑
+    if (isAutoSync) {
+      return {
+        ok: true,
+        itemId: existing.id,
+        deduplicated: true,
+        skippedReason: 'in_trash',
+        item: existing,
+      };
+    }
+
+    const now = Date.now();
+    if (
+      existing.syncStatus === 'opfs_staged' ||
+      existing.syncStatus === 'vault_synced' ||
+      existing.syncStatus === 'meta_dirty'
+    ) {
+      const restored: CollectionItemRecord = {
+        ...existing,
+        deletedAt: null,
+        updatedAt: now,
+        syncStatus:
+          existing.syncStatus === 'vault_synced'
+            ? 'meta_dirty'
+            : existing.syncStatus,
+      };
+      await db.items.put(restored);
+      return {
+        ok: true,
+        itemId: restored.id,
+        deduplicated: false,
+        item: restored,
+      };
+    }
+  } else if (
     existing &&
     existing.deletedAt == null &&
     existing.syncStatus !== 'failed'
@@ -412,41 +635,45 @@ async function handleCaptureItem(
     };
   }
 
-  const now = Date.now();
-  // 若条目此前仅被软删除且本地媒体已下载完成，直接原地恢复并复用原 relativeDir
+  const { assets, coverRelativePath } = buildMediaAssetsFromPayload(payload);
+  const prefs = await getUserPreferences();
+
+  // 视频过大取消自动保存拦截：仅作用于自动保存（原站收藏 / 全量同步），手动收藏或弹窗“继续保存”直接放行
   if (
-    existing &&
-    existing.deletedAt != null &&
-    (existing.syncStatus === 'opfs_staged' ||
-      existing.syncStatus === 'vault_synced' ||
-      existing.syncStatus === 'meta_dirty')
+    !message.forceSave &&
+    prefs.skipOversizedVideoAutoSave &&
+    payload.kind === 'video' &&
+    isAutoSaveTrigger(payload.triggerSource)
   ) {
-    const restored: CollectionItemRecord = {
-      ...existing,
-      deletedAt: null,
-      updatedAt: now,
-      syncStatus:
-        existing.syncStatus === 'vault_synced'
-          ? 'meta_dirty'
-          : existing.syncStatus,
-    };
-    await db.items.put(restored);
-    return {
-      ok: true,
-      itemId: restored.id,
-      deduplicated: false,
-      item: restored,
-    };
+    const videoAssets = assets.filter((asset) => asset.kind === 'video');
+    const videoSizeBytes = await resolveVideoAssetsSizeBytes(videoAssets);
+    const thresholdMb = clampOversizedVideoThresholdMb(
+      prefs.oversizedVideoThresholdMb,
+    );
+    const thresholdBytes = thresholdMb * BYTES_PER_MIB;
+    if (videoSizeBytes !== undefined && videoSizeBytes > thresholdBytes) {
+      return {
+        ok: true,
+        skippedOversized: true,
+        videoSizeBytes,
+        thresholdMb,
+        notifyMode: prefs.oversizedVideoNotifyMode,
+      };
+    }
   }
 
+  const now = Date.now();
   const itemId = existing ? existing.id : ulid();
-  const relativeDir = buildItemRelativeDir(
-    payload.platform,
-    payload.sourceId,
-    payload.title,
-    now,
-  );
-  const { assets, coverRelativePath } = buildMediaAssetsFromPayload(payload);
+  // 复用已有合法 relativeDir（特别是从「不自动同步」手动重采集时，避免 Vault 遗留旧目录）
+  const relativeDir =
+    existing && isSafeVaultRelativeDir(existing.relativeDir)
+      ? existing.relativeDir
+      : buildItemRelativeDir(
+          payload.platform,
+          payload.sourceId,
+          payload.title,
+          now,
+        );
 
   const mergedRawTags = [
     ...payload.hashtags,
@@ -455,7 +682,6 @@ async function handleCaptureItem(
   const upsertedTags = await upsertTags(mergedRawTags);
   const tagNames = upsertedTags.map((tag) => tag.name);
 
-  const prefs = await getUserPreferences();
   let resolvedFolderId: string | null =
     message.folderId !== undefined ? message.folderId : prefs.defaultFolderId;
   if (resolvedFolderId !== null) {
@@ -482,6 +708,7 @@ async function handleCaptureItem(
     collectedAt: now,
     updatedAt: now,
     folderId: resolvedFolderId,
+    folderIds: resolvedFolderId ? [resolvedFolderId] : [],
     tags: tagNames,
     note: existing && existing.deletedAt == null ? existing.note : '',
     relativeDir,
@@ -490,6 +717,7 @@ async function handleCaptureItem(
     syncStatus: 'pending_download',
     totalSizeBytes: 0,
     deletedAt: null,
+    autoSyncExclusion: null,
     ...(payload.platformExtra !== undefined
       ? { platformExtra: payload.platformExtra }
       : {}),
@@ -536,6 +764,7 @@ async function handleCaptureBatchItems(
 ): Promise<BackgroundResponseMap['CAPTURE_BATCH_ITEMS']> {
   let capturedCount = 0;
   let deduplicatedCount = 0;
+  let skippedOversizedCount = 0;
 
   for (const payload of message.payloads) {
     const res = await handleCaptureItem({
@@ -544,7 +773,9 @@ async function handleCaptureBatchItems(
       payload,
     });
     if (res.ok) {
-      if (res.deduplicated) {
+      if (res.skippedOversized) {
+        skippedOversizedCount += 1;
+      } else if (res.deduplicated) {
         deduplicatedCount += 1;
       } else {
         capturedCount += 1;
@@ -556,6 +787,7 @@ async function handleCaptureBatchItems(
     ok: true,
     capturedCount,
     deduplicatedCount,
+    skippedOversizedCount,
   };
 }
 
@@ -589,7 +821,7 @@ async function handleUncollectItems(
         .where('dedupeKey')
         .equals(dedupeKey)
         .first();
-      if (!existing || existing.deletedAt != null) {
+      if (!existing || existing.deletedAt != null || isAutoSyncExcluded(existing)) {
         continue;
       }
 
@@ -649,6 +881,338 @@ async function handleUncollectItems(
     ok: true,
     removedItemIds,
     skipped: false,
+  };
+}
+
+/** 支持后台同步取消原平台账号收藏的平台及其入口 URL */
+const REMOTE_UNCOLLECT_ENTRY_URLS: Partial<Record<PlatformId, string>> = {
+  douyin: 'https://www.douyin.com/',
+  bilibili: 'https://www.bilibili.com/',
+  xiaohongshu: 'https://www.xiaohongshu.com/',
+  zhihu: 'https://www.zhihu.com/',
+  v2ex: 'https://www.v2ex.com/',
+};
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForTabComplete(
+  tabId: number,
+  timeoutMs = 15_000,
+): Promise<boolean> {
+  try {
+    const initial = await chrome.tabs.get(tabId);
+    if (initial.status === 'complete') {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve(ok);
+    };
+
+    const onUpdated = (
+      updatedTabId: number,
+      changeInfo: { status?: string },
+    ): void => {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        finish(true);
+      }
+    };
+
+    const onRemoved = (removedTabId: number): void => {
+      if (removedTabId === tabId) {
+        finish(false);
+      }
+    };
+
+    const timer = setTimeout(() => finish(true), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+  });
+}
+
+async function sendRemoteUncollectToTabWithRetry(
+  tabId: number,
+  items: Array<{
+    sourceId: string;
+    platformExtra?: Record<string, string | number | boolean | null>;
+  }>,
+  maxAttempts = 8,
+): Promise<
+  | { ok: true; results: Array<{ sourceId: string; ok: boolean; reason?: string }> }
+  | { ok: false; error: string; connectionError: boolean }
+> {
+  let lastError = '无法连接到平台页面脚本';
+  let connectionError = false;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (attempt > 0) {
+      await sleepMs(350);
+    }
+    try {
+      const response = await sendToTab(tabId, {
+        target: 'content',
+        type: 'CONTENT_REMOTE_UNCOLLECT',
+        items,
+      });
+      if (response && response.ok) {
+        return { ok: true, results: response.results };
+      }
+      return {
+        ok: false,
+        error:
+          response && !response.ok
+            ? response.error
+            : '平台页面未能处理取消收藏请求',
+        connectionError: false,
+      };
+    } catch (error) {
+      lastError = formatErrorMessage(error);
+      connectionError =
+        /Receiving end does not exist|Could not establish connection|message port closed/i.test(
+          lastError,
+        );
+      if (!connectionError) {
+        break;
+      }
+    }
+  }
+
+  return { ok: false, error: lastError, connectionError };
+}
+
+async function handleCancelItemDownloadTasks(
+  message: Extract<BackgroundMessage, { type: 'CANCEL_ITEM_DOWNLOAD_TASKS' }>,
+): Promise<BackgroundResponseMap['CANCEL_ITEM_DOWNLOAD_TASKS']> {
+  const uniqueIds = Array.from(new Set(message.itemIds.filter(Boolean)));
+  if (uniqueIds.length === 0) {
+    return { ok: true, cancelledCount: 0 };
+  }
+
+  const now = Date.now();
+  const activeTaskIdsToAbort: string[] = [];
+  let cancelledCount = 0;
+
+  await db.transaction('rw', db.tasks, async () => {
+    const relatedTasks = await db.tasks
+      .where('itemId')
+      .anyOf(uniqueIds)
+      .toArray();
+    for (const task of relatedTasks) {
+      if (
+        task.status === 'queued' ||
+        task.status === 'downloading' ||
+        task.status === 'processing'
+      ) {
+        if (task.status === 'downloading' || task.status === 'processing') {
+          activeTaskIdsToAbort.push(task.id);
+        }
+        cancelledCount += 1;
+        await db.tasks.put({
+          ...task,
+          status: 'cancelled',
+          errorMessage: '关联条目已删除，下载任务已取消。',
+          updatedAt: now,
+        });
+      }
+    }
+  });
+
+  if (activeTaskIdsToAbort.length > 0 && (await hasOffscreenDocument())) {
+    await Promise.all(
+      activeTaskIdsToAbort.map((taskId) =>
+        sendToOffscreen({
+          target: 'offscreen',
+          type: 'OFFSCREEN_ABORT_DOWNLOAD',
+          taskId,
+        }).catch(() => undefined),
+      ),
+    );
+  }
+
+  if (cancelledCount > 0) {
+    void scheduleActionIconSync();
+    void pumpDownloadQueue();
+  }
+
+  return { ok: true, cancelledCount };
+}
+
+async function executePlatformRemoteUncollect(
+  platform: PlatformId,
+  targets: Array<{
+    sourceId: string;
+    platformExtra?: Record<string, string | number | boolean | null>;
+  }>,
+): Promise<
+  Array<{
+    platform: PlatformId;
+    sourceId: string;
+    ok: boolean;
+    reason?: string;
+  }>
+> {
+  const entryUrl = REMOTE_UNCOLLECT_ENTRY_URLS[platform];
+  if (!entryUrl) {
+    return targets.map((t) => ({
+      platform,
+      sourceId: t.sourceId,
+      ok: false,
+      reason: '暂不支持该平台自动取消账号收藏',
+    }));
+  }
+
+  // 1. 优先查找已打开的同平台标签页（优先 status === 'complete'）
+  let existingTabId: number | null = null;
+  try {
+    const allTabs = await chrome.tabs.query({});
+    const matchingTabs = allTabs.filter(
+      (tab) =>
+        tab.id !== undefined &&
+        typeof tab.url === 'string' &&
+        matchAdapterByUrl(tab.url)?.id === platform,
+    );
+    const readyTab =
+      matchingTabs.find((tab) => tab.status === 'complete') ?? matchingTabs[0];
+    if (readyTab?.id !== undefined) {
+      existingTabId = readyTab.id;
+    }
+  } catch {
+    existingTabId = null;
+  }
+
+  if (existingTabId !== null) {
+    const res = await sendRemoteUncollectToTabWithRetry(
+      existingTabId,
+      targets,
+      3,
+    );
+    if (res.ok) {
+      return res.results.map((r) => ({ platform, ...r }));
+    }
+    if (!res.connectionError) {
+      return targets.map((t) => ({
+        platform,
+        sourceId: t.sourceId,
+        ok: false,
+        reason: res.error,
+      }));
+    }
+    // 已打开标签页无法连接时，降级创建临时后台标签页重试
+  }
+
+  // 2. 当前无可用标签页：创建静默临时非激活标签页并在结束后自动关闭
+  let tempTabId: number | null = null;
+  try {
+    const created = await chrome.tabs.create({
+      url: entryUrl,
+      active: false,
+    });
+    if (created.id === undefined) {
+      return targets.map((t) => ({
+        platform,
+        sourceId: t.sourceId,
+        ok: false,
+        reason: '无法创建后台临时标签页',
+      }));
+    }
+    tempTabId = created.id;
+
+    const loaded = await waitForTabComplete(tempTabId, 15_000);
+    if (!loaded) {
+      return targets.map((t) => ({
+        platform,
+        sourceId: t.sourceId,
+        ok: false,
+        reason: '后台临时标签页在完成前被关闭',
+      }));
+    }
+
+    const res = await sendRemoteUncollectToTabWithRetry(tempTabId, targets, 10);
+    if (res.ok) {
+      return res.results.map((r) => ({ platform, ...r }));
+    }
+    return targets.map((t) => ({
+      platform,
+      sourceId: t.sourceId,
+      ok: false,
+      reason: res.error,
+    }));
+  } catch (error) {
+    const reason = formatErrorMessage(error);
+    return targets.map((t) => ({
+      platform,
+      sourceId: t.sourceId,
+      ok: false,
+      reason,
+    }));
+  } finally {
+    if (tempTabId !== null) {
+      await chrome.tabs.remove(tempTabId).catch(() => undefined);
+    }
+  }
+}
+
+async function handleRemoteUncollectItems(
+  message: Extract<BackgroundMessage, { type: 'REMOTE_UNCOLLECT_ITEMS' }>,
+): Promise<BackgroundResponseMap['REMOTE_UNCOLLECT_ITEMS']> {
+  if (message.items.length === 0) {
+    return { ok: true, results: [] };
+  }
+
+  const grouped = new Map<
+    PlatformId,
+    Array<{
+      sourceId: string;
+      platformExtra?: Record<string, string | number | boolean | null>;
+    }>
+  >();
+
+  for (const item of message.items) {
+    const sourceId = item.sourceId.trim();
+    if (!sourceId) {
+      continue;
+    }
+    const list = grouped.get(item.platform);
+    const entry = {
+      sourceId,
+      ...(item.platformExtra !== undefined
+        ? { platformExtra: item.platformExtra }
+        : {}),
+    };
+    if (list) {
+      if (!list.some((existing) => existing.sourceId === sourceId)) {
+        list.push(entry);
+      }
+    } else {
+      grouped.set(item.platform, [entry]);
+    }
+  }
+
+  const perPlatformResults = await Promise.all(
+    Array.from(grouped.entries()).map(([platform, targets]) =>
+      executePlatformRemoteUncollect(platform, targets),
+    ),
+  );
+
+  return {
+    ok: true,
+    results: perPlatformResults.flat(),
   };
 }
 
@@ -774,7 +1338,7 @@ async function handleGetStatusSummary(
   let metaDirtyCount = 0;
 
   for (const item of allItems) {
-    if (item.deletedAt != null) {
+    if (item.deletedAt != null || isAutoSyncExcluded(item)) {
       continue;
     }
     totalItems += 1;
@@ -824,6 +1388,9 @@ async function handleTriggerActiveTabCapture(
       target: 'content',
       type: 'CONTENT_TRIGGER_CAPTURE',
       triggerSource: 'popup',
+      ...(message.autoSyncExclusion !== undefined
+        ? { autoSyncExclusion: message.autoSyncExclusion }
+        : {}),
     });
     if (response && !response.ok) {
       return { ok: false, error: response.error };
@@ -846,8 +1413,11 @@ async function handleRetryDownloadTask(
   }
 
   const item = await db.items.get(task.itemId);
-  if (!item || item.deletedAt != null) {
-    return { ok: false, error: '关联收藏条目不存在或已移入回收站。' };
+  if (!item || item.deletedAt != null || isAutoSyncExcluded(item)) {
+    return {
+      ok: false,
+      error: '关联收藏条目不存在、已移入回收站或已设为不自动同步。',
+    };
   }
 
   if (task.status === 'downloading' || task.status === 'processing') {
@@ -905,6 +1475,24 @@ async function handleCancelDownloadTask(
       type: 'OFFSCREEN_ABORT_DOWNLOAD',
       taskId: task.id,
     }).catch(() => undefined);
+  }
+
+  const relatedItem = await db.items.get(task.itemId);
+  if (
+    relatedItem &&
+    relatedItem.deletedAt == null &&
+    !isAutoSyncExcluded(relatedItem) &&
+    (relatedItem.syncStatus === 'pending_download' ||
+      relatedItem.syncStatus === 'failed')
+  ) {
+    await removeItemFromOpfs(relatedItem.id).catch(() => undefined);
+    await markItemsAutoSyncExcluded([
+      {
+        itemId: relatedItem.id,
+        reason: 'sync_cancelled_by_user',
+        detail: '下载同步过程中已手动取消同步到插件',
+      },
+    ]);
   }
 
   void scheduleActionIconSync();
@@ -972,6 +1560,7 @@ async function handleNotifyPreferencesUpdated(): Promise<
           target: 'content',
           type: 'CONTENT_PREFERENCES_UPDATED',
           floatingButtonEnabled: preferences.floatingButtonEnabled,
+          nativeCollectToastEnabled: preferences.nativeCollectToastEnabled,
           autoSyncAllCollections: preferences.autoSyncAllCollections,
           syncUncollectToPlugin: preferences.syncUncollectToPlugin,
         }).catch(() => undefined);
@@ -1032,6 +1621,8 @@ async function handleOffscreenProgress(
 async function handleOffscreenComplete(
   message: Extract<BackgroundMessage, { type: 'OFFSCREEN_COMPLETE' }>,
 ): Promise<BackgroundResponseMap['OFFSCREEN_COMPLETE']> {
+  let shouldDiscardStagedOpfs = false;
+
   try {
     const now = Date.now();
 
@@ -1039,24 +1630,35 @@ async function handleOffscreenComplete(
       const existingItem = await db.items.get(message.itemId);
       const existingTask = await db.tasks.get(message.taskId);
 
-      const mergedAssets = existingItem
-        ? mergeCompletedAssets(existingItem.assets, message.assets)
-        : message.assets;
+      // 竞态防护：若任务在完成回调前已被取消、或条目已删除/转入「不自动同步」，丢弃本次落盘结果
+      const discarded =
+        !existingItem ||
+        existingItem.deletedAt != null ||
+        isAutoSyncExcluded(existingItem) ||
+        existingTask?.status === 'cancelled';
 
-      if (existingItem) {
-        const nextTotalSizeBytes =
-          message.totalSizeBytes + (existingItem.commentsSizeBytes ?? 0);
-        await db.items.put({
-          ...existingItem,
-          assets: mergedAssets,
-          totalSizeBytes: nextTotalSizeBytes,
-          syncStatus: 'opfs_staged',
-          updatedAt: now,
-          ...(message.thumbnailDataUrl !== undefined
-            ? { thumbnailDataUrl: message.thumbnailDataUrl }
-            : {}),
-        });
+      if (discarded) {
+        shouldDiscardStagedOpfs = true;
+        return;
       }
+
+      const mergedAssets = mergeCompletedAssets(
+        existingItem.assets,
+        message.assets,
+      );
+
+      const nextTotalSizeBytes =
+        message.totalSizeBytes + (existingItem.commentsSizeBytes ?? 0);
+      await db.items.put({
+        ...existingItem,
+        assets: mergedAssets,
+        totalSizeBytes: nextTotalSizeBytes,
+        syncStatus: 'opfs_staged',
+        updatedAt: now,
+        ...(message.thumbnailDataUrl !== undefined
+          ? { thumbnailDataUrl: message.thumbnailDataUrl }
+          : {}),
+      });
 
       if (existingTask) {
         const completedCount = mergedAssets.filter(
@@ -1075,6 +1677,10 @@ async function handleOffscreenComplete(
         });
       }
     });
+
+    if (shouldDiscardStagedOpfs) {
+      await removeItemFromOpfs(message.itemId).catch(() => undefined);
+    }
   } catch (error) {
     console.error('[Collect+] Failed to handle OFFSCREEN_COMPLETE:', error);
   } finally {
@@ -1137,7 +1743,7 @@ async function handleSaveItemComments(
   }
 
   const item = await db.items.get(message.itemId);
-  if (!item || item.deletedAt != null) {
+  if (!item || item.deletedAt != null || isAutoSyncExcluded(item)) {
     return { ok: true };
   }
 
@@ -1181,7 +1787,11 @@ async function handleOffscreenCommentsComplete(
     const now = Date.now();
     await db.transaction('rw', db.items, async () => {
       const existingItem = await db.items.get(message.itemId);
-      if (!existingItem) {
+      if (
+        !existingItem ||
+        existingItem.deletedAt != null ||
+        isAutoSyncExcluded(existingItem)
+      ) {
         return;
       }
       const mediaBytes = existingItem.assets.reduce(
@@ -1239,6 +1849,10 @@ async function routeBackgroundMessage(
       return handleSaveItemComments(message);
     case 'UNCOLLECT_ITEMS':
       return handleUncollectItems(message);
+    case 'REMOTE_UNCOLLECT_ITEMS':
+      return handleRemoteUncollectItems(message);
+    case 'CANCEL_ITEM_DOWNLOAD_TASKS':
+      return handleCancelItemDownloadTasks(message);
     case 'CHECK_ACCOUNT_SYNC_ACTION':
       return handleCheckAccountSyncAction(message);
     case 'BEGIN_MANUAL_ACCOUNT_SYNC':
