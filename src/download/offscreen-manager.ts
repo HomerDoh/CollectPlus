@@ -6,6 +6,7 @@
  */
 
 import { sendToOffscreen } from '../types/messages.ts';
+import { withActionIconRenderLock } from './action-icon.ts';
 
 /** Offscreen Document 的相对路径（用于 `chrome.runtime.getURL` 匹配） */
 export const OFFSCREEN_DOCUMENT_PATH = '/offscreen.html';
@@ -85,20 +86,24 @@ export async function ensureOffscreenDocument(): Promise<void> {
   creatingPromise = (async () => {
     const exists = await hasOffscreenDocument();
     if (!exists) {
-      try {
-        await chrome.offscreen.createDocument({
-          url: OFFSCREEN_CREATE_URL,
-          reasons: ['BLOBS', 'WORKERS'],
-          justification:
-            'Stream media downloads to OPFS and generate offline cover thumbnails',
-        });
-      } catch (error) {
-        // 极端竞态下可能已由其他上下文创建，复查存在性后继续握手
-        const existsAfterError = await hasOffscreenDocument();
-        if (!existsAfterError) {
-          throw error;
+      await withActionIconRenderLock(async () => {
+        try {
+          await chrome.offscreen.createDocument({
+            url: OFFSCREEN_CREATE_URL,
+            reasons: ['BLOBS', 'WORKERS'],
+            justification:
+              'Stream media downloads to OPFS and generate offline cover thumbnails',
+          });
+        } catch (error) {
+          // 极端竞态下可能已由其他上下文创建，复查存在性后继续握手
+          const existsAfterError = await hasOffscreenDocument();
+          if (!existsAfterError) {
+            throw error;
+          }
         }
-      }
+        await waitForOffscreenReady();
+      });
+      return;
     }
 
     await waitForOffscreenReady();

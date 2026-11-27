@@ -197,12 +197,17 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       await folderInput.press('Enter');
       await expect(sidebar.getByText('精选素材')).toBeVisible();
 
-      // 移入回收站
+      // 移入回收站（通过统一删除确认弹窗）
       const videoCard = libraryPage
         .locator('article')
         .filter({ hasText: MOCK_VIDEO_TITLE });
       await videoCard.hover();
       await videoCard.getByTitle('移入回收站').click();
+      const deleteModal = libraryPage.getByTestId('delete-confirm-modal');
+      await expect(deleteModal).toBeVisible();
+      await deleteModal.getByTestId('delete-sync-uncollect-checkbox').uncheck();
+      await deleteModal.getByTestId('delete-confirm-submit').click();
+      await expect(deleteModal).toBeHidden();
       await expect(libraryPage.locator('article')).toHaveCount(1);
 
       // 切换至回收站视图并恢复

@@ -21,8 +21,12 @@ import {
   type NativeUncollectCapturedMessage,
   type PageBridgeMessage,
   type PassiveCollectionListCapturedMessage,
+  type RemoteUncollectResponseMessage,
+  type RemoteUncollectTargetInput,
+  type RemoteUncollectTargetOutcome,
   type RequestCurrentItemMessage,
   type RequestItemCommentsMessage,
+  type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
 type UnknownRecord = Record<string, unknown>;
@@ -78,6 +82,7 @@ let activeSyncId: string | null = null;
 let activeSyncAbortController: AbortController | null = null;
 let internalSyncFetchInFlight = 0;
 let internalCommentFetchInFlight = 0;
+let internalUncollectFetchInFlight = 0;
 
 /** 仅存内存的 noteId -> xsec_token 映射（不落盘、不随元数据发送） */
 const memoryXsecTokens = new Map<string, string>();
@@ -875,7 +880,11 @@ function handleInterceptedApiResponse(
 
   // 3. 原生取消收藏
   if (/\/api\/sns\/web\/v1\/note\/uncollect(?:\/|$)/.test(pathname)) {
-    if (method.toUpperCase() === 'POST' && isApiSuccess(payload)) {
+    if (
+      internalUncollectFetchInFlight === 0 &&
+      method.toUpperCase() === 'POST' &&
+      isApiSuccess(payload)
+    ) {
       const bodyObj = parseRequestBodyJson(bodyText);
       const sourceIds: string[] = [];
       if (bodyObj) {
@@ -1455,7 +1464,110 @@ function handleBridgeRequest(message: PageBridgeMessage): void {
       });
       break;
     }
+
+    case 'REQUEST_REMOTE_UNCOLLECT': {
+      const req: RequestRemoteUncollectMessage = message;
+      void runRemoteUncollectItems(req.items).then((results) => {
+        const response: RemoteUncollectResponseMessage = {
+          channel: PAGE_BRIDGE_CHANNEL,
+          direction: 'main-to-content',
+          type: 'REMOTE_UNCOLLECT_RESPONSE',
+          requestId: req.requestId,
+          platform: 'xiaohongshu',
+          results,
+        };
+        postBridgeMessage(response);
+      });
+      break;
+    }
   }
+}
+
+async function runRemoteUncollectItems(
+  items: readonly RemoteUncollectTargetInput[],
+): Promise<RemoteUncollectTargetOutcome[]> {
+  const results: RemoteUncollectTargetOutcome[] = [];
+
+  for (let i = 0; i < items.length; i += 1) {
+    const target = items[i];
+    if (!target) {
+      continue;
+    }
+    const noteId = target.sourceId.trim();
+    if (!noteId) {
+      results.push({ sourceId: target.sourceId, ok: false, reason: '无效笔记 ID' });
+      continue;
+    }
+    if (i > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    }
+
+    internalUncollectFetchInFlight += 1;
+    try {
+      const response = await window.fetch(
+        'https://edith.xiaohongshu.com/api/sns/web/v1/note/uncollect',
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'content-type': 'application/json;charset=UTF-8',
+          },
+          body: JSON.stringify({ note_id: noteId }),
+        },
+      );
+      if (
+        response.status === 401 ||
+        response.status === 403 ||
+        response.status === 406 ||
+        response.status === 461
+      ) {
+        results.push({
+          sourceId: noteId,
+          ok: false,
+          reason: `小红书未登录或触发校验（HTTP ${response.status}）`,
+        });
+        continue;
+      }
+      if (!response.ok) {
+        results.push({
+          sourceId: noteId,
+          ok: false,
+          reason: `小红书接口返回 HTTP ${response.status}`,
+        });
+        continue;
+      }
+      const text = await response.text();
+      if (text) {
+        try {
+          const parsed: unknown = JSON.parse(text);
+          if (!isApiSuccess(parsed)) {
+            results.push({
+              sourceId: noteId,
+              ok: false,
+              reason: '小红书取消收藏未通过校验',
+            });
+            continue;
+          }
+        } catch {
+          // 忽略非 JSON 响应
+        }
+      }
+      results.push({ sourceId: noteId, ok: true });
+    } catch (error) {
+      results.push({
+        sourceId: noteId,
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      internalUncollectFetchInFlight = Math.max(
+        0,
+        internalUncollectFetchInFlight - 1,
+      );
+    }
+  }
+
+  return results;
 }
 
 /** 安装小红书 Main World 被动拦截器与桥接监听器（幂等） */

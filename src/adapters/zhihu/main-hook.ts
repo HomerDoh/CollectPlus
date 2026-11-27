@@ -21,8 +21,12 @@ import {
   type NativeUncollectCapturedMessage,
   type PageBridgeMessage,
   type PassiveCollectionListCapturedMessage,
+  type RemoteUncollectResponseMessage,
+  type RemoteUncollectTargetInput,
+  type RemoteUncollectTargetOutcome,
   type RequestCurrentItemMessage,
   type RequestItemCommentsMessage,
+  type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
 type UnknownRecord = Record<string, unknown>;
@@ -75,6 +79,7 @@ let activeSyncId: string | null = null;
 let activeSyncAbortController: AbortController | null = null;
 let internalSyncFetchInFlight = 0;
 let internalCommentFetchInFlight = 0;
+let internalUncollectFetchInFlight = 0;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -938,7 +943,10 @@ function handleInterceptedApiResponse(
   }
 
   // 2. 原生收藏（POST）与取消收藏（DELETE）
-  const collectTarget = resolveCollectTargetFromRequest(parsedUrl, bodyText);
+  const collectTarget =
+    internalUncollectFetchInFlight === 0
+      ? resolveCollectTargetFromRequest(parsedUrl, bodyText)
+      : null;
   if (collectTarget) {
     const compositeId = buildCompositeKey(
       collectTarget.type,
@@ -1569,7 +1577,151 @@ function handleBridgeRequest(message: PageBridgeMessage): void {
       });
       break;
     }
+
+    case 'REQUEST_REMOTE_UNCOLLECT': {
+      const req: RequestRemoteUncollectMessage = message;
+      void runRemoteUncollectItems(req.items).then((results) => {
+        const response: RemoteUncollectResponseMessage = {
+          channel: PAGE_BRIDGE_CHANNEL,
+          direction: 'main-to-content',
+          type: 'REMOTE_UNCOLLECT_RESPONSE',
+          requestId: req.requestId,
+          platform: 'zhihu',
+          results,
+        };
+        postBridgeMessage(response);
+      });
+      break;
+    }
   }
+}
+
+function readCookieValue(name: string): string | undefined {
+  try {
+    const rawCookie = document.cookie || '';
+    for (const part of rawCookie.split(';')) {
+      const idx = part.indexOf('=');
+      if (idx === -1) {
+        continue;
+      }
+      if (part.slice(0, idx).trim() === name) {
+        const val = part.slice(idx + 1).trim();
+        return val ? decodeURIComponent(val) : undefined;
+      }
+    }
+  } catch {
+    // 忽略 Cookie 读取异常
+  }
+  return undefined;
+}
+
+async function runRemoteUncollectItems(
+  items: readonly RemoteUncollectTargetInput[],
+): Promise<RemoteUncollectTargetOutcome[]> {
+  const xsrf = readCookieValue('_xsrf');
+  const results: RemoteUncollectTargetOutcome[] = [];
+
+  for (let i = 0; i < items.length; i += 1) {
+    const target = items[i];
+    if (!target) {
+      continue;
+    }
+    const parsedRef = parseCompositeKey(target.sourceId);
+    if (!parsedRef) {
+      results.push({
+        sourceId: target.sourceId,
+        ok: false,
+        reason: '无效知乎内容标识',
+      });
+      continue;
+    }
+    if (i > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 280));
+    }
+
+    internalUncollectFetchInFlight += 1;
+    try {
+      const listUrl = `/api/v4/favlists?include=data[*].is_favorited&content_id=${encodeURIComponent(parsedRef.rawId)}&content_type=${encodeURIComponent(parsedRef.type)}`;
+      const listRes = await window.fetch(listUrl, {
+        method: 'GET',
+        credentials: 'include',
+      });
+      if (listRes.status === 401 || listRes.status === 403) {
+        results.push({
+          sourceId: target.sourceId,
+          ok: false,
+          reason: `知乎未登录或触发校验（HTTP ${listRes.status}）`,
+        });
+        continue;
+      }
+      if (!listRes.ok) {
+        results.push({
+          sourceId: target.sourceId,
+          ok: false,
+          reason: `无法查询知乎收藏夹状态（HTTP ${listRes.status}）`,
+        });
+        continue;
+      }
+
+      const listText = await listRes.text();
+      const listJson: unknown = listText ? JSON.parse(listText) : null;
+      const favIds: string[] = [];
+      if (isRecord(listJson) && Array.isArray(listJson.data)) {
+        for (const entry of listJson.data) {
+          if (isRecord(entry) && entry.is_favorited === true) {
+            const cid = readFirstId(entry, ['id']);
+            if (cid) {
+              favIds.push(cid);
+            }
+          }
+        }
+      }
+
+      if (favIds.length === 0) {
+        results.push({ sourceId: target.sourceId, ok: true });
+        continue;
+      }
+
+      let allOk = true;
+      let firstError: string | undefined;
+      for (const cid of favIds) {
+        const delRes = await window.fetch(
+          `/api/v4/collections/${encodeURIComponent(cid)}/contents/${encodeURIComponent(parsedRef.rawId)}?content_type=${encodeURIComponent(parsedRef.type)}`,
+          {
+            method: 'DELETE',
+            credentials: 'include',
+            headers: {
+              ...(xsrf ? { 'x-xsrftoken': xsrf } : {}),
+            },
+          },
+        );
+        if (!delRes.ok) {
+          allOk = false;
+          if (!firstError) {
+            firstError = `知乎取消收藏返回 HTTP ${delRes.status}`;
+          }
+        }
+      }
+      results.push({
+        sourceId: target.sourceId,
+        ok: allOk,
+        ...(firstError !== undefined ? { reason: firstError } : {}),
+      });
+    } catch (error) {
+      results.push({
+        sourceId: target.sourceId,
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      internalUncollectFetchInFlight = Math.max(
+        0,
+        internalUncollectFetchInFlight - 1,
+      );
+    }
+  }
+
+  return results;
 }
 
 /** 安装知乎 Main World 被动拦截器与桥接监听器（幂等） */

@@ -49,6 +49,27 @@ let lastAppliedSignature: string | null = null;
 let isSyncing = false;
 let pendingSync = false;
 let liveSyncStarted = false;
+let renderLockChain: Promise<void> = Promise.resolve();
+
+/**
+ * 串行互斥锁：确保 SW 的 `OffscreenCanvas` 图标渲染与 `chrome.offscreen.createDocument` 不在同一时刻并发执行，
+ * 避免 Windows Chromium 扩展进程内 Blink 字体初始化竞态导致访问冲突崩溃。
+ */
+export async function withActionIconRenderLock<T>(
+  task: () => Promise<T>,
+): Promise<T> {
+  const prev = renderLockChain;
+  let release: () => void = () => undefined;
+  renderLockChain = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
 
 /**
  * 根据按 `createdAt` 升序排列的未完成任务列表计算当前扩展图标展示状态。
@@ -382,7 +403,7 @@ export async function scheduleActionIconSync(): Promise<void> {
   try {
     do {
       pendingSync = false;
-      await syncOnce();
+      await withActionIconRenderLock(() => syncOnce());
     } while (pendingSync);
   } catch (error) {
     console.warn('[Collect+] Failed to sync action icon state:', error);

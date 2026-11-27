@@ -30,10 +30,13 @@ import {
   type CurrentItemResponseMessage,
   type ItemCommentsResponseMessage,
   type PassiveCollectionListCapturedMessage,
+  type RemoteUncollectResponseMessage,
+  type RemoteUncollectTargetInput,
   type RequestCurrentItemMessage,
   type RequestFullCollectionSyncMessage,
   type RequestItemCommentsMessage,
   type RequestLoginStateMessage,
+  type RequestRemoteUncollectMessage,
 } from '../types/adapter.ts';
 import { isContentMessage, sendToBackground } from '../types/messages.ts';
 
@@ -50,6 +53,11 @@ const NATIVE_CAPTURE_DEDUPE_WINDOW_MS = 2000;
 
 interface PendingItemRequest {
   resolve: (response: CurrentItemResponseMessage | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingRemoteUncollectRequest {
+  resolve: (response: RemoteUncollectResponseMessage | null) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -173,12 +181,17 @@ export default defineContentScript({
 
     const pendingRequests = new Map<string, PendingItemRequest>();
     const pendingCommentRequests = new Map<string, PendingCommentsRequest>();
+    const pendingRemoteUncollectRequests = new Map<
+      string,
+      PendingRemoteUncollectRequest
+    >();
     const recentNativeCaptures = new Map<string, number>();
 
     const postToMainWorld = (
       message:
         | RequestCurrentItemMessage
         | RequestItemCommentsMessage
+        | RequestRemoteUncollectMessage
         | RequestLoginStateMessage
         | RequestFullCollectionSyncMessage
         | CancelFullCollectionSyncMessage,
@@ -880,8 +893,51 @@ export default defineContentScript({
           }
           break;
         }
+
+        case 'CONTENT_REMOTE_UNCOLLECT': {
+          void requestRemoteUncollectFromMainWorld(message.items)
+            .then((response) => {
+              if (!response) {
+                sendResponse({
+                  ok: false,
+                  error: '抖音页面桥接响应超时，未能同步取消收藏。',
+                });
+                return;
+              }
+              sendResponse({ ok: true, results: response.results });
+            })
+            .catch((error: unknown) => {
+              sendResponse({
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+          return true;
+        }
       }
     });
+
+    const requestRemoteUncollectFromMainWorld = (
+      items: RemoteUncollectTargetInput[],
+    ): Promise<RemoteUncollectResponseMessage | null> => {
+      const requestId = `cp-dy-uncollect-${Date.now()}-${++requestCounter}`;
+      const timeoutMs = Math.min(60_000, 15_000 + items.length * 3000);
+      return new Promise<RemoteUncollectResponseMessage | null>((resolve) => {
+        const timer = setTimeout(() => {
+          pendingRemoteUncollectRequests.delete(requestId);
+          resolve(null);
+        }, timeoutMs);
+
+        pendingRemoteUncollectRequests.set(requestId, { resolve, timer });
+        postToMainWorld({
+          channel: PAGE_BRIDGE_CHANNEL,
+          direction: 'content-to-main',
+          type: 'REQUEST_REMOTE_UNCOLLECT',
+          requestId,
+          items,
+        });
+      });
+    };
 
     // 2. 监听来自 Background / Popup 的控制指令
     const runtimeMessageListener = (
@@ -918,6 +974,19 @@ export default defineContentScript({
           }
           sendResponse({ ok: true });
           return false;
+        }
+
+        case 'REMOTE_UNCOLLECT_RESPONSE': {
+          isMainBridgeReady = true;
+          const pending = pendingRemoteUncollectRequests.get(
+            event.data.requestId,
+          );
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingRemoteUncollectRequests.delete(event.data.requestId);
+            pending.resolve(event.data);
+          }
+          break;
         }
       }
     };
@@ -966,6 +1035,11 @@ export default defineContentScript({
         pending.resolve(null);
       }
       pendingRequests.clear();
+      for (const pending of pendingRemoteUncollectRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.resolve(null);
+      }
+      pendingRemoteUncollectRequests.clear();
       for (const pending of pendingCommentRequests.values()) {
         clearTimeout(pending.timer);
         pending.resolve(null);

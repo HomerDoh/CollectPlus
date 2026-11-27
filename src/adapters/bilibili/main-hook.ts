@@ -21,8 +21,12 @@ import {
   type NativeUncollectCapturedMessage,
   type PageBridgeMessage,
   type PassiveCollectionListCapturedMessage,
+  type RemoteUncollectResponseMessage,
+  type RemoteUncollectTargetInput,
+  type RemoteUncollectTargetOutcome,
   type RequestCurrentItemMessage,
   type RequestItemCommentsMessage,
+  type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
 type UnknownRecord = Record<string, unknown>;
@@ -1204,6 +1208,7 @@ function handleInterceptedApiResponse(
   }
 
   if (
+    internalFetchInFlight === 0 &&
     method.toUpperCase() === 'POST' &&
     (pathname.includes('/x/v3/fav/resource/deal') ||
       pathname.includes('/medialist/gateway/coll/resource/deal') ||
@@ -1449,6 +1454,235 @@ function handleRequestItemComments(message: RequestItemCommentsMessage): void {
   );
 }
 
+function readCookieValue(name: string): string | undefined {
+  try {
+    const rawCookie = document.cookie || '';
+    for (const part of rawCookie.split(';')) {
+      const idx = part.indexOf('=');
+      if (idx === -1) {
+        continue;
+      }
+      const key = part.slice(0, idx).trim();
+      if (key === name) {
+        const val = part.slice(idx + 1).trim();
+        return val ? decodeURIComponent(val) : undefined;
+      }
+    }
+  } catch {
+    // 忽略 Cookie 读取异常
+  }
+  return undefined;
+}
+
+async function resolveAidForRemoteUncollect(
+  target: RemoteUncollectTargetInput,
+): Promise<string | null> {
+  const extraAid = target.platformExtra?.aid;
+  if (typeof extraAid === 'string' && /^\d+$/.test(extraAid.trim())) {
+    return extraAid.trim();
+  }
+  if (typeof extraAid === 'number' && Number.isFinite(extraAid) && extraAid > 0) {
+    return String(Math.trunc(extraAid));
+  }
+
+  const trimmed = target.sourceId.trim();
+  const avMatch = /^av(\d+)$/i.exec(trimmed);
+  if (avMatch?.[1]) {
+    return avMatch[1];
+  }
+  if (/^\d+$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  const cachedMeta = videoMetaCache.get(trimmed);
+  if (cachedMeta) {
+    const cachedAid = readIdString(cachedMeta, 'aid') ?? readIdString(cachedMeta, 'id');
+    if (cachedAid && /^\d+$/.test(cachedAid)) {
+      return cachedAid;
+    }
+  }
+
+  const viewRes = await fetchJsonInternal(
+    `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(trimmed)}`,
+  );
+  if (
+    viewRes.status >= 200 &&
+    viewRes.status < 300 &&
+    isRecord(viewRes.json) &&
+    readNumber(viewRes.json, 'code') === 0 &&
+    isRecord(viewRes.json.data)
+  ) {
+    const resolvedAid = readIdString(viewRes.json.data, 'aid');
+    if (resolvedAid && /^\d+$/.test(resolvedAid)) {
+      return resolvedAid;
+    }
+  }
+  return null;
+}
+
+async function runRemoteUncollectItems(
+  items: readonly RemoteUncollectTargetInput[],
+): Promise<RemoteUncollectTargetOutcome[]> {
+  const csrf = readCookieValue('bili_jct');
+  if (!csrf) {
+    return items.map((item) => ({
+      sourceId: item.sourceId,
+      ok: false,
+      reason: '未检测到 B站登录态（缺少 bili_jct）',
+    }));
+  }
+
+  let mid = detectedAccount?.accountId;
+  if (!mid) {
+    const navRes = await fetchJsonInternal(
+      'https://api.bilibili.com/x/web-interface/nav',
+    ).catch(() => ({ status: 0, json: null }));
+    if (navRes.status >= 200 && navRes.status < 300) {
+      detectLoginFromNavPayload(navRes.json);
+      mid = detectedAccount?.accountId;
+    }
+  }
+  if (!mid) {
+    return items.map((item) => ({
+      sourceId: item.sourceId,
+      ok: false,
+      reason: '未检测到已登录的 B站账号',
+    }));
+  }
+
+  const results: RemoteUncollectTargetOutcome[] = [];
+  for (let i = 0; i < items.length; i += 1) {
+    const target = items[i];
+    if (!target) {
+      continue;
+    }
+    if (i > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 260));
+    }
+
+    try {
+      const aid = await resolveAidForRemoteUncollect(target);
+      if (!aid) {
+        results.push({
+          sourceId: target.sourceId,
+          ok: false,
+          reason: '无法解析稿件 AV 号',
+        });
+        continue;
+      }
+
+      const listRes = await fetchJsonInternal(
+        `https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${encodeURIComponent(mid)}&rid=${encodeURIComponent(aid)}&type=2`,
+      );
+      if (
+        listRes.status < 200 ||
+        listRes.status >= 300 ||
+        !isRecord(listRes.json) ||
+        readNumber(listRes.json, 'code') !== 0
+      ) {
+        results.push({
+          sourceId: target.sourceId,
+          ok: false,
+          reason: `无法查询 B站收藏夹状态（HTTP ${listRes.status}）`,
+        });
+        continue;
+      }
+
+      const dataObj = isRecord(listRes.json.data) ? listRes.json.data : null;
+      const folderList =
+        dataObj && Array.isArray(dataObj.list) ? dataObj.list : [];
+      const delFolderIds: string[] = [];
+      for (const entry of folderList) {
+        if (!isRecord(entry)) {
+          continue;
+        }
+        if (readNumber(entry, 'fav_state') === 1) {
+          const fid = readIdString(entry, 'id');
+          if (fid) {
+            delFolderIds.push(fid);
+          }
+        }
+      }
+
+      if (delFolderIds.length === 0) {
+        results.push({ sourceId: target.sourceId, ok: true });
+        continue;
+      }
+
+      internalFetchInFlight += 1;
+      try {
+        const body = new URLSearchParams({
+          rid: aid,
+          type: '2',
+          add_media_ids: '',
+          del_media_ids: delFolderIds.join(','),
+          platform: 'web',
+          csrf,
+        });
+        const dealRes = await window.fetch(
+          'https://api.bilibili.com/x/v3/fav/resource/deal',
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            },
+            body: body.toString(),
+          },
+        );
+        const text = await dealRes.text();
+        let parsed: unknown = null;
+        if (text) {
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            parsed = null;
+          }
+        }
+        const code = isRecord(parsed) ? readNumber(parsed, 'code') : undefined;
+        if (dealRes.ok && code === 0) {
+          results.push({ sourceId: target.sourceId, ok: true });
+        } else {
+          const msg = isRecord(parsed) ? readString(parsed, 'message') : undefined;
+          results.push({
+            sourceId: target.sourceId,
+            ok: false,
+            reason: msg
+              ? `B站取消收藏失败：${msg}`
+              : `B站取消收藏失败（HTTP ${dealRes.status}）`,
+          });
+        }
+      } finally {
+        internalFetchInFlight = Math.max(0, internalFetchInFlight - 1);
+      }
+    } catch (error) {
+      results.push({
+        sourceId: target.sourceId,
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return results;
+}
+
+function handleRequestRemoteUncollect(
+  request: RequestRemoteUncollectMessage,
+): void {
+  void runRemoteUncollectItems(request.items).then((results) => {
+    const response: RemoteUncollectResponseMessage = {
+      channel: PAGE_BRIDGE_CHANNEL,
+      direction: 'main-to-content',
+      type: 'REMOTE_UNCOLLECT_RESPONSE',
+      requestId: request.requestId,
+      platform: 'bilibili',
+      results,
+    };
+    postBridgeMessage(response);
+  });
+}
+
 /**
  * 安装 Bilibili Main World 旁路拦截器（幂等防重入）。
  */
@@ -1508,6 +1742,10 @@ export function installBilibiliMainHook(): void {
         if (activeSyncId === event.data.syncId) {
           activeSyncAbortController?.abort();
         }
+        break;
+
+      case 'REQUEST_REMOTE_UNCOLLECT':
+        handleRequestRemoteUncollect(event.data);
         break;
     }
   });

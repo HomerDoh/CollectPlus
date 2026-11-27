@@ -20,8 +20,12 @@ import {
   type NativeUncollectCapturedMessage,
   type PageBridgeMessage,
   type PassiveCollectionListCapturedMessage,
+  type RemoteUncollectResponseMessage,
+  type RemoteUncollectTargetInput,
+  type RemoteUncollectTargetOutcome,
   type RequestCurrentItemMessage,
   type RequestItemCommentsMessage,
+  type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
 type UnknownRecord = Record<string, unknown>;
@@ -99,6 +103,7 @@ let activeSyncId: string | null = null;
 let activeSyncAbortController: AbortController | null = null;
 let internalSyncFetchInFlight = 0;
 let internalCommentFetchInFlight = 0;
+let internalUncollectFetchInFlight = 0;
 
 interface CachedAwemeComments {
   comments: UnknownRecord[];
@@ -1651,7 +1656,10 @@ function installFetchHook(): void {
   ): Promise<Response> {
     const requestUrl = getFetchRequestUrl(input);
     const isApi = isDouyinApiUrl(requestUrl);
-    const collectKind = isApi ? classifyCollectEndpoint(requestUrl) : null;
+    const collectKind =
+      isApi && internalUncollectFetchInFlight === 0
+        ? classifyCollectEndpoint(requestUrl)
+        : null;
     const isProfileSelf = isApi && isUserProfileSelfUrl(requestUrl);
     const isCollectionList =
       isApi && internalSyncFetchInFlight === 0 && isCollectionListUrl(requestUrl);
@@ -1884,6 +1892,86 @@ function installXhrHook(): void {
   };
 }
 
+async function runRemoteUncollectItems(
+  items: readonly RemoteUncollectTargetInput[],
+): Promise<RemoteUncollectTargetOutcome[]> {
+  const results: RemoteUncollectTargetOutcome[] = [];
+
+  for (let i = 0; i < items.length; i += 1) {
+    const target = items[i];
+    if (!target) {
+      continue;
+    }
+    const awemeId = target.sourceId.trim();
+    if (!awemeId) {
+      results.push({ sourceId: target.sourceId, ok: false, reason: '无效作品 ID' });
+      continue;
+    }
+    if (i > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 260));
+    }
+
+    internalUncollectFetchInFlight += 1;
+    try {
+      const endpoint = `/aweme/v1/web/aweme/collect/?aweme_id=${encodeURIComponent(awemeId)}&action=0`;
+      const response = await window.fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        },
+        body: `aweme_id=${encodeURIComponent(awemeId)}&action=0`,
+      });
+      if (response.status === 401 || response.status === 403) {
+        results.push({
+          sourceId: awemeId,
+          ok: false,
+          reason: `抖音未登录或触发校验（HTTP ${response.status}）`,
+        });
+        continue;
+      }
+      if (!response.ok) {
+        results.push({
+          sourceId: awemeId,
+          ok: false,
+          reason: `抖音接口返回 HTTP ${response.status}`,
+        });
+        continue;
+      }
+      const text = await response.text();
+      if (text) {
+        try {
+          const parsed: unknown = JSON.parse(text);
+          if (!isResponseStatusSuccess(parsed)) {
+            results.push({
+              sourceId: awemeId,
+              ok: false,
+              reason: '抖音取消收藏未通过状态校验（可能需要重新登录）',
+            });
+            continue;
+          }
+        } catch {
+          // 非 JSON 2xx 响应按成功处理
+        }
+      }
+      results.push({ sourceId: awemeId, ok: true });
+    } catch (error) {
+      results.push({
+        sourceId: awemeId,
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      internalUncollectFetchInFlight = Math.max(
+        0,
+        internalUncollectFetchInFlight - 1,
+      );
+    }
+  }
+
+  return results;
+}
+
 function installBridgeMessageListener(): void {
   window.addEventListener('message', (event: MessageEvent<unknown>) => {
     if (event.source !== window) {
@@ -1937,6 +2025,22 @@ function installBridgeMessageListener(): void {
         if (activeSyncId === event.data.syncId && activeSyncAbortController) {
           activeSyncAbortController.abort();
         }
+        break;
+      }
+
+      case 'REQUEST_REMOTE_UNCOLLECT': {
+        const request: RequestRemoteUncollectMessage = event.data;
+        void runRemoteUncollectItems(request.items).then((results) => {
+          const response: RemoteUncollectResponseMessage = {
+            channel: PAGE_BRIDGE_CHANNEL,
+            direction: 'main-to-content',
+            type: 'REMOTE_UNCOLLECT_RESPONSE',
+            requestId: request.requestId,
+            platform: 'douyin',
+            results,
+          };
+          postBridgeMessage(response);
+        });
         break;
       }
 

@@ -757,6 +757,99 @@ export default defineContentScript({
         return false;
       }
 
+      if (message.type === 'CONTENT_REMOTE_UNCOLLECT') {
+        void (async () => {
+          const results: Array<{
+            sourceId: string;
+            ok: boolean;
+            reason?: string;
+          }> = [];
+          const parser = new DOMParser();
+
+          for (let i = 0; i < message.items.length; i += 1) {
+            const target = message.items[i];
+            if (!target) {
+              continue;
+            }
+            const topicId = target.sourceId.trim();
+            if (!/^\d+$/.test(topicId)) {
+              results.push({
+                sourceId: target.sourceId,
+                ok: false,
+                reason: '无效 V2EX 主题 ID',
+              });
+              continue;
+            }
+            if (i > 0) {
+              await new Promise<void>((resolve) => setTimeout(resolve, 260));
+            }
+
+            try {
+              const topicRes = await fetch(
+                `${window.location.origin}/t/${encodeURIComponent(topicId)}`,
+                { method: 'GET', credentials: 'include' },
+              );
+              if (!topicRes.ok) {
+                results.push({
+                  sourceId: topicId,
+                  ok: false,
+                  reason: `无法读取 V2EX 主题页（HTTP ${topicRes.status}）`,
+                });
+                continue;
+              }
+              const html = await topicRes.text();
+              const doc = parser.parseFromString(html, 'text/html');
+              const unfavLink = doc.querySelector<HTMLAnchorElement>(
+                `a[href*="/unfavorite/topic/${topicId}"]`,
+              );
+              if (!unfavLink) {
+                const favLink = doc.querySelector<HTMLAnchorElement>(
+                  `a[href*="/favorite/topic/${topicId}"]`,
+                );
+                if (favLink) {
+                  results.push({ sourceId: topicId, ok: true });
+                } else {
+                  results.push({
+                    sourceId: topicId,
+                    ok: false,
+                    reason: '未检测到 V2EX 登录态或主题不可访问',
+                  });
+                }
+                continue;
+              }
+
+              const unfavHref = unfavLink.getAttribute('href') ?? '';
+              const unfavUrl = new URL(
+                unfavHref,
+                window.location.origin,
+              ).toString();
+              const unfavRes = await fetch(unfavUrl, {
+                method: 'GET',
+                credentials: 'include',
+              });
+              if (unfavRes.ok) {
+                results.push({ sourceId: topicId, ok: true });
+              } else {
+                results.push({
+                  sourceId: topicId,
+                  ok: false,
+                  reason: `V2EX 取消收藏失败（HTTP ${unfavRes.status}）`,
+                });
+              }
+            } catch (error) {
+              results.push({
+                sourceId: topicId,
+                ok: false,
+                reason: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+
+          sendResponse({ ok: true, results });
+        })();
+        return true;
+      }
+
       return false;
     };
 

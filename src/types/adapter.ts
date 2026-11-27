@@ -300,6 +300,43 @@ export interface ItemCommentsResponseMessage {
   error?: string;
 }
 
+/** 远端取消平台账号收藏的单条请求目标 */
+export interface RemoteUncollectTargetInput {
+  /** 平台侧唯一内容 ID */
+  sourceId: string;
+  /** 可选平台扩展字段（如 B站 aid，减少额外接口查询） */
+  platformExtra?: Record<string, PlatformExtraValue>;
+}
+
+/** 远端取消平台账号收藏的单条执行结果 */
+export interface RemoteUncollectTargetOutcome {
+  /** 平台侧唯一内容 ID */
+  sourceId: string;
+  /** 是否取消收藏成功（或原平台已未收藏） */
+  ok: boolean;
+  /** 失败或跳过原因说明 */
+  reason?: string;
+}
+
+/** Isolated Content Script 请求 Main World 在原平台执行取消收藏 */
+export interface RequestRemoteUncollectMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'content-to-main';
+  type: 'REQUEST_REMOTE_UNCOLLECT';
+  requestId: string;
+  items: RemoteUncollectTargetInput[];
+}
+
+/** Main World 返回在原平台执行取消收藏的结果列表 */
+export interface RemoteUncollectResponseMessage {
+  channel: typeof PAGE_BRIDGE_CHANNEL;
+  direction: 'main-to-content';
+  type: 'REMOTE_UNCOLLECT_RESPONSE';
+  requestId: string;
+  platform: PlatformId;
+  results: RemoteUncollectTargetOutcome[];
+}
+
 /** Main World ↔ Isolated Content Script 强类型桥接消息判别联合 */
 export type PageBridgeMessage =
   | BridgeReadyMessage
@@ -315,7 +352,9 @@ export type PageBridgeMessage =
   | CollectionSyncDoneMessage
   | PassiveCollectionListCapturedMessage
   | RequestItemCommentsMessage
-  | ItemCommentsResponseMessage;
+  | ItemCommentsResponseMessage
+  | RequestRemoteUncollectMessage
+  | RemoteUncollectResponseMessage;
 
 const COLLECTION_SYNC_DONE_STATUSES: ReadonlySet<string> = new Set<
   CollectionSyncDoneStatus
@@ -455,6 +494,34 @@ export function isPageBridgeMessage(data: unknown): data is PageBridgeMessage {
         typeof data.sourceId === 'string' &&
         Array.isArray(data.rawComments) &&
         (data.error === undefined || typeof data.error === 'string')
+      );
+
+    case 'REQUEST_REMOTE_UNCOLLECT':
+      return (
+        direction === 'content-to-main' &&
+        typeof data.requestId === 'string' &&
+        Array.isArray(data.items) &&
+        data.items.every(
+          (entry) =>
+            isRecord(entry) &&
+            typeof entry.sourceId === 'string' &&
+            entry.sourceId.trim().length > 0,
+        )
+      );
+
+    case 'REMOTE_UNCOLLECT_RESPONSE':
+      return (
+        direction === 'main-to-content' &&
+        typeof data.requestId === 'string' &&
+        isPlatformId(data.platform) &&
+        Array.isArray(data.results) &&
+        data.results.every(
+          (entry) =>
+            isRecord(entry) &&
+            typeof entry.sourceId === 'string' &&
+            typeof entry.ok === 'boolean' &&
+            (entry.reason === undefined || typeof entry.reason === 'string'),
+        )
       );
 
     default:
