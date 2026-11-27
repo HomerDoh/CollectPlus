@@ -21,6 +21,11 @@ import {
   X,
 } from 'lucide-react';
 import {
+  clampOversizedVideoThresholdMb,
+  MAX_OVERSIZED_VIDEO_THRESHOLD_MB,
+  MIN_OVERSIZED_VIDEO_THRESHOLD_MB,
+} from '@/storage/db.ts';
+import {
   getBrowserStorageEstimate,
   type BrowserStorageEstimate,
 } from '@/storage/opfs.ts';
@@ -37,6 +42,7 @@ import type {
   FolderNode,
   LibrarySortOption,
   LibraryViewMode,
+  OversizedVideoNotifyMode,
   UserPreferences,
 } from '@/types/schema.ts';
 import {
@@ -127,6 +133,14 @@ interface FlatFolderOption {
 }
 
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5] as const;
+const OVERSIZED_THRESHOLD_PRESETS_MB = [50, 100, 200, 500, 1024] as const;
+const OVERSIZED_NOTIFY_OPTIONS: ReadonlyArray<{
+  value: OversizedVideoNotifyMode;
+  label: string;
+}> = [
+  { value: 'popup', label: '弹窗' },
+  { value: 'silent', label: '静默' },
+];
 
 function flattenFoldersForSelect(
   folders: readonly FolderNode[],
@@ -247,6 +261,13 @@ export function SettingsPanel({
   const [shortcutText, setShortcutText] = useState('Alt+S');
   const [shortcutNotice, setShortcutNotice] = useState<string | null>(null);
   const [savingNotice, setSavingNotice] = useState<string | null>(null);
+  const [thresholdDraft, setThresholdDraft] = useState<string>(
+    String(preferences.oversizedVideoThresholdMb),
+  );
+
+  useEffect(() => {
+    setThresholdDraft(String(preferences.oversizedVideoThresholdMb));
+  }, [preferences.oversizedVideoThresholdMb]);
 
   useEffect(() => {
     if (focusVaultSectionTick === 0) {
@@ -334,6 +355,17 @@ export function SettingsPanel({
     await onUpdatePreferences(patch);
     if (notice) {
       setSavingNotice(notice);
+    }
+  };
+
+  const handleCommitThresholdDraft = () => {
+    const clamped = clampOversizedVideoThresholdMb(thresholdDraft);
+    setThresholdDraft(String(clamped));
+    if (clamped !== preferences.oversizedVideoThresholdMb) {
+      void handlePatchPreferences(
+        { oversizedVideoThresholdMb: clamped },
+        `视频体积上限已设为 ${clamped} MB`,
+      );
     }
   };
 
@@ -523,6 +555,157 @@ export function SettingsPanel({
                     )
                   }
                 />
+              </div>
+
+              {/* 视频过大时取消自动保存 */}
+              <div className="py-3.5">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <label
+                      htmlFor="setting-skip-oversized-video"
+                      className="block text-xs font-semibold text-slate-900"
+                    >
+                      视频过大时取消自动保存
+                    </label>
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      开启后，原站收藏拦截或全量同步遇到超过设定大小的视频时将取消自动保存；手动点击收藏不受影响
+                    </p>
+                  </div>
+                  <ToggleSwitch
+                    id="setting-skip-oversized-video"
+                    checked={preferences.skipOversizedVideoAutoSave}
+                    ariaLabel="视频过大时取消自动保存"
+                    onChange={(checked) =>
+                      void handlePatchPreferences(
+                        { skipOversizedVideoAutoSave: checked },
+                        checked
+                          ? '已开启视频过大取消自动保存'
+                          : '已关闭视频过大取消自动保存',
+                      )
+                    }
+                  />
+                </div>
+
+                {preferences.skipOversizedVideoAutoSave && (
+                  <div
+                    data-testid="oversized-video-options"
+                    className="mt-3 flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5"
+                  >
+                    {/* 体积上限（MB） */}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <label
+                          htmlFor="setting-oversized-threshold-mb"
+                          className="block text-xs font-medium text-slate-800"
+                        >
+                          超过多少 MB 时取消自动保存
+                        </label>
+                        <p className="mt-0.5 text-[11px] text-slate-500">
+                          默认 200 MB，可点选预设档位或输入自定义数值（{MIN_OVERSIZED_VIDEO_THRESHOLD_MB}~{MAX_OVERSIZED_VIDEO_THRESHOLD_MB} MB）
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div
+                          className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5"
+                          role="group"
+                          aria-label="视频体积上限预设档位"
+                        >
+                          {OVERSIZED_THRESHOLD_PRESETS_MB.map((mb) => {
+                            const active =
+                              preferences.oversizedVideoThresholdMb === mb;
+                            return (
+                              <button
+                                key={mb}
+                                type="button"
+                                onClick={() =>
+                                  void handlePatchPreferences(
+                                    { oversizedVideoThresholdMb: mb },
+                                    `视频体积上限已设为 ${mb} MB`,
+                                  )
+                                }
+                                className={`rounded-md px-2 py-1 text-xs font-semibold tabular-nums transition ${
+                                  active
+                                    ? 'bg-white text-indigo-700 shadow-2xs'
+                                    : 'text-slate-600 hover:text-slate-900'
+                                }`}
+                              >
+                                {mb} MB
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-2 py-1 focus-within:border-indigo-400">
+                          <input
+                            id="setting-oversized-threshold-mb"
+                            type="number"
+                            min={MIN_OVERSIZED_VIDEO_THRESHOLD_MB}
+                            max={MAX_OVERSIZED_VIDEO_THRESHOLD_MB}
+                            step={10}
+                            value={thresholdDraft}
+                            onChange={(e) => setThresholdDraft(e.target.value)}
+                            onBlur={handleCommitThresholdDraft}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            aria-label="自定义视频体积上限（MB）"
+                            className="w-16 bg-transparent text-right text-xs font-semibold tabular-nums text-slate-800 focus:outline-none"
+                          />
+                          <span className="ml-1 text-[11px] font-medium text-slate-500">
+                            MB
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 触发时通知状态 */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200/70 pt-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-slate-800">
+                          触发时的通知状态
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-slate-500">
+                          {preferences.oversizedVideoNotifyMode === 'popup'
+                            ? '弹窗：在页面弹出提示卡片，展示视频大小并支持选择继续保存或跳过，5 秒后自动消失'
+                            : '静默：直接取消自动保存，不弹出任何提示卡片'}
+                        </p>
+                      </div>
+                      <div
+                        className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5"
+                        role="group"
+                        aria-label="触发时的通知状态"
+                      >
+                        {OVERSIZED_NOTIFY_OPTIONS.map((opt) => {
+                          const active =
+                            preferences.oversizedVideoNotifyMode === opt.value;
+                          return (
+                            <button
+                              key={opt.value}
+                              type="button"
+                              aria-pressed={active}
+                              onClick={() =>
+                                void handlePatchPreferences(
+                                  { oversizedVideoNotifyMode: opt.value },
+                                  opt.value === 'popup'
+                                    ? '已切换为弹窗通知'
+                                    : '已切换为静默取消',
+                                )
+                              }
+                              className={`min-w-14 rounded-md px-3 py-1 text-xs font-semibold transition ${
+                                active
+                                  ? 'bg-white text-indigo-700 shadow-2xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 快捷收藏默认保存文件夹 */}

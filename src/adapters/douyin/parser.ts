@@ -699,6 +699,7 @@ function extractVideoAsset(aweme: UnknownRecord): CapturedAssetInput | null {
   let selectedUrls: string[] = [];
   let selectedWidth = defaultWidth;
   let selectedHeight = defaultHeight;
+  let selectedDataSize: number | undefined;
 
   if (candidates.length > 0) {
     // 优先非 HEVC（H.264 兼容性最佳），同类内按分辨率、码率、体积降序
@@ -719,6 +720,9 @@ function extractVideoAsset(aweme: UnknownRecord): CapturedAssetInput | null {
     if (best) {
       selectedWidth = best.width ?? defaultWidth;
       selectedHeight = best.height ?? defaultHeight;
+      if (best.dataSize > 0) {
+        selectedDataSize = Math.round(best.dataSize);
+      }
 
       const allCandidateUrls: string[] = [];
       for (const candidate of candidates) {
@@ -735,11 +739,22 @@ function extractVideoAsset(aweme: UnknownRecord): CapturedAssetInput | null {
     ['download_addr', 'downloadAddr'],
   ];
   const directFallbackUrls: string[] = [];
+  let fallbackDataSize: number | undefined;
   for (const keys of fallbackAddrKeys) {
     const addrObj = readRecord(videoObj, keys);
-    directFallbackUrls.push(
-      ...extractUrlListFromObject(addrObj, { stripWatermark: true }),
-    );
+    const urls = extractUrlListFromObject(addrObj, { stripWatermark: true });
+    if (
+      urls.length > 0 &&
+      directFallbackUrls.length === 0 &&
+      fallbackDataSize === undefined &&
+      addrObj
+    ) {
+      const candidateSize = readFirstNumber(addrObj, ['data_size', 'dataSize']);
+      if (candidateSize !== undefined && candidateSize > 0) {
+        fallbackDataSize = Math.round(candidateSize);
+      }
+    }
+    directFallbackUrls.push(...urls);
   }
 
   // 兼容 Fiber 中可能直接提供的 playApi 字段
@@ -759,6 +774,8 @@ function extractVideoAsset(aweme: UnknownRecord): CapturedAssetInput | null {
     return null;
   }
 
+  const resolvedSizeBytes =
+    selectedUrls.length > 0 ? selectedDataSize : fallbackDataSize;
   const fallbackUrls = mergedUrls.slice(1);
   const asset: CapturedAssetInput = {
     id: 'video',
@@ -778,6 +795,9 @@ function extractVideoAsset(aweme: UnknownRecord): CapturedAssetInput | null {
   }
   if (durationSec !== undefined) {
     asset.durationSec = durationSec;
+  }
+  if (resolvedSizeBytes !== undefined && resolvedSizeBytes > 0) {
+    asset.sizeBytes = resolvedSizeBytes;
   }
 
   return asset;

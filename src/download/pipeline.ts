@@ -55,6 +55,8 @@ import {
 
 /** 单个 HTTP 请求等待响应头的超时阈值（毫秒） */
 const FETCH_HEADER_TIMEOUT_MS = 30_000;
+/** 预探测视频体积的响应头超时阈值（毫秒），避免慢节点阻塞自动保存反馈 */
+const PROBE_HEADER_TIMEOUT_MS = 8_000;
 /** 网络抖动或 5xx 临时错误时的退避重试等待时间（毫秒） */
 const TRANSIENT_RETRY_DELAY_MS = 600;
 /** 单个候选 URL 对临时错误的最大重试次数 */
@@ -225,6 +227,236 @@ function parseContentLength(headers: Headers): number | undefined {
     return undefined;
   }
   return Math.floor(parsed);
+}
+
+function parseContentRangeTotal(headers: Headers): number | undefined {
+  const raw = headers.get('content-range');
+  if (!raw) {
+    return undefined;
+  }
+  const match = /^bytes\s+(?:\d+-\d+|\*)\/(\d+)$/i.exec(raw.trim());
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return Math.floor(parsed);
+}
+
+/**
+ * 轻量探测候选直链的精确字节数：
+ * 1. 优先发 HEAD 读取 Content-Length；
+ * 2. 若站点拒绝 HEAD 或未返回长度，回退发 GET + Range: bytes=0-0，
+ *    从 206 Content-Range 或 200 Content-Length 读取后立即取消响应体，绝不下载正文。
+ */
+async function probeUrlSizeBytes(
+  urls: readonly string[],
+  signal?: AbortSignal,
+): Promise<number | undefined> {
+  for (const url of urls) {
+    throwIfAborted(signal);
+
+    let headDefinitivelyMissing = false;
+    try {
+      const headRes = await fetchWithHeaderTimeout(
+        url,
+        { method: 'HEAD' },
+        signal,
+        PROBE_HEADER_TIMEOUT_MS,
+      );
+      if (headRes.ok) {
+        const len = parseContentLength(headRes.headers);
+        if (len !== undefined && len > 0) {
+          return len;
+        }
+      } else if (headRes.status === 404 || headRes.status === 410) {
+        headDefinitivelyMissing = true;
+      }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) {
+        throw createAbortError(signal);
+      }
+    }
+
+    if (headDefinitivelyMissing) {
+      continue;
+    }
+
+    const rangeController = new AbortController();
+    const onExternalAbort = (): void => {
+      rangeController.abort(signal?.reason);
+    };
+    signal?.addEventListener('abort', onExternalAbort, { once: true });
+
+    try {
+      const rangeRes = await fetchWithHeaderTimeout(
+        url,
+        {
+          method: 'GET',
+          headers: { Range: 'bytes=0-0' },
+        },
+        rangeController.signal,
+        PROBE_HEADER_TIMEOUT_MS,
+      );
+
+      let resolvedBytes: number | undefined;
+      if (rangeRes.status === 206) {
+        resolvedBytes = parseContentRangeTotal(rangeRes.headers);
+      } else if (rangeRes.ok) {
+        resolvedBytes = parseContentLength(rangeRes.headers);
+      }
+
+      void rangeRes.body?.cancel().catch(() => undefined);
+      rangeController.abort();
+
+      if (resolvedBytes !== undefined && resolvedBytes > 0) {
+        return resolvedBytes;
+      }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) {
+        throw createAbortError(signal);
+      }
+    } finally {
+      signal?.removeEventListener('abort', onExternalAbort);
+    }
+  }
+
+  return undefined;
+}
+
+function sumM3u8DurationSec(manifestText: string): number {
+  let totalSec = 0;
+  const regex = /^#EXTINF:([0-9]+(?:\.[0-9]+)?)/gm;
+  let match = regex.exec(manifestText);
+  while (match !== null) {
+    const val = Number(match[1]);
+    if (Number.isFinite(val) && val > 0) {
+      totalSec += val;
+    }
+    match = regex.exec(manifestText);
+  }
+  return totalSec;
+}
+
+async function probeHlsAssetSizeBytes(
+  asset: MediaAsset,
+  signal?: AbortSignal,
+): Promise<number | undefined> {
+  const candidates = collectCandidateUrls(asset);
+  for (const manifestUrl of candidates) {
+    throwIfAborted(signal);
+    try {
+      const rootManifest = await fetchTextWithRetry(manifestUrl, signal);
+      let parsed = parseM3u8Playlist(rootManifest.text, rootManifest.finalUrl);
+      let mediaText = rootManifest.text;
+      let variantBandwidth = 0;
+
+      if (parsed.isMaster) {
+        const sortedVariants = [...parsed.variants].sort(
+          (a, b) => b.bandwidth - a.bandwidth,
+        );
+        const bestVariant = sortedVariants[0];
+        if (!bestVariant) {
+          continue;
+        }
+        variantBandwidth = bestVariant.bandwidth;
+        const mediaManifest = await fetchTextWithRetry(bestVariant.url, signal);
+        mediaText = mediaManifest.text;
+        parsed = parseM3u8Playlist(mediaManifest.text, mediaManifest.finalUrl);
+      }
+
+      if (
+        parsed.segments.length > 0 &&
+        parsed.segments.every((seg) => seg.byteRange !== undefined)
+      ) {
+        let total = parsed.initSegment?.byteRange?.length ?? 0;
+        for (const seg of parsed.segments) {
+          total += seg.byteRange?.length ?? 0;
+        }
+        if (total > 0) {
+          return total;
+        }
+      }
+
+      if (variantBandwidth > 0) {
+        const totalDurationSec = sumM3u8DurationSec(mediaText);
+        if (totalDurationSec > 0) {
+          return Math.round((variantBandwidth / 8) * totalDurationSec);
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) {
+        throw createAbortError(signal);
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 在不下载媒体正文的前提下，解析或探测视频资产列表的总体积（字节）。
+ * 无法获取任何有效体积时返回 `undefined`（由调用方按放行处理）。
+ */
+export async function probeVideoAssetsSizeBytes(
+  assets: readonly MediaAsset[],
+  signal?: AbortSignal,
+): Promise<number | undefined> {
+  const videoAssets = assets.filter((asset) => asset.kind === 'video');
+  if (videoAssets.length === 0) {
+    return undefined;
+  }
+
+  let totalBytes = 0;
+  let knownCount = 0;
+
+  for (const asset of videoAssets) {
+    throwIfAborted(signal);
+
+    if (
+      typeof asset.sizeBytes === 'number' &&
+      Number.isFinite(asset.sizeBytes) &&
+      asset.sizeBytes > 0
+    ) {
+      totalBytes += Math.floor(asset.sizeBytes);
+      knownCount += 1;
+      continue;
+    }
+
+    let probed: number | undefined;
+    switch (asset.strategy) {
+      case 'direct': {
+        probed = await probeUrlSizeBytes(collectCandidateUrls(asset), signal);
+        break;
+      }
+      case 'dash_mux': {
+        const videoCandidates = collectCandidateUrls(asset);
+        const audioCandidates = collectAudioCandidateUrls(asset);
+        const [videoBytes, audioBytes] = await Promise.all([
+          probeUrlSizeBytes(videoCandidates, signal),
+          audioCandidates.length > 0
+            ? probeUrlSizeBytes(audioCandidates, signal)
+            : Promise.resolve(undefined),
+        ]);
+        if (videoBytes !== undefined && videoBytes > 0) {
+          probed = videoBytes + (audioBytes ?? 0);
+        }
+        break;
+      }
+      case 'hls_mux': {
+        probed = await probeHlsAssetSizeBytes(asset, signal);
+        break;
+      }
+    }
+
+    if (probed !== undefined && probed > 0) {
+      totalBytes += probed;
+      knownCount += 1;
+    }
+  }
+
+  return knownCount > 0 && totalBytes > 0 ? totalBytes : undefined;
 }
 
 /**

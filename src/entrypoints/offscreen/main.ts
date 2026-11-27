@@ -9,6 +9,7 @@
 import {
   executeDownloadJob,
   isAbortError,
+  probeVideoAssetsSizeBytes,
   stageItemCommentsToOpfs,
 } from '../../download/pipeline.ts';
 import { tryAutoFlushToVault } from '../../storage/vault.ts';
@@ -174,6 +175,23 @@ chrome.runtime.onMessage.addListener(
       case 'OFFSCREEN_PING': {
         sendResponse({ ok: true, ready: true });
         return false;
+      }
+
+      case 'OFFSCREEN_PROBE_MEDIA_SIZE': {
+        void probeVideoAssetsSizeBytes(message.assets)
+          .then((totalSizeBytes) => {
+            sendResponse({
+              ok: true,
+              ...(totalSizeBytes !== undefined ? { totalSizeBytes } : {}),
+            });
+          })
+          .catch((error: unknown) => {
+            sendResponse({
+              ok: false,
+              error: formatErrorMessage(error),
+            });
+          });
+        return true;
       }
 
       case 'OFFSCREEN_ABORT_DOWNLOAD': {

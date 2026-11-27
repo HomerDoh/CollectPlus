@@ -437,6 +437,11 @@ export function buildMediaAssetsFromPayload(payload: CapturedPayload): {
       ...(input.durationSec !== undefined
         ? { durationSec: input.durationSec }
         : {}),
+      ...(typeof input.sizeBytes === 'number' &&
+      Number.isFinite(input.sizeBytes) &&
+      input.sizeBytes > 0
+        ? { sizeBytes: Math.floor(input.sizeBytes) }
+        : {}),
     };
 
     assets.push(mediaAsset);

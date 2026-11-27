@@ -495,6 +495,7 @@ interface ZVideoCandidate {
   width?: number;
   height?: number;
   durationSec?: number;
+  sizeBytes?: number;
 }
 
 function extractZVideoAsset(record: UnknownRecord): CapturedAssetInput | null {
@@ -534,6 +535,9 @@ function extractZVideoAsset(record: UnknownRecord): CapturedAssetInput | null {
         rawDuration !== undefined && rawDuration > 0
           ? Math.round(rawDuration * 100) / 100
           : undefined;
+      const rawSize = readFirstNumber(entry, ['size']);
+      const sizeBytes =
+        rawSize !== undefined && rawSize > 0 ? Math.round(rawSize) : undefined;
 
       candidates.push({
         url,
@@ -543,6 +547,7 @@ function extractZVideoAsset(record: UnknownRecord): CapturedAssetInput | null {
         ...(width !== undefined ? { width } : {}),
         ...(height !== undefined ? { height } : {}),
         ...(durationSec !== undefined ? { durationSec } : {}),
+        ...(sizeBytes !== undefined ? { sizeBytes } : {}),
       });
     }
   }
@@ -598,6 +603,7 @@ function extractZVideoAsset(record: UnknownRecord): CapturedAssetInput | null {
     ...(best.width !== undefined ? { width: best.width } : {}),
     ...(best.height !== undefined ? { height: best.height } : {}),
     ...(best.durationSec !== undefined ? { durationSec: best.durationSec } : {}),
+    ...(best.sizeBytes !== undefined ? { sizeBytes: best.sizeBytes } : {}),
   };
 }
 

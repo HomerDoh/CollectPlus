@@ -370,6 +370,7 @@ interface VideoStreamCandidate {
   width?: number;
   height?: number;
   durationSec?: number;
+  sizeBytes?: number;
 }
 
 function collectStreamCandidates(
@@ -423,6 +424,9 @@ function collectStreamCandidates(
           ? Math.round((rawDuration / 1000) * 100) / 100
           : Math.round(rawDuration * 100) / 100
         : undefined;
+    const rawSize = readFirstNumber(item, ['size', 'file_size', 'fileSize']);
+    const sizeBytes =
+      rawSize !== undefined && rawSize > 0 ? Math.round(rawSize) : undefined;
 
     out.push({
       urls,
@@ -432,6 +436,7 @@ function collectStreamCandidates(
       ...(width !== undefined ? { width } : {}),
       ...(height !== undefined ? { height } : {}),
       ...(durationSec !== undefined ? { durationSec } : {}),
+      ...(sizeBytes !== undefined ? { sizeBytes } : {}),
     });
   }
 }
@@ -523,6 +528,8 @@ function extractVideoAsset(note: UnknownRecord): CapturedAssetInput | null {
     (mediaVideoMeta ? readPositiveInt(mediaVideoMeta, ['height']) : undefined) ??
     readPositiveInt(videoObj, ['height']);
   const durationSec = best?.durationSec ?? fallbackDurationSec;
+  const sizeBytes =
+    best && best.urls[0] === primaryUrl ? best.sizeBytes : undefined;
   const fallbackUrls = mergedUrls.slice(1);
 
   return {
@@ -535,6 +542,7 @@ function extractVideoAsset(note: UnknownRecord): CapturedAssetInput | null {
     ...(width !== undefined ? { width } : {}),
     ...(height !== undefined ? { height } : {}),
     ...(durationSec !== undefined ? { durationSec } : {}),
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
   };
 }
 

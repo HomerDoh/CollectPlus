@@ -458,6 +458,11 @@ function extractVideoAsset(
           readRecord(videoData, ['dimension']);
         const width = dimension ? readPositiveInt(dimension, ['width']) : undefined;
         const height = dimension ? readPositiveInt(dimension, ['height']) : undefined;
+        const durlSize = readFirstNumber(first, ['size']);
+        const sizeBytes =
+          durlSize !== undefined && durlSize > 0
+            ? Math.round(durlSize)
+            : undefined;
         const fallbackUrls = urls.slice(1);
 
         return {
@@ -470,6 +475,7 @@ function extractVideoAsset(
           ...(width !== undefined ? { width } : {}),
           ...(height !== undefined ? { height } : {}),
           ...(durationSec !== undefined ? { durationSec } : {}),
+          ...(sizeBytes !== undefined ? { sizeBytes } : {}),
         };
       }
     }

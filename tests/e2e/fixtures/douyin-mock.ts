@@ -41,6 +41,7 @@ const MOCK_CDN_HOST_RE =
 export function buildMockVideoAweme(
   awemeId: string,
   customTitle?: string,
+  videoDataSizeBytes?: number,
 ): Record<string, unknown> {
   const isDefaultVideo = awemeId === MOCK_VIDEO_AWEME_ID;
   const title =
@@ -100,6 +101,9 @@ export function buildMockVideoAweme(
           play_addr: {
             width: 1080,
             height: 1920,
+            ...(videoDataSizeBytes !== undefined
+              ? { data_size: videoDataSizeBytes }
+              : {}),
             url_list: [
               `https://v26-web.douyinvod.com/aweme/v1/playwm/?video_id=${videoId}`,
             ],
@@ -110,10 +114,13 @@ export function buildMockVideoAweme(
   };
 }
 
-function buildMockVideoDetailResponse(awemeId: string): Record<string, unknown> {
+function buildMockVideoDetailResponse(
+  awemeId: string,
+  videoDataSizeBytes?: number,
+): Record<string, unknown> {
   return {
     status_code: 0,
-    aweme_detail: buildMockVideoAweme(awemeId),
+    aweme_detail: buildMockVideoAweme(awemeId, undefined, videoDataSizeBytes),
   };
 }
 
@@ -251,6 +258,7 @@ interface CdpFetchPausedEvent {
   requestId: string;
   request: {
     url: string;
+    method?: string;
     headers: Record<string, string>;
   };
 }
@@ -263,6 +271,10 @@ export interface MockLoggedInUser {
 export interface DouyinMockOptions {
   /** 可选钩子：在返回 CDN 媒体二进制前挂起等待，用于验证并发队列与图标进度状态 */
   beforeFulfillMedia?: (url: string) => Promise<void>;
+  /** 可选：返回视频元数据中的精确 data_size（字节），用于测试元数据快路径 */
+  getVideoDataSizeBytes?: (awemeId: string) => number | undefined;
+  /** 可选：自定义 Offscreen HEAD 探测返回的 Content-Length（字节） */
+  getHeadContentLengthBytes?: (url: string) => number | undefined;
   /** 可选：返回当前登录账号，用于模拟已登录页面触发首次同步/弹窗 */
   getLoggedInUser?: () => MockLoggedInUser | null;
   /** 可选：自定义 `/aweme/v1/web/aweme/listcollection/` 响应（支持多页与风控模拟） */
@@ -305,22 +317,30 @@ async function attachBrowserCdpCdnMock(
 
   cdp.on('Fetch.requestPaused', (event: CdpFetchPausedEvent) => {
     const { requestId, request } = event;
-    tracker.requestedMediaUrls.push(request.url);
+    const isHead = request.method?.toUpperCase() === 'HEAD';
+    if (isHead) {
+      tracker.headProbeUrls.push(request.url);
+    } else {
+      tracker.requestedMediaUrls.push(request.url);
+    }
 
     void (async () => {
-      if (options?.beforeFulfillMedia) {
+      if (!isHead && options?.beforeFulfillMedia) {
         await options.beforeFulfillMedia(request.url);
       }
       const { contentType, body } = buildMockMediaPayload(request.url);
+      const headLength = isHead
+        ? (options?.getHeadContentLengthBytes?.(request.url) ?? body.byteLength)
+        : body.byteLength;
       await cdp.send('Fetch.fulfillRequest', {
         requestId,
         responseCode: 200,
         responseHeaders: [
           { name: 'content-type', value: contentType },
-          { name: 'content-length', value: String(body.byteLength) },
+          { name: 'content-length', value: String(headLength) },
           { name: 'access-control-allow-origin', value: '*' },
         ],
-        body: body.toString('base64'),
+        body: isHead ? '' : body.toString('base64'),
       });
     })().catch(() => undefined);
   });
@@ -335,6 +355,7 @@ async function attachBrowserCdpCdnMock(
 
 export interface DouyinMockTracker {
   requestedMediaUrls: string[];
+  headProbeUrls: string[];
   listCollectionRequests: number;
   commentListRequests: number;
   dispose: () => Promise<void>;
@@ -407,6 +428,7 @@ export async function installDouyinMockRoutes(
 ): Promise<DouyinMockTracker> {
   const tracker: DouyinMockTracker = {
     requestedMediaUrls: [],
+    headProbeUrls: [],
     listCollectionRequests: 0,
     commentListRequests: 0,
     dispose: async () => undefined,
@@ -474,7 +496,10 @@ export async function installDouyinMockRoutes(
       const body =
         awemeId === MOCK_GALLERY_AWEME_ID
           ? MOCK_GALLERY_DETAIL_RESPONSE
-          : buildMockVideoDetailResponse(awemeId);
+          : buildMockVideoDetailResponse(
+              awemeId,
+              options?.getVideoDataSizeBytes?.(awemeId),
+            );
       await route.fulfill({
         status: 200,
         contentType: 'application/json; charset=utf-8',
@@ -526,11 +551,12 @@ export async function installDouyinMockRoutes(
       return;
     }
 
-    if (url.pathname.startsWith(`/video/${MOCK_VIDEO_AWEME_ID}`)) {
+    const videoPathMatch = /^\/video\/(\d+)/.exec(url.pathname);
+    if (videoPathMatch?.[1]) {
       await route.fulfill({
         status: 200,
         contentType: 'text/html; charset=utf-8',
-        body: buildMockDouyinHtml(MOCK_VIDEO_AWEME_ID, 'video', {
+        body: buildMockDouyinHtml(videoPathMatch[1], 'video', {
           autoFetchSelfProfile,
         }),
       });

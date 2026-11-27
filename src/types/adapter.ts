@@ -58,6 +58,8 @@ export interface CapturedAssetInput {
   height?: number;
   /** 音视频时长（秒） */
   durationSec?: number;
+  /** 平台接口明确提供的精确文件体积（字节，可选） */
+  sizeBytes?: number;
   /** 文件名或扩展名提示（由路径规范化模块统一落盘命名） */
   filenameHint?: string;
 }

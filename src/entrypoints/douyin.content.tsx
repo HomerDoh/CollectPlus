@@ -112,6 +112,7 @@ function createOverlayStore(): {
     floatingButtonEnabled: true,
     syncPrompt: null,
     syncBanner: null,
+    oversizedPrompt: null,
   };
 
   const listeners = new Set<() => void>();
@@ -164,9 +165,11 @@ export default defineContentScript({
     let activeSyncFetched = 0;
     let activeSyncAdded = 0;
     let activeSyncDeduplicated = 0;
+    let activeSyncSkippedOversized = 0;
     let activeSyncBatchQueue: Promise<void> = Promise.resolve();
     let passiveFallbackActive = false;
     let bannerAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingOversizedPayload: CapturedPayload | null = null;
 
     const pendingRequests = new Map<string, PendingItemRequest>();
     const pendingCommentRequests = new Map<string, PendingCommentsRequest>();
@@ -216,6 +219,7 @@ export default defineContentScript({
       activeSyncFetched = 0;
       activeSyncAdded = 0;
       activeSyncDeduplicated = 0;
+      activeSyncSkippedOversized = 0;
       activeSyncBatchQueue = Promise.resolve();
       clearBannerTimer();
 
@@ -322,7 +326,11 @@ export default defineContentScript({
 
     const ingestRawItemsBatch = async (
       rawItems: readonly unknown[],
-    ): Promise<{ added: number; deduplicated: number }> => {
+    ): Promise<{
+      added: number;
+      deduplicated: number;
+      skippedOversized: number;
+    }> => {
       const payloads: CapturedPayload[] = [];
       for (const rawItem of rawItems) {
         const normalized = douyinAdapter.normalizeRawData(rawItem, 'auto_sync');
@@ -331,7 +339,7 @@ export default defineContentScript({
         }
       }
       if (payloads.length === 0) {
-        return { added: 0, deduplicated: 0 };
+        return { added: 0, deduplicated: 0, skippedOversized: 0 };
       }
 
       // 容错：MV3 Service Worker 在多页同步间隙休眠/重启时瞬断通道，重试一次唤醒 SW
@@ -343,11 +351,12 @@ export default defineContentScript({
             payloads,
           });
           if (!response || !response.ok) {
-            return { added: 0, deduplicated: 0 };
+            return { added: 0, deduplicated: 0, skippedOversized: 0 };
           }
           return {
             added: response.capturedCount,
             deduplicated: response.deduplicatedCount,
+            skippedOversized: response.skippedOversizedCount,
           };
         } catch (error) {
           if (attempt === 0) {
@@ -357,7 +366,7 @@ export default defineContentScript({
           console.warn('[Collect+] Batch ingest failed after retry:', error);
         }
       }
-      return { added: 0, deduplicated: 0 };
+      return { added: 0, deduplicated: 0, skippedOversized: 0 };
     };
 
     const handleCollectionSyncBatch = (
@@ -371,12 +380,12 @@ export default defineContentScript({
         if (activeSyncId !== batchSyncId) {
           return;
         }
-        const { added, deduplicated } = await ingestRawItemsBatch(
-          message.rawItems,
-        );
+        const { added, deduplicated, skippedOversized } =
+          await ingestRawItemsBatch(message.rawItems);
         activeSyncFetched += message.rawItems.length;
         activeSyncAdded += added;
         activeSyncDeduplicated += deduplicated;
+        activeSyncSkippedOversized += skippedOversized;
 
         updateState((prev) => ({
           ...prev,
@@ -385,6 +394,9 @@ export default defineContentScript({
             fetchedCount: activeSyncFetched,
             addedCount: activeSyncAdded,
             deduplicatedCount: activeSyncDeduplicated,
+            ...(activeSyncSkippedOversized > 0
+              ? { skippedOversizedCount: activeSyncSkippedOversized }
+              : {}),
           },
         }));
       });
@@ -423,6 +435,9 @@ export default defineContentScript({
             fetchedCount: activeSyncFetched,
             addedCount: activeSyncAdded,
             deduplicatedCount: activeSyncDeduplicated,
+            ...(activeSyncSkippedOversized > 0
+              ? { skippedOversizedCount: activeSyncSkippedOversized }
+              : {}),
           },
         }));
         scheduleBannerAutoClose();
@@ -492,10 +507,12 @@ export default defineContentScript({
         return;
       }
 
-      const { added, deduplicated } = await ingestRawItemsBatch(
-        message.rawItems,
-      );
-      if (passiveFallbackActive && (added > 0 || deduplicated > 0)) {
+      const { added, deduplicated, skippedOversized } =
+        await ingestRawItemsBatch(message.rawItems);
+      if (
+        passiveFallbackActive &&
+        (added > 0 || deduplicated > 0 || skippedOversized > 0)
+      ) {
         updateState((prev) => ({
           ...prev,
           syncBanner: {
@@ -503,6 +520,9 @@ export default defineContentScript({
             fetchedCount: message.rawItems.length,
             addedCount: added,
             deduplicatedCount: deduplicated,
+            ...(skippedOversized > 0
+              ? { skippedOversizedCount: skippedOversized }
+              : {}),
             message: '已通过被动旁路同步本页收藏作品',
           },
         }));
@@ -603,11 +623,13 @@ export default defineContentScript({
 
     const submitCapturedPayload = async (
       payload: CapturedPayload,
+      options?: { forceSave?: boolean },
     ): Promise<void> => {
       const captureResponse = await sendToBackground({
         target: 'background',
         type: 'CAPTURE_ITEM',
         payload,
+        ...(options?.forceSave ? { forceSave: true } : {}),
       });
 
       if (!captureResponse || !captureResponse.ok) {
@@ -617,6 +639,23 @@ export default defineContentScript({
             ? captureResponse.error
             : 'Background service did not acknowledge capture.',
         );
+        return;
+      }
+
+      if (captureResponse.skippedOversized) {
+        if (captureResponse.notifyMode === 'popup') {
+          requestCounter += 1;
+          pendingOversizedPayload = payload;
+          updateState((prev) => ({
+            ...prev,
+            oversizedPrompt: {
+              id: `cp-dy-oversized-${Date.now()}-${requestCounter}`,
+              title: payload.title,
+              videoSizeBytes: captureResponse.videoSizeBytes,
+              thresholdMb: captureResponse.thresholdMb,
+            },
+          }));
+        }
         return;
       }
 
@@ -954,6 +993,18 @@ export default defineContentScript({
       onDismissSyncBanner: () => {
         clearBannerTimer();
         updateState((prev) => ({ ...prev, syncBanner: null }));
+      },
+      onConfirmOversizedSave: () => {
+        const payloadToSave = pendingOversizedPayload;
+        pendingOversizedPayload = null;
+        updateState((prev) => ({ ...prev, oversizedPrompt: null }));
+        if (payloadToSave) {
+          void submitCapturedPayload(payloadToSave, { forceSave: true });
+        }
+      },
+      onSkipOversized: () => {
+        pendingOversizedPayload = null;
+        updateState((prev) => ({ ...prev, oversizedPrompt: null }));
       },
     };
 

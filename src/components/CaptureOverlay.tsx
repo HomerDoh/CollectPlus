@@ -10,11 +10,16 @@ import {
   CheckCircle2,
   ChevronLeft,
   ExternalLink,
+  HardDrive,
   Loader2,
   RefreshCw,
   X,
 } from 'lucide-react';
-import { useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import { formatBytes } from '../entrypoints/library/utils/format.ts';
+
+/** 视频过大提示弹窗自动消失时间（毫秒） */
+const OVERSIZED_PROMPT_AUTO_DISMISS_MS = 5000;
 
 /** 首次进入已登录网页时的全量同步询问弹窗状态 */
 export interface SyncPromptState {
@@ -28,8 +33,18 @@ export interface SyncBannerState {
   fetchedCount: number;
   addedCount: number;
   deduplicatedCount: number;
+  skippedOversizedCount?: number;
   message?: string;
   fallbackUrl?: string;
+}
+
+/** 视频体积超过上限取消自动保存时的页面提示弹窗状态 */
+export interface OversizedPromptState {
+  /** 唯一实例 ID，用于连续触发时重置 5 秒自动消失倒计时 */
+  id: string;
+  title: string;
+  videoSizeBytes: number;
+  thresholdMb: number;
 }
 
 /** 浮层整体只读快照 */
@@ -38,6 +53,7 @@ export interface CaptureOverlaySnapshot {
   floatingButtonEnabled: boolean;
   syncPrompt: SyncPromptState | null;
   syncBanner: SyncBannerState | null;
+  oversizedPrompt?: OversizedPromptState | null;
 }
 
 /** 轻量外部状态存储接口，供 Content Script 驱动 React Shadow DOM 渲染 */
@@ -54,6 +70,8 @@ export interface CaptureOverlayActions {
   onCancelFullSync: () => void;
   onOpenFallbackPage: (url: string) => void;
   onDismissSyncBanner: () => void;
+  onConfirmOversizedSave?: () => void;
+  onSkipOversized?: () => void;
 }
 
 export interface CaptureOverlayProps {
@@ -62,17 +80,124 @@ export interface CaptureOverlayProps {
 }
 
 export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
-  const { isCapturing, floatingButtonEnabled, syncPrompt, syncBanner } =
-    useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const {
+    isCapturing,
+    floatingButtonEnabled,
+    syncPrompt,
+    syncBanner,
+    oversizedPrompt = null,
+  } = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [fabCollapsed, setFabCollapsed] = useState(false);
+  const [remainingSeconds, setRemainingSeconds] = useState(5);
 
-  if (!floatingButtonEnabled && !syncPrompt && !syncBanner) {
+  const oversizedPromptId = oversizedPrompt?.id ?? null;
+
+  useEffect(() => {
+    if (!oversizedPromptId) {
+      return;
+    }
+
+    const deadline = Date.now() + OVERSIZED_PROMPT_AUTO_DISMISS_MS;
+    setRemainingSeconds(Math.ceil(OVERSIZED_PROMPT_AUTO_DISMISS_MS / 1000));
+
+    const tickInterval = setInterval(() => {
+      const leftMs = deadline - Date.now();
+      setRemainingSeconds(Math.max(1, Math.ceil(leftMs / 1000)));
+    }, 200);
+
+    const dismissTimer = setTimeout(() => {
+      actions.onSkipOversized?.();
+    }, OVERSIZED_PROMPT_AUTO_DISMISS_MS);
+
+    return () => {
+      clearInterval(tickInterval);
+      clearTimeout(dismissTimer);
+    };
+  }, [oversizedPromptId, actions]);
+
+  if (!floatingButtonEnabled && !syncPrompt && !syncBanner && !oversizedPrompt) {
     return null;
   }
 
   return (
     <div className="cp-overlay-root">
-      {syncPrompt && (
+      {(oversizedPrompt || syncPrompt || syncBanner) && (
+        <div className="cp-toast-stack">
+          {oversizedPrompt && (
+            <div
+              className="cp-oversized-prompt"
+              role="alertdialog"
+              aria-modal="false"
+              aria-label="视频体积过大已取消自动保存"
+              data-testid="cp-oversized-prompt"
+            >
+              <div className="cp-sync-card-head">
+                <span
+                  className="cp-oversized-icon-badge"
+                  aria-hidden="true"
+                >
+                  <HardDrive size={15} />
+                </span>
+                <div className="cp-sync-card-title-wrap">
+                  <div className="cp-sync-card-title">
+                    视频过大，已取消自动保存
+                  </div>
+                  <div
+                    className="cp-oversized-title"
+                    title={oversizedPrompt.title}
+                  >
+                    {oversizedPrompt.title}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="cp-sync-close-btn"
+                  aria-label="跳过并关闭"
+                  onClick={() => actions.onSkipOversized?.()}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <div
+                className="cp-oversized-size-row"
+                data-testid="cp-oversized-size"
+              >
+                <span>视频容量：</span>
+                <strong className="cp-oversized-size-val">
+                  {formatBytes(oversizedPrompt.videoSizeBytes)}
+                </strong>
+                <span className="cp-oversized-size-limit">
+                  （上限 {oversizedPrompt.thresholdMb} MB）
+                </span>
+              </div>
+              <div className="cp-sync-card-actions">
+                <button
+                  type="button"
+                  className="cp-sync-btn-secondary"
+                  data-testid="cp-oversized-skip-btn"
+                  onClick={() => actions.onSkipOversized?.()}
+                >
+                  跳过 ({remainingSeconds}s)
+                </button>
+                <button
+                  type="button"
+                  className="cp-sync-btn-primary"
+                  data-testid="cp-oversized-save-btn"
+                  onClick={() => actions.onConfirmOversizedSave?.()}
+                >
+                  继续保存
+                </button>
+              </div>
+              <div className="cp-oversized-progress-track" aria-hidden="true">
+                <div
+                  key={oversizedPrompt.id}
+                  className="cp-oversized-progress-bar"
+                />
+              </div>
+            </div>
+          )}
+
+          {syncPrompt && (
         <div
           className="cp-sync-prompt"
           role="dialog"
@@ -153,6 +278,9 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                     {syncBanner.deduplicatedCount > 0
                       ? ` · 已存在 ${syncBanner.deduplicatedCount} 条`
                       : ''}
+                    {(syncBanner.skippedOversizedCount ?? 0) > 0
+                      ? ` · 跳过过大 ${syncBanner.skippedOversizedCount} 条`
+                      : ''}
                   </div>
                 </>
               )}
@@ -166,6 +294,9 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                     {syncBanner.addedCount} 条
                     {syncBanner.deduplicatedCount > 0
                       ? ` · 去重 ${syncBanner.deduplicatedCount} 条`
+                      : ''}
+                    {(syncBanner.skippedOversizedCount ?? 0) > 0
+                      ? ` · 跳过过大 ${syncBanner.skippedOversizedCount} 条`
                       : ''}
                   </div>
                 </>
@@ -221,6 +352,9 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
               </button>
             )}
           </div>
+        </div>
+      )}
+
         </div>
       )}
 

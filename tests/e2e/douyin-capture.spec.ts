@@ -638,4 +638,200 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
       await tracker.dispose();
     }
   });
+
+  test('视频过大取消自动保存：设置持久化、HEAD/元数据体积校验、弹窗5秒自动消失、跳过/继续保存、静默与手动放行', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    test.setTimeout(60_000);
+    const MB = 1024 * 1024;
+    const headProbeVideoId = '7490000000000000090';
+    const skipVideoId = '7490000000000000091';
+    const continueSaveVideoId = '7490000000000000092';
+    const silentVideoId = '7490000000000000093';
+
+    const tracker = await installDouyinMockRoutes(context, {
+      getHeadContentLengthBytes: (url) => {
+        if (url.includes(headProbeVideoId)) {
+          return 250 * MB;
+        }
+        return undefined;
+      },
+      getVideoDataSizeBytes: (awemeId) => {
+        if (awemeId === skipVideoId) {
+          return 220 * MB;
+        }
+        if (awemeId === continueSaveVideoId) {
+          return 300 * MB;
+        }
+        if (awemeId === silentVideoId) {
+          return 260 * MB;
+        }
+        return undefined;
+      },
+    });
+
+    try {
+      // 1. 打开管理台设置页：验证默认关闭，开启后默认 200 MB + 弹窗模式，修改为 100 MB 并验证持久化
+      const libraryPage = await context.newPage();
+      await libraryPage.goto(extensionUrl('library.html'));
+      await libraryPage.getByRole('button', { name: '设置', exact: true }).click();
+
+      const oversizedSwitch = libraryPage.locator(
+        '#setting-skip-oversized-video',
+      );
+      await expect(oversizedSwitch).toBeVisible();
+      await expect(oversizedSwitch).toHaveAttribute('aria-checked', 'false');
+      await expect(
+        libraryPage.getByTestId('oversized-video-options'),
+      ).toHaveCount(0);
+
+      await oversizedSwitch.click();
+      await expect(oversizedSwitch).toHaveAttribute('aria-checked', 'true');
+
+      const optionsBox = libraryPage.getByTestId('oversized-video-options');
+      await expect(optionsBox).toBeVisible();
+      const thresholdInput = libraryPage.locator(
+        '#setting-oversized-threshold-mb',
+      );
+      await expect(thresholdInput).toHaveValue('200');
+      await expect(
+        optionsBox.getByRole('button', { name: '弹窗', exact: true }),
+      ).toHaveAttribute('aria-pressed', 'true');
+
+      // 切换阈值为 100 MB 并刷新验证持久化
+      await optionsBox.getByRole('button', { name: '100 MB' }).click();
+      await expect(thresholdInput).toHaveValue('100');
+
+      await libraryPage.reload();
+      await libraryPage.getByRole('button', { name: '设置', exact: true }).click();
+      await expect(
+        libraryPage.locator('#setting-skip-oversized-video'),
+      ).toHaveAttribute('aria-checked', 'true');
+      await expect(
+        libraryPage.locator('#setting-oversized-threshold-mb'),
+      ).toHaveValue('100');
+
+      const openVideoAndLoadDetail = async (awemeId: string) => {
+        const page = await context.newPage();
+        await page.goto(`https://www.douyin.com/video/${awemeId}`, {
+          waitUntil: 'domcontentloaded',
+        });
+        await expect(page.locator('button.cp-fab-btn')).toBeVisible();
+        await page.click('#mock-load-detail');
+        await expect
+          .poll(async () =>
+            page.evaluate(() => {
+              const win = window as unknown as { __mockDetailLoaded?: boolean };
+              return Boolean(win.__mockDetailLoaded);
+            }),
+          )
+          .toBe(true);
+        return page;
+      };
+
+      // 2. 弹窗模式 + Offscreen HEAD 探测（无 data_size）+ 5 秒自动消失
+      const pageAutoDismiss = await openVideoAndLoadDetail(headProbeVideoId);
+      await pageAutoDismiss.click('#mock-native-collect');
+
+      const prompt1 = pageAutoDismiss.getByTestId('cp-oversized-prompt');
+      await expect(prompt1).toBeVisible({ timeout: 10_000 });
+      await expect(
+        pageAutoDismiss.getByTestId('cp-oversized-size'),
+      ).toContainText('250 MB');
+      await expect(
+        pageAutoDismiss.getByTestId('cp-oversized-size'),
+      ).toContainText('100 MB');
+
+      // 确认仅发起 HEAD 探测，未发起视频 GET 下载
+      expect(
+        tracker.headProbeUrls.some((u) => u.includes(headProbeVideoId)),
+      ).toBe(true);
+      expect(
+        tracker.requestedMediaUrls.some((u) => u.includes(headProbeVideoId)),
+      ).toBe(false);
+
+      // 不做任何操作，验证 5 秒后弹窗自动消失
+      await expect(prompt1).toHaveCount(0, { timeout: 8_000 });
+      await pageAutoDismiss.close();
+
+      // 3. 弹窗模式 + 点击「跳过」（元数据 data_size 快路径，不触发 HEAD）
+      const pageSkip = await openVideoAndLoadDetail(skipVideoId);
+      await pageSkip.click('#mock-native-collect');
+
+      const prompt2 = pageSkip.getByTestId('cp-oversized-prompt');
+      await expect(prompt2).toBeVisible({ timeout: 12_000 });
+      await expect(pageSkip.getByTestId('cp-oversized-size')).toContainText(
+        '220 MB',
+      );
+      expect(
+        tracker.headProbeUrls.some((u) => u.includes(skipVideoId)),
+      ).toBe(false);
+
+      await pageSkip.getByTestId('cp-oversized-skip-btn').click();
+      await expect(prompt2).toHaveCount(0);
+      await pageSkip.close();
+
+      // 4. 弹窗模式 + 点击「继续保存」→ 绕过阈值成功下载并入库
+      const pageContinue = await openVideoAndLoadDetail(continueSaveVideoId);
+      await pageContinue.click('#mock-native-collect');
+
+      const prompt3 = pageContinue.getByTestId('cp-oversized-prompt');
+      await expect(prompt3).toBeVisible({ timeout: 12_000 });
+      await expect(pageContinue.getByTestId('cp-oversized-size')).toContainText(
+        '300 MB',
+      );
+
+      await pageContinue.getByTestId('cp-oversized-save-btn').click();
+      await expect(prompt3).toHaveCount(0);
+
+      // 5. 切换为「静默」模式 → 原站收藏超大视频不弹窗且不入库；再点悬浮按钮手动收藏则正常保存
+      await libraryPage
+        .getByTestId('oversized-video-options')
+        .getByRole('button', { name: '静默', exact: true })
+        .click();
+      await expect(
+        libraryPage
+          .getByTestId('oversized-video-options')
+          .getByRole('button', { name: '静默', exact: true }),
+      ).toHaveAttribute('aria-pressed', 'true');
+
+      const pageSilent = await openVideoAndLoadDetail(silentVideoId);
+      await pageSilent.click('#mock-native-collect');
+      // 等待原生收藏 5 秒缓冲窗口提交完成后确认静默跳过、无过大提示弹窗
+      await pageSilent.waitForTimeout(5_800);
+      await expect(
+        pageSilent.getByTestId('cp-oversized-prompt'),
+      ).toHaveCount(0);
+
+      // 手动点击悬浮「收藏当前」按钮不受自动保存体积阈值限制
+      await pageSilent.locator('button.cp-fab-btn').click();
+      await expect(
+        pageSilent.getByTestId('cp-oversized-prompt'),
+      ).toHaveCount(0);
+
+      // 6. 返回管理台收藏列表：仅「继续保存」与「手动收藏」两条存在，「5秒自动消失」「跳过」均未入库
+      await libraryPage.getByRole('button', { name: /全部收藏/ }).click();
+      await expect(
+        libraryPage.getByText(`连刷测试视频_${continueSaveVideoId}`),
+      ).toBeVisible({ timeout: 20_000 });
+      await expect(
+        libraryPage.getByText(`连刷测试视频_${silentVideoId}`),
+      ).toBeVisible({ timeout: 20_000 });
+      await expect(
+        libraryPage.getByText(`连刷测试视频_${headProbeVideoId}`),
+      ).toHaveCount(0);
+      await expect(
+        libraryPage.getByText(`连刷测试视频_${skipVideoId}`),
+      ).toHaveCount(0);
+
+      await pageContinue.close();
+      await pageSilent.close();
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await tracker.dispose();
+    }
+  });
 });

@@ -185,16 +185,26 @@
   }
 }
 
-/* 首次进入已登录页面：全量同步询问弹窗与进度/兜底横幅（避开左下角悬浮按钮与右侧互动栏） */
+/* 首次进入已登录页面与视频过大提示弹窗栈（避开左下角悬浮按钮与右侧互动栏） */
 
-.cp-sync-prompt,
-.cp-sync-banner {
+.cp-toast-stack {
   position: fixed;
   left: 24px;
   bottom: 76px;
   width: 332px;
   max-width: calc(100vw - 48px);
   z-index: 2147483647;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cp-oversized-prompt,
+.cp-sync-prompt,
+.cp-sync-banner {
+  position: relative;
+  width: 100%;
   pointer-events: auto;
   border-radius: 14px;
   border: 1px solid rgba(129, 140, 248, 0.36);
@@ -205,6 +215,86 @@
   box-shadow:
     0 16px 38px rgba(2, 6, 23, 0.56),
     0 2px 10px rgba(79, 70, 229, 0.24);
+}
+
+.cp-oversized-prompt {
+  padding: 14px 14px 12px;
+  border-color: rgba(251, 191, 36, 0.45);
+  overflow: hidden;
+}
+
+.cp-oversized-icon-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cp-oversized-title {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-oversized-size-row {
+  margin-top: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  font-size: 12px;
+  line-height: 17px;
+  color: #e2e8f0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.cp-oversized-size-val {
+  color: #fde68a;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.cp-oversized-size-limit {
+  font-size: 11px;
+  color: #cbd5e1;
+}
+
+.cp-oversized-progress-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.cp-oversized-progress-bar {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%);
+  transform-origin: left center;
+  animation: cp-countdown-shrink 5s linear forwards;
+}
+
+@keyframes cp-countdown-shrink {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
 }
 
 .cp-sync-prompt {

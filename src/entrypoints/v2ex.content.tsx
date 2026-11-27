@@ -242,6 +242,10 @@ export default defineContentScript({
         return 'failed';
       }
 
+      if (captureResponse.skippedOversized) {
+        return 'failed';
+      }
+
       if (!captureResponse.deduplicated && topicData.replies.length > 0) {
         const comments = parseV2exComments(
           topicData.replies,
