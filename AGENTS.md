@@ -5,7 +5,7 @@
 ## 1. Project Overview
 
 - **项目名称**：Collect+（包名 `collect-plus`，本地收藏库默认目录 `CollectVault`）
-- **产品定位**：开源、本地优先、零外部后端依赖的 Chrome Manifest V3 跨平台防失效收藏管理扩展。当前已完成 **抖音（`www.douyin.com`）短视频 + 图集 MVP 闭环**，全链路按 `PlatformAdapter` 插件化架构预留横向扩展能力（B 站、小红书、X/Twitter、Instagram）。
+- **产品定位**：开源、本地优先、零外部后端依赖的 Chrome Manifest V3 跨平台防失效收藏管理扩展。当前已完成 **抖音（`www.douyin.com`）**、**B站（`www.bilibili.com`）** 与 **V2EX（`www.v2ex.com`）** 独立收藏插件闭环，全链路按 `PlatformAdapter` 插件化架构预留横向扩展能力（小红书、X/Twitter、Instagram、知乎、YouTube）。
 - **核心技术栈**：
   - 扩展框架：`WXT` (`srcDir: 'src'`, `publicDir: 'src/public'`) + `Vite`
   - 前端 UI：`React 19` + `TypeScript` (`strict: true`) + `Tailwind CSS v4` + `lucide-react`
@@ -88,9 +88,21 @@ pnpm zip
     │   └── pipeline.ts                    # 方案 A 流式下载（direct / dash_mux / hls_mux）与 WebP 缩略图
     ├── adapters/
     │   ├── registry.ts                    # 多平台适配器注册中心与 DNR 规则汇总
-    │   └── douyin/
-    │       ├── parser.ts                  # 抖音 aweme 归一化（H.264 优先无水印视频、图集原图）
-    │       └── main-hook.ts               # Main World fetch/XHR 旁路拦截、200 条 LRU、React Fiber 兜底
+    │   ├── douyin/
+    │   │   ├── parser.ts                  # 抖音 aweme 归一化（H.264 优先无水印视频、图集原图）
+    │   │   └── main-hook.ts               # Main World fetch/XHR 旁路拦截、200 条 LRU、React Fiber 兜底
+    │   ├── bilibili/
+    │   │   ├── parser.ts                  # B站视频归一化（AVC 优先 DASH 无损混流 + durl 回退、评论）
+    │   │   └── main-hook.ts               # Main World fetch/XHR 拦截、__INITIAL_STATE__/__playinfo__ 合并
+    │   ├── v2ex/
+    │   │   ├── dom-extractor.ts           # V2EX SSR HTML 提取（正文、附言、内嵌图、回复与 /my/topics）
+    │   │   └── parser.ts                  # V2EX 主题文章与回复归一化
+    │   ├── xiaohongshu/
+    │   │   ├── parser.ts                  # 小红书笔记归一化（H.264 优先视频、无水印图文、评论）
+    │   │   └── main-hook.ts               # Main World fetch/XHR 拦截、__INITIAL_STATE__ 收割、原生收藏/同步
+    │   └── zhihu/
+    │       ├── parser.ts                  # 知乎多形态归一化（回答、专栏文章、想法、知乎视频、评论）
+    │       └── main-hook.ts               # Main World fetch/XHR 拦截、js-initialData 解析、data-zop 视口定位
     ├── components/
     │   ├── CaptureOverlay.tsx             # Shadow DOM 轻悬浮采集按钮（静默采集无弹窗）
     │   └── capture-overlay.css            # 独立 px 隔离样式（:host { all: initial }）
@@ -99,8 +111,15 @@ pnpm zip
     └── entrypoints/
         ├── background.ts                  # MV3 Service Worker 事件中枢与受控并发下载调度器
         ├── offscreen/main.ts              # Offscreen 下载任务执行与进度回传
-        ├── douyin-main.content.ts         # world: 'MAIN', runAt: 'document_start'
-        ├── douyin.content.tsx             # Isolated World 桥接 + Shadow DOM 浮层挂载
+        ├── douyin-main.content.ts         # 抖音 world: 'MAIN', runAt: 'document_start'
+        ├── douyin.content.tsx             # 抖音 Isolated World 桥接 + Shadow DOM 浮层挂载
+        ├── bilibili-main.content.ts       # B站 world: 'MAIN', runAt: 'document_start'
+        ├── bilibili.content.tsx           # B站 Isolated World 桥接 + Shadow DOM 浮层挂载
+        ├── v2ex.content.tsx               # V2EX Isolated World 独立入口 + Shadow DOM 浮层挂载
+        ├── xiaohongshu-main.content.ts    # 小红书 world: 'MAIN', runAt: 'document_start'
+        ├── xiaohongshu.content.tsx        # 小红书 Isolated World 桥接 + Shadow DOM 浮层挂载
+        ├── zhihu-main.content.ts          # 知乎 world: 'MAIN', runAt: 'document_start'
+        ├── zhihu.content.tsx              # 知乎 Isolated World 桥接 + Shadow DOM 浮层挂载
         ├── popup/App.tsx                  # 扩展快捷弹窗（状态检测、一键触发采集、统计速览）
         └── library/                       # 全屏管理台（SidebarTree、SettingsPanel、ItemCardGrid、ItemDetailDrawer）
 ```

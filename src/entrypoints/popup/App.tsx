@@ -33,10 +33,11 @@ type CaptureFeedback =
 
 const PLATFORM_READY_TEXT: Record<PlatformId, string> = {
   douyin: '已就绪：抖音网页版（收藏自动拦截已开启）',
-  bilibili: '已就绪：B站网页版',
-  zhihu: '已就绪：知乎网页版',
+  bilibili: '已就绪：B站网页版（收藏自动拦截已开启）',
+  v2ex: '已就绪：V2EX 网页版（收藏自动拦截已开启）',
+  zhihu: '已就绪：知乎网页版（收藏自动拦截已开启）',
   youtube: '已就绪：YouTube 网页版',
-  xiaohongshu: '已就绪：小红书网页版',
+  xiaohongshu: '已就绪：小红书网页版（收藏自动拦截已开启）',
   twitter: '已就绪：X / Twitter 网页版',
   instagram: '已就绪：Instagram 网页版',
 };
@@ -342,18 +343,56 @@ export default function App() {
             <div className="flex items-start gap-2">
               <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-slate-300" />
               <p className="text-xs leading-relaxed text-slate-600">
-                当前页面暂不支持采集，前往抖音网页版即可使用
+                当前页面暂不支持采集，前往抖音、B站、V2EX、小红书或知乎网页版即可使用
               </p>
             </div>
-            <a
-              href="https://www.douyin.com/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
-            >
-              <span>前往抖音网页版</span>
-              <ExternalLink className="h-3 w-3" />
-            </a>
+            <div className="flex flex-wrap items-center gap-3">
+              <a
+                href="https://www.douyin.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
+              >
+                <span>抖音</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+              <a
+                href="https://www.bilibili.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
+              >
+                <span>B站</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+              <a
+                href="https://www.v2ex.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
+              >
+                <span>V2EX</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+              <a
+                href="https://www.xiaohongshu.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
+              >
+                <span>小红书</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+              <a
+                href="https://www.zhihu.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
+              >
+                <span>知乎</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
           </div>
         )}
       </section>

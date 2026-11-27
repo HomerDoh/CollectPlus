@@ -6,7 +6,13 @@ import {
 
 interface SeedItemInput {
   id: string;
-  platform: 'douyin' | 'bilibili' | 'zhihu' | 'youtube' | 'twitter';
+  platform:
+    | 'douyin'
+    | 'bilibili'
+    | 'xiaohongshu'
+    | 'zhihu'
+    | 'youtube'
+    | 'twitter';
   sourceId: string;
   kind: 'video' | 'gallery' | 'image' | 'article';
   title: string;
@@ -277,6 +283,17 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
         collectedAt: now - 5000,
         totalSizeBytes: 512 * 1024,
       }),
+      buildSeedRecord({
+        id: '01JFILTERITEM0000000000006',
+        platform: 'xiaohongshu',
+        sourceId: 'xhs-01',
+        kind: 'gallery',
+        title: '小红书图文笔记样本',
+        description: '小红书笔记正文',
+        authorName: '小红薯作者',
+        collectedAt: now - 6000,
+        totalSizeBytes: 256 * 1024,
+      }),
     ];
 
     await libraryPage.evaluate(async (records) => {
@@ -303,7 +320,7 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     }, seedItems);
 
     await libraryPage.reload();
-    await expect(libraryPage.locator('article')).toHaveCount(5);
+    await expect(libraryPage.locator('article')).toHaveCount(6);
 
     // 1. 媒体类型筛选：三项（全部 / 视频 / 图文）
     const mediaKindGroup = libraryPage.getByRole('group', {
@@ -319,9 +336,10 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     await expect(libraryPage.locator('article')).toHaveCount(3);
 
     await mediaKindGroup.getByRole('button', { name: '图文', exact: true }).click();
-    await expect(libraryPage.locator('article')).toHaveCount(2);
+    await expect(libraryPage.locator('article')).toHaveCount(3);
     await expect(libraryPage.getByText('知乎深度专栏文章样本')).toBeVisible();
     await expect(libraryPage.getByText('X 图文动态样本')).toBeVisible();
+    await expect(libraryPage.getByText('小红书图文笔记样本')).toBeVisible();
 
     // 打开文章详情抽屉，验证离线阅读预览正常渲染无报错
     await libraryPage
@@ -343,9 +361,9 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     await mediaKindGroup
       .getByRole('button', { name: '全部', exact: true })
       .click();
-    await expect(libraryPage.locator('article')).toHaveCount(5);
+    await expect(libraryPage.locator('article')).toHaveCount(6);
 
-    // 2. 平台筛选：抖音 / B站 / 知乎 / YouTube / X
+    // 2. 平台筛选：抖音 / B站 / 小红书 / 知乎 / YouTube / X
     const platformGroup = libraryPage.getByRole('group', {
       name: '来源平台筛选',
     });
@@ -353,6 +371,7 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     const platformChecks: Array<{ label: string; expectedTitle: string }> = [
       { label: '抖音', expectedTitle: '抖音短视频样本' },
       { label: 'B站', expectedTitle: 'B站教程视频样本' },
+      { label: '小红书', expectedTitle: '小红书图文笔记样本' },
       { label: '知乎', expectedTitle: '知乎深度专栏文章样本' },
       { label: 'YouTube', expectedTitle: 'YouTube 科技测评样本' },
       { label: 'X', expectedTitle: 'X 图文动态样本' },
@@ -367,7 +386,7 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     }
 
     await platformGroup.getByRole('button', { name: '全部', exact: true }).click();
-    await expect(libraryPage.locator('article')).toHaveCount(5);
+    await expect(libraryPage.locator('article')).toHaveCount(6);
 
     // 3. 验证侧边栏不再展示标签栏，但视频详情保留标签编辑且搜索栏可按标签检索
     const sidebar = libraryPage.locator('aside');
@@ -381,7 +400,7 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     await expect(libraryPage.locator('article')).toHaveCount(1);
     await expect(libraryPage.getByText('抖音短视频样本')).toBeVisible();
     await libraryPage.getByRole('button', { name: '清除搜索' }).click();
-    await expect(libraryPage.locator('article')).toHaveCount(5);
+    await expect(libraryPage.locator('article')).toHaveCount(6);
 
     // 打开视频详情抽屉，确认已有标签保留且可新增标签并被搜索栏检索到
     await libraryPage

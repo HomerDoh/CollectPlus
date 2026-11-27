@@ -18,6 +18,7 @@ export const PLATFORM_DNR_RULE_BASE: Readonly<Record<PlatformId, number>> = {
   instagram: 5000,
   zhihu: 6000,
   youtube: 7000,
+  v2ex: 8000,
 };
 
 /** 缺省生效的资源类型集合 */

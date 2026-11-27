@@ -108,6 +108,8 @@ export interface PipelineProgressSnapshot {
 export interface DownloadJobInput {
   itemId: string;
   assets: MediaAsset[];
+  /** 文章类条目允许可选内嵌图片全部失败而不阻断正文与评论归档 */
+  allowAllAssetsFailed?: boolean;
   signal?: AbortSignal;
   onProgress?: (snapshot: PipelineProgressSnapshot) => void;
 }
@@ -187,11 +189,14 @@ function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /** 去重并过滤空白候选 URL 列表 */
-function collectCandidateUrls(asset: MediaAsset): string[] {
+function collectUniqueUrls(rawUrls: readonly (string | undefined)[]): string[] {
   const seen = new Set<string>();
   const urls: string[] = [];
 
-  for (const raw of [asset.sourceUrl, ...(asset.fallbackUrls ?? [])]) {
+  for (const raw of rawUrls) {
+    if (typeof raw !== 'string') {
+      continue;
+    }
     const trimmed = raw.trim();
     if (trimmed && !seen.has(trimmed)) {
       seen.add(trimmed);
@@ -200,6 +205,14 @@ function collectCandidateUrls(asset: MediaAsset): string[] {
   }
 
   return urls;
+}
+
+function collectCandidateUrls(asset: MediaAsset): string[] {
+  return collectUniqueUrls([asset.sourceUrl, ...(asset.fallbackUrls ?? [])]);
+}
+
+function collectAudioCandidateUrls(asset: MediaAsset): string[] {
+  return collectUniqueUrls([asset.audioUrl, ...(asset.audioFallbackUrls ?? [])]);
 }
 
 function parseContentLength(headers: Headers): number | undefined {
@@ -618,138 +631,142 @@ export async function muxDashToOpfs(
     throw new Error(`DASH asset "${asset.id}" has no valid video URL.`);
   }
 
-  const audioUrl = asset.audioUrl?.trim() || undefined;
+  const audioCandidates = collectAudioCandidateUrls(asset);
+  const audioAttemptList: Array<string | undefined> =
+    audioCandidates.length > 0 ? audioCandidates.slice(0, 3) : [undefined];
   let lastError: unknown = new Error(
     `Failed to mux DASH asset "${asset.id}" from all candidate URLs.`,
   );
 
   for (const videoUrl of candidates) {
-    throwIfAborted(signal);
-    hooks.onResetBytes();
+    for (const audioUrl of audioAttemptList) {
+      throwIfAborted(signal);
+      hooks.onResetBytes();
 
-    const fetchFn = createMediabunnyFetchFn(signal);
-    const getRetryDelay = createUrlSourceRetryPolicy(signal);
+      const fetchFn = createMediabunnyFetchFn(signal);
+      const getRetryDelay = createUrlSourceRetryPolicy(signal);
 
-    const videoSource = new UrlSource(videoUrl, {
-      fetchFn,
-      requestInit: { credentials: 'omit' },
-      getRetryDelay,
-    });
-    const audioSource = audioUrl
-      ? new UrlSource(audioUrl, {
-          fetchFn,
-          requestInit: { credentials: 'omit' },
-          getRetryDelay,
-        })
-      : null;
+      const videoSource = new UrlSource(videoUrl, {
+        fetchFn,
+        requestInit: { credentials: 'omit' },
+        getRetryDelay,
+      });
+      const audioSource = audioUrl
+        ? new UrlSource(audioUrl, {
+            fetchFn,
+            requestInit: { credentials: 'omit' },
+            getRetryDelay,
+          })
+        : null;
 
-    videoSource.on('read', ({ start, end }) => {
-      if (end > start) {
-        hooks.onDeltaBytes(end - start);
-      }
-    });
-    audioSource?.on('read', ({ start, end }) => {
-      if (end > start) {
-        hooks.onDeltaBytes(end - start);
-      }
-    });
+      videoSource.on('read', ({ start, end }) => {
+        if (end > start) {
+          hooks.onDeltaBytes(end - start);
+        }
+      });
+      audioSource?.on('read', ({ start, end }) => {
+        if (end > start) {
+          hooks.onDeltaBytes(end - start);
+        }
+      });
 
-    const videoInput = new Input({
-      source: videoSource,
-      formats: DASH_VIDEO_FORMATS,
-    });
-    const audioInput = audioSource
-      ? new Input({
-          source: audioSource,
-          formats: DASH_AUDIO_FORMATS,
-        })
-      : null;
+      const videoInput = new Input({
+        source: videoSource,
+        formats: DASH_VIDEO_FORMATS,
+      });
+      const audioInput = audioSource
+        ? new Input({
+            source: audioSource,
+            formats: DASH_AUDIO_FORMATS,
+          })
+        : null;
 
-    let activeOutput: Output | null = null;
-    let videoConversion: Conversion | null = null;
-    let audioConversion: Conversion | null = null;
+      let activeOutput: Output | null = null;
+      let videoConversion: Conversion | null = null;
+      let audioConversion: Conversion | null = null;
 
-    const onAbort = (): void => {
-      void videoConversion?.cancel().catch(() => undefined);
-      void audioConversion?.cancel().catch(() => undefined);
-      void activeOutput?.cancel().catch(() => undefined);
-      videoInput.dispose();
-      audioInput?.dispose();
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
+      const onAbort = (): void => {
+        void videoConversion?.cancel().catch(() => undefined);
+        void audioConversion?.cancel().catch(() => undefined);
+        void activeOutput?.cancel().catch(() => undefined);
+        videoInput.dispose();
+        audioInput?.dispose();
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
 
-    try {
-      const [videoSize, audioSize] = await Promise.all([
-        videoSource.getSizeOrNull().catch(() => null),
-        audioSource ? audioSource.getSizeOrNull().catch(() => null) : Promise.resolve(0),
-      ]);
+      try {
+        const [videoSize, audioSize] = await Promise.all([
+          videoSource.getSizeOrNull().catch(() => null),
+          audioSource ? audioSource.getSizeOrNull().catch(() => null) : Promise.resolve(0),
+        ]);
 
-      const knownTotal = (videoSize ?? 0) + (audioSize ?? 0);
-      if (knownTotal > 0) {
-        hooks.onKnownTotalBytes(knownTotal);
-      }
+        const knownTotal = (videoSize ?? 0) + (audioSize ?? 0);
+        if (knownTotal > 0) {
+          hooks.onKnownTotalBytes(knownTotal);
+        }
 
-      const outputBytes = await withOpfsStreamTarget(
-        itemId,
-        asset.relativePath,
-        signal,
-        async (streamTarget) => {
-          const output = new Output({
-            format: new Mp4OutputFormat({ fastStart: false }),
-            target: streamTarget,
-          });
-          activeOutput = output;
+        const outputBytes = await withOpfsStreamTarget(
+          itemId,
+          asset.relativePath,
+          signal,
+          async (streamTarget) => {
+            const output = new Output({
+              format: new Mp4OutputFormat({ fastStart: false }),
+              target: streamTarget,
+            });
+            activeOutput = output;
 
-          videoConversion = await Conversion.init({
-            input: videoInput,
-            output,
-            composable: true,
-            copy: { mode: 'preferred' },
-            ...(audioInput ? { audio: { discard: true } } : {}),
-            showWarnings: false,
-          });
-
-          if (audioInput) {
-            audioConversion = await Conversion.init({
-              input: audioInput,
+            videoConversion = await Conversion.init({
+              input: videoInput,
               output,
               composable: true,
               copy: { mode: 'preferred' },
-              video: { discard: true },
+              ...(audioInput ? { audio: { discard: true } } : {}),
               showWarnings: false,
             });
-          }
 
-          if (!output.hasEnoughTracks()) {
-            throw new Error(
-              `No valid tracks found when muxing DASH stream for asset "${asset.id}".`,
-            );
-          }
+            if (audioInput) {
+              audioConversion = await Conversion.init({
+                input: audioInput,
+                output,
+                composable: true,
+                copy: { mode: 'preferred' },
+                video: { discard: true },
+                showWarnings: false,
+              });
+            }
 
-          throwIfAborted(signal);
-          await output.start();
+            if (!output.hasEnoughTracks()) {
+              throw new Error(
+                `No valid tracks found when muxing DASH stream for asset "${asset.id}".`,
+              );
+            }
 
-          const executions: Promise<void>[] = [videoConversion.execute()];
-          if (audioConversion) {
-            executions.push(audioConversion.execute());
-          }
-          await Promise.all(executions);
+            throwIfAborted(signal);
+            await output.start();
 
-          throwIfAborted(signal);
-          await output.finalize();
-        },
-      );
+            const executions: Promise<void>[] = [videoConversion.execute()];
+            if (audioConversion) {
+              executions.push(audioConversion.execute());
+            }
+            await Promise.all(executions);
 
-      return outputBytes;
-    } catch (error) {
-      if (signal?.aborted || isAbortError(error)) {
-        throw createAbortError(signal);
+            throwIfAborted(signal);
+            await output.finalize();
+          },
+        );
+
+        return outputBytes;
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) {
+          throw createAbortError(signal);
+        }
+        lastError = error;
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+        videoInput.dispose();
+        audioInput?.dispose();
       }
-      lastError = error;
-    } finally {
-      signal?.removeEventListener('abort', onAbort);
-      videoInput.dispose();
-      audioInput?.dispose();
     }
   }
 
@@ -1672,12 +1689,16 @@ async function generateOfflineThumbnail(
 export async function executeDownloadJob(
   input: DownloadJobInput,
 ): Promise<DownloadJobResult> {
-  const { itemId, assets, signal, onProgress } = input;
+  const { itemId, assets, allowAllAssetsFailed = false, signal, onProgress } =
+    input;
   throwIfAborted(signal);
 
   const resultAssets: MediaAsset[] = assets.map((asset) => ({
     ...asset,
     ...(asset.fallbackUrls ? { fallbackUrls: [...asset.fallbackUrls] } : {}),
+    ...(asset.audioFallbackUrls
+      ? { audioFallbackUrls: [...asset.audioFallbackUrls] }
+      : {}),
   }));
 
   const tracker = new ThrottledProgressTracker(resultAssets, onProgress);
@@ -1754,29 +1775,31 @@ export async function executeDownloadJob(
 
     throwIfAborted(signal);
 
-    // 3. 容错评估：封面失败不阻断成功的主体媒体；主体媒体全军覆没则抛出明确错误
-    const primaryAssets = resultAssets.filter((asset) => asset.kind !== 'cover');
-    if (primaryAssets.length > 0) {
-      const hasAnyPrimarySuccess = primaryAssets.some(
-        (asset) => asset.downloaded,
-      );
-      if (!hasAnyPrimarySuccess) {
-        const reasons = [...failureMessages.values()];
-        throw new Error(
-          reasons.length > 0
-            ? `All primary media assets failed to download: ${reasons[0]}`
-            : 'All primary media assets failed to download.',
+    // 3. 容错评估：封面失败不阻断成功的主体媒体；文章类允许可选外链图片失败；其余主体媒体全军覆没则抛出明确错误
+    if (!allowAllAssetsFailed) {
+      const primaryAssets = resultAssets.filter((asset) => asset.kind !== 'cover');
+      if (primaryAssets.length > 0) {
+        const hasAnyPrimarySuccess = primaryAssets.some(
+          (asset) => asset.downloaded,
         );
-      }
-    } else if (resultAssets.length > 0) {
-      const hasAnySuccess = resultAssets.some((asset) => asset.downloaded);
-      if (!hasAnySuccess) {
-        const reasons = [...failureMessages.values()];
-        throw new Error(
-          reasons.length > 0
-            ? `All media assets failed to download: ${reasons[0]}`
-            : 'All media assets failed to download.',
-        );
+        if (!hasAnyPrimarySuccess) {
+          const reasons = [...failureMessages.values()];
+          throw new Error(
+            reasons.length > 0
+              ? `All primary media assets failed to download: ${reasons[0]}`
+              : 'All primary media assets failed to download.',
+          );
+        }
+      } else if (resultAssets.length > 0) {
+        const hasAnySuccess = resultAssets.some((asset) => asset.downloaded);
+        if (!hasAnySuccess) {
+          const reasons = [...failureMessages.values()];
+          throw new Error(
+            reasons.length > 0
+              ? `All media assets failed to download: ${reasons[0]}`
+              : 'All media assets failed to download.',
+          );
+        }
       }
     }
 

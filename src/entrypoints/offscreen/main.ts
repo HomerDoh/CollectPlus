@@ -62,12 +62,13 @@ async function runDownloadTask(
   message: OffscreenStartDownloadMessage,
   controller: AbortController,
 ): Promise<void> {
-  const { taskId, itemId, assets } = message;
+  const { taskId, itemId, assets, allowAllAssetsFailed } = message;
 
   try {
     const result = await executeDownloadJob({
       itemId,
       assets,
+      ...(allowAllAssetsFailed !== undefined ? { allowAllAssetsFailed } : {}),
       signal: controller.signal,
       onProgress: (snapshot) => {
         void sendToBackground({

@@ -163,6 +163,11 @@ export function platformMeta(platform: PlatformId): PlatformVisual {
         label: 'B站',
         badgeClass: 'bg-pink-600/85 text-white backdrop-blur-xs',
       };
+    case 'v2ex':
+      return {
+        label: 'V2EX',
+        badgeClass: 'bg-teal-700/85 text-white backdrop-blur-xs',
+      };
     case 'zhihu':
       return {
         label: '知乎',

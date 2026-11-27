@@ -25,9 +25,9 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
             }));
           });
         },
-        { message: '等待 Background 同步抖音会话级 DNR 规则' },
+        { message: '等待 Background 同步抖音/B站/V2EX/小红书/知乎 会话级 DNR 规则' },
       )
-      .toHaveLength(7);
+      .toHaveLength(18);
 
     const rules = await serviceWorker.evaluate(
       async (): Promise<DnrRuleSummary[]> => {

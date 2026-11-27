@@ -28,6 +28,8 @@ export type PlatformFilter =
   | 'all'
   | 'douyin'
   | 'bilibili'
+  | 'v2ex'
+  | 'xiaohongshu'
   | 'zhihu'
   | 'youtube'
   | 'twitter';
@@ -654,6 +656,8 @@ export function SidebarTree({
                   { value: 'all', label: '全部' },
                   { value: 'douyin', label: '抖音' },
                   { value: 'bilibili', label: 'B站' },
+                  { value: 'v2ex', label: 'V2EX' },
+                  { value: 'xiaohongshu', label: '小红书' },
                   { value: 'zhihu', label: '知乎' },
                   { value: 'youtube', label: 'YouTube' },
                   { value: 'twitter', label: 'X' },

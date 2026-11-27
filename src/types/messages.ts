@@ -288,6 +288,8 @@ export interface OffscreenStartDownloadMessage {
   platform: PlatformId;
   relativeDir: string;
   assets: MediaAsset[];
+  /** 文章类条目允许可选内嵌图片全部失败而不阻断正文与评论归档 */
+  allowAllAssetsFailed?: boolean;
 }
 
 export interface OffscreenStageCommentsMessage {

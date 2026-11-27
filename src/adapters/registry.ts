@@ -1,16 +1,27 @@
 /**
  * 多平台适配器全局注册中心。
  *
- * 当前注册一期抖音适配器（`douyinAdapter`），
- * 结构保持开放以支持二期平滑接入 B 站、小红书、X、Instagram 等平台适配器。
+ * 已注册抖音（`douyinAdapter`）、B站（`bilibiliAdapter`）、V2EX（`v2exAdapter`）、
+ * 小红书（`xiaohongshuAdapter`）与知乎（`zhihuAdapter`）独立适配器，
+ * 结构保持开放以支持平滑接入更多内容平台。
  */
 
 import type { PlatformDnrSpec } from '../download/dnr.ts';
 import type { PlatformAdapter } from '../types/adapter.ts';
 import type { PlatformId } from '../types/schema.ts';
+import { bilibiliAdapter } from './bilibili/parser.ts';
 import { douyinAdapter } from './douyin/parser.ts';
+import { v2exAdapter } from './v2ex/parser.ts';
+import { xiaohongshuAdapter } from './xiaohongshu/parser.ts';
+import { zhihuAdapter } from './zhihu/parser.ts';
 
-const REGISTERED_ADAPTERS: readonly PlatformAdapter[] = [douyinAdapter];
+const REGISTERED_ADAPTERS: readonly PlatformAdapter[] = [
+  douyinAdapter,
+  bilibiliAdapter,
+  v2exAdapter,
+  xiaohongshuAdapter,
+  zhihuAdapter,
+];
 
 const ADAPTER_BY_ID: ReadonlyMap<PlatformId, PlatformAdapter> = new Map(
   REGISTERED_ADAPTERS.map((adapter) => [adapter.id, adapter]),

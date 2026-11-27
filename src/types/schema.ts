@@ -12,6 +12,7 @@ export const SCHEMA_VERSION = 1 as const;
 export const PLATFORM_IDS = [
   'douyin',
   'bilibili',
+  'v2ex',
   'zhihu',
   'youtube',
   'xiaohongshu',
@@ -70,6 +71,8 @@ export interface MediaAsset {
   fallbackUrls?: string[];
   /** 预留 DASH 音视频分离流混流时的音频轨道地址 */
   audioUrl?: string;
+  /** DASH 音视频分离流混流时的备用音频轨道地址列表 */
+  audioFallbackUrls?: string[];
   /** 相对条目目录的路径，例如 'cover.jpg'、'video.mp4'、'media/01.jpg' */
   relativePath: string;
   /** 媒体 MIME 类型 */

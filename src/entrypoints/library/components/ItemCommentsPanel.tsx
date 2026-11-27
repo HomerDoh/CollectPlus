@@ -205,7 +205,7 @@ export function ItemCommentsPanel({
         </span>
         <p className="text-xs font-medium text-slate-600">暂无已保存的离线评论</p>
         <p className="text-[11px] text-slate-400">
-          收藏抖音视频时将自动同步保存前 100 条评论。
+          支持离线评论的平台在收藏时将自动同步保存前 100 条评论或回复。
         </p>
         <button
           type="button"

@@ -48,6 +48,8 @@ export interface CapturedAssetInput {
   fallbackUrls?: string[];
   /** DASH 音视频分离流混流时的音频轨道地址 */
   audioUrl?: string;
+  /** DASH 音视频分离流混流时的备用音频轨道地址列表 */
+  audioFallbackUrls?: string[];
   /** 媒体 MIME 类型 */
   mimeType: string;
   /** 像素宽度 */

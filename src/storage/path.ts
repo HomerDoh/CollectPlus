@@ -429,6 +429,9 @@ export function buildMediaAssetsFromPayload(payload: CapturedPayload): {
         ? { fallbackUrls: [...input.fallbackUrls] }
         : {}),
       ...(input.audioUrl !== undefined ? { audioUrl: input.audioUrl } : {}),
+      ...(input.audioFallbackUrls && input.audioFallbackUrls.length > 0
+        ? { audioFallbackUrls: [...input.audioFallbackUrls] }
+        : {}),
       ...(input.width !== undefined ? { width: input.width } : {}),
       ...(input.height !== undefined ? { height: input.height } : {}),
       ...(input.durationSec !== undefined

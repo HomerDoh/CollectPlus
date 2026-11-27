@@ -363,6 +363,7 @@ async function pumpDownloadQueue(): Promise<void> {
             platform: item.platform,
             relativeDir: item.relativeDir,
             assets: item.assets,
+            ...(item.kind === 'article' ? { allowAllAssetsFailed: true } : {}),
           });
 
           if (!response || !response.ok) {

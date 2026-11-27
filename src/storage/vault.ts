@@ -1530,6 +1530,9 @@ function parseMediaAsset(raw: unknown): MediaAsset | null {
   const fallbackUrls = Array.isArray(raw.fallbackUrls)
     ? raw.fallbackUrls.filter((u): u is string => typeof u === 'string')
     : undefined;
+  const audioFallbackUrls = Array.isArray(raw.audioFallbackUrls)
+    ? raw.audioFallbackUrls.filter((u): u is string => typeof u === 'string')
+    : undefined;
 
   return {
     id: raw.id,
@@ -1541,6 +1544,9 @@ function parseMediaAsset(raw: unknown): MediaAsset | null {
     downloaded: typeof raw.downloaded === 'boolean' ? raw.downloaded : true,
     ...(fallbackUrls && fallbackUrls.length > 0 ? { fallbackUrls } : {}),
     ...(typeof raw.audioUrl === 'string' ? { audioUrl: raw.audioUrl } : {}),
+    ...(audioFallbackUrls && audioFallbackUrls.length > 0
+      ? { audioFallbackUrls }
+      : {}),
     ...(typeof raw.sizeBytes === 'number' && Number.isFinite(raw.sizeBytes)
       ? { sizeBytes: raw.sizeBytes }
       : {}),
