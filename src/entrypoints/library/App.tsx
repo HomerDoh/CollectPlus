@@ -232,7 +232,6 @@ export default function App() {
   const [mediaKindFilter, setMediaKindFilter] =
     useState<MediaKindFilter>('all');
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>('all');
-  const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<SortOption>('collectedAt');
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
@@ -735,7 +734,6 @@ export default function App() {
       );
       closeItemDrawer();
       setSelectedFolderId(null);
-      setSelectedTag(null);
       setActiveView('all');
       if (vaultHandle && permissionState === 'granted') {
         setShowRebuildSuggestion(true);
@@ -983,10 +981,6 @@ export default function App() {
         return false;
       }
 
-      if (selectedTag !== null && !item.tags.includes(selectedTag)) {
-        return false;
-      }
-
       if (trimmedQuery && !searchRankMap.has(item.id)) {
         return false;
       }
@@ -1027,7 +1021,6 @@ export default function App() {
     selectedFolderId,
     mediaKindFilter,
     platformFilter,
-    selectedTag,
     searchQuery,
     sortBy,
     searchIndexVersion,
@@ -1060,7 +1053,6 @@ export default function App() {
     searchQuery.trim().length > 0 ||
     mediaKindFilter !== 'all' ||
     platformFilter !== 'all' ||
-    selectedTag !== null ||
     selectedFolderId !== null ||
     activeView === 'uncategorized' ||
     activeView === 'pending_sync';
@@ -1069,7 +1061,6 @@ export default function App() {
     setSearchQuery('');
     setMediaKindFilter('all');
     setPlatformFilter('all');
-    setSelectedTag(null);
     setSelectedFolderId(null);
     if (activeView !== 'trash') {
       setActiveView('all');
@@ -1100,12 +1091,10 @@ export default function App() {
       <SidebarTree
         items={items}
         folders={folders}
-        tags={tags}
         activeView={activeView}
         selectedFolderId={selectedFolderId}
         mediaKindFilter={mediaKindFilter}
         platformFilter={platformFilter}
-        selectedTag={selectedTag}
         isSettingsOpen={activePage === 'settings'}
         syncStatus={sidebarSyncStatus}
         onSelectView={(view) => {
@@ -1124,10 +1113,6 @@ export default function App() {
         onSelectPlatform={(platform) => {
           setActivePage('library');
           setPlatformFilter(platform);
-        }}
-        onSelectTag={(tag) => {
-          setActivePage('library');
-          setSelectedTag(tag);
         }}
         onOpenSettings={() => {
           setActivePage('settings');

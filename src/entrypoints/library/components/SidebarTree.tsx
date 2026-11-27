@@ -17,11 +17,10 @@ import {
   Pencil,
   Plus,
   Settings,
-  Tag,
   Trash2,
   X,
 } from 'lucide-react';
-import type { CollectionItemRecord, FolderNode, TagMeta } from '@/types/schema.ts';
+import type { CollectionItemRecord, FolderNode } from '@/types/schema.ts';
 
 export type QuickNavView = 'all' | 'uncategorized' | 'pending_sync' | 'trash';
 export type SidebarSyncStatus = 'syncing' | 'failed';
@@ -37,19 +36,16 @@ export type PlatformFilter =
 export interface SidebarTreeProps {
   items: readonly CollectionItemRecord[];
   folders: readonly FolderNode[];
-  tags: readonly TagMeta[];
   activeView: QuickNavView;
   selectedFolderId: string | null;
   mediaKindFilter: MediaKindFilter;
   platformFilter: PlatformFilter;
-  selectedTag: string | null;
   isSettingsOpen: boolean;
   syncStatus: SidebarSyncStatus;
   onSelectView: (view: QuickNavView) => void;
   onSelectFolder: (folderId: string) => void;
   onSelectMediaKind: (kind: MediaKindFilter) => void;
   onSelectPlatform: (platform: PlatformFilter) => void;
-  onSelectTag: (tagName: string | null) => void;
   onOpenSettings: () => void;
   onOpenVaultSettings: () => void;
   onCreateFolder: (name: string, parentId: string | null) => Promise<void>;
@@ -92,19 +88,16 @@ function buildFolderTree(folders: readonly FolderNode[]): FolderTreeNode[] {
 export function SidebarTree({
   items,
   folders,
-  tags,
   activeView,
   selectedFolderId,
   mediaKindFilter,
   platformFilter,
-  selectedTag,
   isSettingsOpen,
   syncStatus,
   onSelectView,
   onSelectFolder,
   onSelectMediaKind,
   onSelectPlatform,
-  onSelectTag,
   onOpenSettings,
   onOpenVaultSettings,
   onCreateFolder,
@@ -124,21 +117,19 @@ export function SidebarTree({
   const [submitting, setSubmitting] = useState(false);
   const [syncTipOpen, setSyncTipOpen] = useState(false);
 
-  // 计算快捷视图计数、每个文件夹含子级计数、标签使用计数
+  // 计算快捷视图计数与每个文件夹含子级计数
   const {
     allCount,
     uncategorizedCount,
     pendingSyncCount,
     trashCount,
     folderDirectCounts,
-    tagCounts,
   } = useMemo(() => {
     let all = 0;
     let uncategorized = 0;
     let pendingSync = 0;
     let trash = 0;
     const directFolderMap = new Map<string, number>();
-    const tagMap = new Map<string, number>();
 
     for (const item of items) {
       if (item.deletedAt != null) {
@@ -160,9 +151,6 @@ export function SidebarTree({
       ) {
         pendingSync += 1;
       }
-      for (const tagName of item.tags) {
-        tagMap.set(tagName, (tagMap.get(tagName) ?? 0) + 1);
-      }
     }
 
     return {
@@ -171,7 +159,6 @@ export function SidebarTree({
       pendingSyncCount: pendingSync,
       trashCount: trash,
       folderDirectCounts: directFolderMap,
-      tagCounts: tagMap,
     };
   }, [items]);
 
@@ -192,14 +179,6 @@ export function SidebarTree({
     }
     return totals;
   }, [folderTree, folderDirectCounts]);
-
-  const sortedTags = useMemo(() => {
-    return [...tags].sort(
-      (a, b) =>
-        (tagCounts.get(b.name) ?? 0) - (tagCounts.get(a.name) ?? 0) ||
-        a.name.localeCompare(b.name),
-    );
-  }, [tags, tagCounts]);
 
   const toggleExpand = (folderId: string) => {
     setExpandedIds((prev) => {
@@ -728,57 +707,6 @@ export function SidebarTree({
           ) : (
             <div className="flex flex-col gap-0.5">
               {folderTree.map((rootNode) => renderFolderNode(rootNode, 0))}
-            </div>
-          )}
-        </section>
-
-        {/* 标签筛选云 */}
-        <section>
-          <div className="mb-2 flex items-center justify-between px-2">
-            <p className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              <Tag className="h-3 w-3" />
-              <span>标签</span>
-            </p>
-            {selectedTag !== null && (
-              <button
-                type="button"
-                onClick={() => onSelectTag(null)}
-                className="text-[11px] font-medium text-indigo-600 hover:underline"
-              >
-                清除
-              </button>
-            )}
-          </div>
-
-          {sortedTags.length === 0 ? (
-            <p className="px-2 py-1 text-xs text-slate-400">暂无标签</p>
-          ) : (
-            <div className="flex flex-wrap gap-1.5 px-1">
-              {sortedTags.map((tag) => {
-                const isSelected = selectedTag === tag.name;
-                const count = tagCounts.get(tag.name) ?? 0;
-                return (
-                  <button
-                    key={tag.name}
-                    type="button"
-                    onClick={() => onSelectTag(isSelected ? null : tag.name)}
-                    className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
-                      isSelected
-                        ? 'border-indigo-500 bg-indigo-50 text-indigo-700 shadow-2xs'
-                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
-                    }`}
-                  >
-                    <span
-                      className="h-2 w-2 shrink-0 rounded-full"
-                      style={{ backgroundColor: tag.color }}
-                    />
-                    <span className="truncate">{tag.name}</span>
-                    <span className="shrink-0 text-[10px] tabular-nums opacity-65">
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
             </div>
           )}
         </section>

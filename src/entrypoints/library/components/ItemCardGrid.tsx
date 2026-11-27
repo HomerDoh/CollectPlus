@@ -192,7 +192,7 @@ export function ItemCardGrid({
             </h3>
             <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
               {hasActiveFilters
-                ? '尝试更换检索关键词，或清除文件夹、媒体类型与标签筛选条件。'
+                ? '尝试更换检索关键词，或清除文件夹、媒体类型与来源平台筛选条件。'
                 : isTrashView
                   ? '移入回收站的条目会暂时保存在这里，随时可以一键恢复。'
                   : '打开抖音网页版并点击收藏按钮或按下 Alt+S，作品将自动静默下载并归档到本地。'}

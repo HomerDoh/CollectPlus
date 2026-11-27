@@ -14,6 +14,7 @@ interface SeedItemInput {
   authorName: string;
   collectedAt: number;
   totalSizeBytes: number;
+  tags?: string[];
 }
 
 function buildSeedRecord(input: SeedItemInput): Record<string, unknown> {
@@ -34,7 +35,7 @@ function buildSeedRecord(input: SeedItemInput): Record<string, unknown> {
     collectedAt: input.collectedAt,
     updatedAt: input.collectedAt,
     folderId: null,
-    tags: [],
+    tags: input.tags ?? [],
     note: '',
     relativeDir: `items/${input.platform}/2026-11/20261125_${input.sourceId}`,
     assets: [],
@@ -230,6 +231,7 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
         authorName: '抖音创作者',
         collectedAt: now - 1000,
         totalSizeBytes: 1024 * 1024,
+        tags: ['预设摄影标签'],
       }),
       buildSeedRecord({
         id: '01JFILTERITEM0000000000002',
@@ -351,6 +353,43 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
 
     await platformGroup.getByRole('button', { name: '全部', exact: true }).click();
     await expect(libraryPage.locator('article')).toHaveCount(5);
+
+    // 3. 验证侧边栏不再展示标签栏，但视频详情保留标签编辑且搜索栏可按标签检索
+    const sidebar = libraryPage.locator('aside');
+    await expect(sidebar.getByText('暂无标签')).toHaveCount(0);
+    await expect(sidebar.getByText('预设摄影标签')).toHaveCount(0);
+
+    const searchInput = libraryPage.getByPlaceholder(
+      '全文检索标题、正文、作者、标签、备注...',
+    );
+    await searchInput.fill('预设摄影标签');
+    await expect(libraryPage.locator('article')).toHaveCount(1);
+    await expect(libraryPage.getByText('抖音短视频样本')).toBeVisible();
+    await libraryPage.getByRole('button', { name: '清除搜索' }).click();
+    await expect(libraryPage.locator('article')).toHaveCount(5);
+
+    // 打开视频详情抽屉，确认已有标签保留且可新增标签并被搜索栏检索到
+    await libraryPage
+      .locator('article')
+      .filter({ hasText: '抖音短视频样本' })
+      .click();
+    const videoDialog = libraryPage.getByRole('dialog');
+    await expect(videoDialog).toBeVisible();
+    await expect(videoDialog.getByText('预设摄影标签')).toBeVisible();
+
+    const tagInput = videoDialog.getByPlaceholder('输入标签后回车添加...');
+    await tagInput.fill('新增剪辑标签');
+    await tagInput.press('Enter');
+    await expect(videoDialog.getByText('新增剪辑标签')).toBeVisible();
+    await videoDialog.getByRole('button', { name: '保存修改' }).click();
+    await expect(videoDialog.getByText(/已保存到浏览器索引/)).toBeVisible();
+    await libraryPage.keyboard.press('Escape');
+    await expect(videoDialog).toBeHidden();
+
+    await expect(sidebar.getByText('新增剪辑标签')).toHaveCount(0);
+    await searchInput.fill('新增剪辑标签');
+    await expect(libraryPage.locator('article')).toHaveCount(1);
+    await expect(libraryPage.getByText('抖音短视频样本')).toBeVisible();
 
     expect(pageErrors).toEqual([]);
   });
