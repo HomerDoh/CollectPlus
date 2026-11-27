@@ -25,8 +25,13 @@ import {
   type CaptureOverlaySnapshot,
   type CaptureOverlayStore,
 } from '../components/CaptureOverlay.tsx';
+import { createNativeCollectBuffer } from '../components/native-collect-buffer.ts';
 import type { CaptureTriggerSource } from '../types/adapter.ts';
-import { isContentMessage, sendToBackground } from '../types/messages.ts';
+import {
+  isContentMessage,
+  sendToBackground,
+  type CaptureAutoSyncExclusionInput,
+} from '../types/messages.ts';
 
 const MANUAL_CAPTURE_THROTTLE_MS = 600;
 const V2EX_COMMENT_CAPTURE_LIMIT = 100;
@@ -217,9 +222,12 @@ export default defineContentScript({
       }, delayMs);
     };
 
+    const topicRepliesBySourceId = new Map<string, V2exRawTopicData['replies']>();
+
     const submitTopicData = async (
       topicData: V2exRawTopicData,
       triggerSource: CaptureTriggerSource,
+      autoSyncExclusion?: CaptureAutoSyncExclusionInput,
     ): Promise<'added' | 'deduplicated' | 'failed'> => {
       const payload = v2exAdapter.normalizeRawData(topicData, triggerSource);
       if (!payload) {
@@ -230,6 +238,7 @@ export default defineContentScript({
         target: 'background',
         type: 'CAPTURE_ITEM',
         payload,
+        ...(autoSyncExclusion ? { autoSyncExclusion } : {}),
       });
 
       if (!captureResponse || !captureResponse.ok) {
@@ -246,7 +255,11 @@ export default defineContentScript({
         return 'failed';
       }
 
-      if (!captureResponse.deduplicated && topicData.replies.length > 0) {
+      if (
+        !captureResponse.deduplicated &&
+        captureResponse.skippedReason !== 'auto_sync_excluded' &&
+        topicData.replies.length > 0
+      ) {
         const comments = parseV2exComments(
           topicData.replies,
           V2EX_COMMENT_CAPTURE_LIMIT,
@@ -269,15 +282,72 @@ export default defineContentScript({
       return captureResponse.deduplicated ? 'deduplicated' : 'added';
     };
 
-    const triggerManualCapture = async (
-      triggerSource: CaptureTriggerSource,
-    ): Promise<void> => {
-      const now = Date.now();
-      if (now - lastManualTriggerAt < MANUAL_CAPTURE_THROTTLE_MS) {
+    const nativeCollectBuffer = createNativeCollectBuffer({
+      initialEnabled: true,
+      onToastChange: (nativeCollectToast) => {
+        updateState((prev) => ({ ...prev, nativeCollectToast }));
+      },
+      onSubmit: async (payload, autoSyncExclusion) => {
+        const captureResponse = await sendToBackground({
+          target: 'background',
+          type: 'CAPTURE_ITEM',
+          payload,
+          ...(autoSyncExclusion ? { autoSyncExclusion } : {}),
+        });
+        const replies = topicRepliesBySourceId.get(payload.sourceId);
+        topicRepliesBySourceId.delete(payload.sourceId);
+        if (
+          captureResponse &&
+          captureResponse.ok &&
+          !captureResponse.skippedOversized &&
+          !captureResponse.deduplicated &&
+          captureResponse.skippedReason !== 'auto_sync_excluded' &&
+          replies &&
+          replies.length > 0
+        ) {
+          const comments = parseV2exComments(
+            replies,
+            V2EX_COMMENT_CAPTURE_LIMIT,
+          );
+          if (comments.length > 0) {
+            void sendToBackground({
+              target: 'background',
+              type: 'SAVE_ITEM_COMMENTS',
+              itemId: captureResponse.itemId,
+              platform: 'v2ex',
+              sourceId: payload.sourceId,
+              comments,
+              limit: V2EX_COMMENT_CAPTURE_LIMIT,
+            }).catch((error: unknown) => {
+              console.warn('[Collect+] Failed to save V2EX replies:', error);
+            });
+          }
+        }
+      },
+    });
+
+    const enqueueNativeTopicCollect = (topicData: V2exRawTopicData): void => {
+      const payload = v2exAdapter.normalizeRawData(topicData, 'native_collect');
+      if (!payload) {
         return;
       }
+      topicRepliesBySourceId.set(payload.sourceId, topicData.replies);
+      nativeCollectBuffer.enqueue(payload);
+    };
+
+    const triggerManualCapture = async (
+      triggerSource: CaptureTriggerSource,
+      autoSyncExclusion?: CaptureAutoSyncExclusionInput,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const now = Date.now();
+      if (
+        !autoSyncExclusion &&
+        now - lastManualTriggerAt < MANUAL_CAPTURE_THROTTLE_MS
+      ) {
+        return { ok: true };
+      }
       if (getState().isCapturing) {
-        return;
+        return { ok: false, error: '当前正在处理采集请求，请稍候。' };
       }
 
       lastManualTriggerAt = now;
@@ -289,14 +359,28 @@ export default defineContentScript({
           window.location.href,
         );
         if (!topicData) {
+          const errMsg = '请打开具体的 V2EX 主题页（/t/...）后再操作。';
           console.warn(
             '[Collect+] Current V2EX page is not a collectible topic page.',
           );
-          return;
+          return { ok: false, error: errMsg };
         }
-        await submitTopicData(topicData, triggerSource);
+        nativeCollectBuffer.cancelPending(topicData.topicId);
+        const outcome = await submitTopicData(
+          topicData,
+          triggerSource,
+          autoSyncExclusion,
+        );
+        if (outcome === 'failed') {
+          return { ok: false, error: '提交 V2EX 主题元数据失败，请稍后重试。' };
+        }
+        return { ok: true };
       } catch (error) {
         console.warn('[Collect+] V2EX manual capture failed:', error);
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
       } finally {
         updateState((prev) => ({ ...prev, isCapturing: false }));
       }
@@ -687,13 +771,14 @@ export default defineContentScript({
             window.location.href,
           );
           if (topicData && topicData.topicId === favId) {
-            void submitTopicData(topicData, 'native_collect');
+            enqueueNativeTopicCollect(topicData);
           }
           return;
         }
 
         const unfavId = extractFavoriteHrefTopicId(href, 'unfavorite');
         if (unfavId) {
+          nativeCollectBuffer.cancelPending(unfavId);
           void sendToBackground({
             target: 'background',
             type: 'UNCOLLECT_ITEMS',
@@ -719,7 +804,7 @@ export default defineContentScript({
         window.location.href,
       );
       if (topicData) {
-        void submitTopicData(topicData, 'native_collect');
+        enqueueNativeTopicCollect(topicData);
       }
     }
 
@@ -741,6 +826,13 @@ export default defineContentScript({
           });
           return false;
         }
+        if (message.autoSyncExclusion) {
+          void triggerManualCapture(
+            message.triggerSource,
+            message.autoSyncExclusion,
+          ).then(sendResponse);
+          return true;
+        }
         void triggerManualCapture(message.triggerSource);
         sendResponse({ ok: true });
         return false;
@@ -749,6 +841,7 @@ export default defineContentScript({
       if (message.type === 'CONTENT_PREFERENCES_UPDATED') {
         prefFloatingButtonEnabled = message.floatingButtonEnabled;
         autoSyncAllCollections = message.autoSyncAllCollections;
+        nativeCollectBuffer.setEnabled(message.nativeCollectToastEnabled);
         applyFloatingVisibility();
         if (message.autoSyncAllCollections && currentAccount) {
           void evaluateAccountSync();
@@ -885,6 +978,9 @@ export default defineContentScript({
       if (prefRes && prefRes.ok) {
         prefFloatingButtonEnabled = prefRes.preferences.floatingButtonEnabled;
         autoSyncAllCollections = prefRes.preferences.autoSyncAllCollections;
+        nativeCollectBuffer.setEnabled(
+          prefRes.preferences.nativeCollectToastEnabled,
+        );
         applyFloatingVisibility();
       }
     } catch {
@@ -916,6 +1012,12 @@ export default defineContentScript({
         clearBannerTimer();
         updateState((prev) => ({ ...prev, syncBanner: null }));
       },
+      onSkipNativeCollectPersistence: (reason) => {
+        nativeCollectBuffer.skipWithReason(reason);
+      },
+      onSaveNativeCollectNow: () => {
+        nativeCollectBuffer.flushNow();
+      },
     };
 
     const ui = await createShadowRootUi(ctx, {
@@ -936,6 +1038,7 @@ export default defineContentScript({
 
     ctx.onInvalidated(() => {
       chrome.runtime.onMessage.removeListener(handleRuntimeMessage);
+      nativeCollectBuffer.dispose();
       activeSyncAbortController?.abort();
       clearBannerTimer();
       ui.remove();

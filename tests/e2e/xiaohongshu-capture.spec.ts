@@ -124,11 +124,11 @@ test.describe('Collect+ 小红书独立插件全链路 E2E 验证', () => {
       await xhsPage.click('#mock-xhs-collect');
 
       await libraryPage.getByRole('button', { name: /全部收藏/ }).click();
-      const galleryCard = libraryPage
+      const galleryCards = libraryPage
         .locator('article')
-        .filter({ hasText: MOCK_XHS_GALLERY_TITLE })
-        .first();
-      await expect(galleryCard).toBeVisible({ timeout: 15_000 });
+        .filter({ hasText: MOCK_XHS_GALLERY_TITLE });
+      await expect(galleryCards).toHaveCount(2, { timeout: 15_000 });
+      const galleryCard = galleryCards.first();
       await expect(galleryCard.getByText('待同步')).toBeVisible({
         timeout: 15_000,
       });

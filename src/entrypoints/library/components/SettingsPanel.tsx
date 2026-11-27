@@ -496,6 +496,34 @@ export function SettingsPanel({
                 />
               </div>
 
+              {/* 原生收藏 5 秒取消保存提示 Toast 开关 */}
+              <div className="flex items-center justify-between gap-4 py-3.5">
+                <div className="min-w-0">
+                  <label
+                    htmlFor="setting-native-collect-toast"
+                    className="block text-xs font-semibold text-slate-900"
+                  >
+                    原生收藏时显示 5 秒取消保存提示
+                  </label>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    开启后，在原站点击收藏时页面将弹出 5 秒倒计时提示，可一键选择「支持作者」「稍后观看」等原因跳过本地保存；关闭后直接静默保存（对已打开页面即时生效）
+                  </p>
+                </div>
+                <ToggleSwitch
+                  id="setting-native-collect-toast"
+                  checked={preferences.nativeCollectToastEnabled}
+                  ariaLabel="原生收藏时显示 5 秒取消保存提示"
+                  onChange={(checked) =>
+                    void handlePatchPreferences(
+                      { nativeCollectToastEnabled: checked },
+                      checked
+                        ? '已开启原生收藏 5 秒取消保存提示'
+                        : '已隐藏原生收藏 5 秒取消保存提示',
+                    )
+                  }
+                />
+              </div>
+
               {/* 自动同步全部收藏（总开关） */}
               <div className="flex items-center justify-between gap-4 py-3.5">
                 <div className="min-w-0">

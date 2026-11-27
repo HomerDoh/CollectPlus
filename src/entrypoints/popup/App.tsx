@@ -3,18 +3,34 @@ import {
   AlertCircle,
   BookmarkPlus,
   CheckCircle2,
+  Clock,
+  CloudOff,
   Download,
   ExternalLink,
   FolderOpen,
   FolderSync,
+  Heart,
   Layers,
   Loader2,
   Pin,
   Sparkles,
 } from 'lucide-react';
 import { sendToBackground } from '@/types/messages.ts';
-import { PIN_HINT_PENDING_KEY, type PlatformId } from '@/types/schema.ts';
+import {
+  PIN_HINT_PENDING_KEY,
+  type AutoSyncExclusionReason,
+  type PlatformId,
+} from '@/types/schema.ts';
 import { getErrorMessage } from '../library/utils/format.ts';
+
+const POPUP_SKIP_REASONS: ReadonlyArray<{
+  reason: AutoSyncExclusionReason;
+  label: string;
+}> = [
+  { reason: 'support_author', label: '支持作者' },
+  { reason: 'watch_later', label: '稍后观看' },
+  { reason: 'skip_local_save', label: '仅存元数据' },
+];
 
 interface PopupSummary {
   supportedPlatform: PlatformId | null;
@@ -51,6 +67,9 @@ export default function App() {
   const [captureFeedback, setCaptureFeedback] = useState<CaptureFeedback>({
     state: 'idle',
   });
+  const [skipPanelOpen, setSkipPanelOpen] = useState<boolean>(false);
+  const [skipDetail, setSkipDetail] = useState<string>('');
+  const [skipSubmitting, setSkipSubmitting] = useState<boolean>(false);
 
   const loadStatus = useCallback(async () => {
     setLoadingSummary(true);
@@ -191,6 +210,49 @@ export default function App() {
     }
   };
 
+  const handleSkipLocalPersistence = async (
+    reason: AutoSyncExclusionReason,
+    reasonLabel: string,
+  ) => {
+    setSkipSubmitting(true);
+    setCaptureFeedback({ state: 'idle' });
+    try {
+      const trimmedDetail = skipDetail.trim();
+      const response = await sendToBackground({
+        target: 'background',
+        type: 'TRIGGER_ACTIVE_TAB_CAPTURE',
+        ...(activeTabId !== undefined ? { tabId: activeTabId } : {}),
+        autoSyncExclusion: {
+          reason,
+          ...(trimmedDetail ? { detail: trimmedDetail } : {}),
+        },
+      });
+
+      if (!response.ok) {
+        setCaptureFeedback({
+          state: 'error',
+          message: response.error,
+        });
+        return;
+      }
+
+      setSkipPanelOpen(false);
+      setSkipDetail('');
+      setCaptureFeedback({
+        state: 'success',
+        message: `已取消本地持久化（${reasonLabel}），仅保留元数据并跳过后续自动同步`,
+      });
+      void loadStatus();
+    } catch (error) {
+      setCaptureFeedback({
+        state: 'error',
+        message: getErrorMessage(error),
+      });
+    } finally {
+      setSkipSubmitting(false);
+    }
+  };
+
   const handleOpenLibrary = async (section?: 'vault') => {
     try {
       await sendToBackground({
@@ -308,7 +370,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => void handleTriggerCapture()}
-              disabled={captureFeedback.state === 'loading'}
+              disabled={captureFeedback.state === 'loading' || skipSubmitting}
               className="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-indigo-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-65"
             >
               {captureFeedback.state === 'loading' ? (
@@ -323,6 +385,70 @@ export default function App() {
                 </>
               )}
             </button>
+
+            <button
+              type="button"
+              data-testid="popup-skip-persistence-btn"
+              onClick={() => setSkipPanelOpen((prev) => !prev)}
+              disabled={captureFeedback.state === 'loading' || skipSubmitting}
+              aria-expanded={skipPanelOpen}
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-65"
+            >
+              {skipSubmitting ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-500" />
+                  <span>正在取消本地持久化...</span>
+                </>
+              ) : (
+                <>
+                  <CloudOff className="h-3.5 w-3.5 text-slate-500" />
+                  <span>取消当前内容本地持久化</span>
+                </>
+              )}
+            </button>
+
+            {skipPanelOpen && (
+              <div
+                data-testid="popup-skip-persistence-panel"
+                className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50/90 p-2.5"
+              >
+                <p className="text-[11px] leading-snug text-slate-600">
+                  选择未保存原因（仅保留元数据，后续打开网站不再自动下载）：
+                </p>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {POPUP_SKIP_REASONS.map(({ reason, label }) => (
+                    <button
+                      key={reason}
+                      type="button"
+                      data-testid={`popup-skip-reason-${reason.replaceAll('_', '-')}`}
+                      disabled={skipSubmitting}
+                      onClick={() =>
+                        void handleSkipLocalPersistence(reason, label)
+                      }
+                      className="inline-flex items-center justify-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11px] font-semibold text-slate-700 shadow-2xs transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 disabled:opacity-60"
+                    >
+                      {reason === 'support_author' ? (
+                        <Heart className="h-3 w-3 text-pink-500" />
+                      ) : reason === 'watch_later' ? (
+                        <Clock className="h-3 w-3 text-sky-500" />
+                      ) : (
+                        <CloudOff className="h-3 w-3 text-violet-500" />
+                      )}
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  data-testid="popup-skip-detail-input"
+                  value={skipDetail}
+                  onChange={(e) => setSkipDetail(e.target.value)}
+                  placeholder="补充原因（可选，点击上方原因按钮生效）"
+                  maxLength={120}
+                  className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none"
+                />
+              </div>
+            )}
 
             {captureFeedback.state === 'success' && (
               <div className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[11px] font-medium text-emerald-700">

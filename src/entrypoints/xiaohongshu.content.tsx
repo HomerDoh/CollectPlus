@@ -19,6 +19,7 @@ import {
   type CaptureOverlaySnapshot,
   type CaptureOverlayStore,
 } from '../components/CaptureOverlay.tsx';
+import { createNativeCollectBuffer } from '../components/native-collect-buffer.ts';
 import {
   isPageBridgeMessage,
   PAGE_BRIDGE_CHANNEL,
@@ -38,7 +39,11 @@ import {
   type RequestLoginStateMessage,
   type RequestRemoteUncollectMessage,
 } from '../types/adapter.ts';
-import { isContentMessage, sendToBackground } from '../types/messages.ts';
+import {
+  isContentMessage,
+  sendToBackground,
+  type CaptureAutoSyncExclusionInput,
+} from '../types/messages.ts';
 
 const MANUAL_CAPTURE_THROTTLE_MS = 600;
 const REQUEST_CURRENT_ITEM_TIMEOUT_MS = 5000;
@@ -540,6 +545,7 @@ export default defineContentScript({
       }
       for (const id of sourceIds) {
         recentNativeCaptures.delete(id);
+        nativeCollectBuffer.cancelPending(id);
       }
       try {
         await sendToBackground({
@@ -613,23 +619,28 @@ export default defineContentScript({
 
     const submitCapturedPayload = async (
       payload: CapturedPayload,
-      options?: { forceSave?: boolean },
-    ): Promise<void> => {
+      options?: {
+        forceSave?: boolean;
+        autoSyncExclusion?: CaptureAutoSyncExclusionInput;
+      },
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       const captureResponse = await sendToBackground({
         target: 'background',
         type: 'CAPTURE_ITEM',
         payload,
         ...(options?.forceSave ? { forceSave: true } : {}),
+        ...(options?.autoSyncExclusion
+          ? { autoSyncExclusion: options.autoSyncExclusion }
+          : {}),
       });
 
       if (!captureResponse || !captureResponse.ok) {
-        console.warn(
-          '[Collect+] Failed to submit XHS item:',
+        const error =
           captureResponse && !captureResponse.ok
             ? captureResponse.error
-            : 'Background service did not acknowledge capture.',
-        );
-        return;
+            : 'Background service did not acknowledge capture.';
+        console.warn('[Collect+] Failed to submit XHS item:', error);
+        return { ok: false, error };
       }
 
       if (captureResponse.skippedOversized) {
@@ -646,13 +657,31 @@ export default defineContentScript({
             },
           }));
         }
-        return;
+        return { ok: true };
       }
 
-      if (!captureResponse.deduplicated) {
+      if (
+        !captureResponse.deduplicated &&
+        captureResponse.skippedReason !== 'auto_sync_excluded'
+      ) {
         void fetchAndSaveNoteComments(captureResponse.itemId, payload.sourceId);
       }
+
+      return { ok: true };
     };
+
+    const nativeCollectBuffer = createNativeCollectBuffer({
+      initialEnabled: true,
+      onToastChange: (nativeCollectToast) => {
+        updateState((prev) => ({ ...prev, nativeCollectToast }));
+      },
+      onSubmit: async (payload, autoSyncExclusion) => {
+        await submitCapturedPayload(
+          payload,
+          autoSyncExclusion ? { autoSyncExclusion } : undefined,
+        );
+      },
+    });
 
     const requestCurrentItemFromMainWorld = (
       triggerSource: CaptureTriggerSource,
@@ -679,13 +708,17 @@ export default defineContentScript({
 
     const triggerManualCapture = async (
       triggerSource: CaptureTriggerSource,
-    ): Promise<void> => {
+      autoSyncExclusion?: CaptureAutoSyncExclusionInput,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       const now = Date.now();
-      if (now - lastManualTriggerAt < MANUAL_CAPTURE_THROTTLE_MS) {
-        return;
+      if (
+        !autoSyncExclusion &&
+        now - lastManualTriggerAt < MANUAL_CAPTURE_THROTTLE_MS
+      ) {
+        return { ok: true };
       }
       if (getState().isCapturing) {
-        return;
+        return { ok: false, error: '当前正在处理采集请求，请稍候。' };
       }
 
       lastManualTriggerAt = now;
@@ -693,36 +726,45 @@ export default defineContentScript({
 
       try {
         const response = await requestCurrentItemFromMainWorld(triggerSource);
-        if (!response) {
-          console.warn(
-            isMainBridgeReady
-              ? '[Collect+] Timed out reading current Xiaohongshu note.'
-              : '[Collect+] XHS main world bridge is not ready yet.',
+        let payload: CapturedPayload | null = null;
+        if (
+          response &&
+          response.rawData !== null &&
+          response.rawData !== undefined
+        ) {
+          payload = xiaohongshuAdapter.normalizeRawData(
+            response.rawData,
+            triggerSource,
           );
-          return;
-        }
-        if (response.rawData === null || response.rawData === undefined) {
-          console.warn(
-            '[Collect+] No active Xiaohongshu note found:',
-            response.error ?? 'empty rawData',
-          );
-          return;
         }
 
-        const payload = xiaohongshuAdapter.normalizeRawData(
-          response.rawData,
-          triggerSource,
-        );
+        if (!payload && autoSyncExclusion) {
+          payload = nativeCollectBuffer.peekPendingPayload();
+        }
+
         if (!payload) {
-          console.warn(
-            '[Collect+] Failed to normalize current Xiaohongshu note.',
-          );
-          return;
+          const errMsg = !response
+            ? isMainBridgeReady
+              ? '读取当前小红书笔记超时，请稍后重试。'
+              : '小红书页面采集桥接尚未就绪，请刷新页面后重试。'
+            : response.rawData === null || response.rawData === undefined
+              ? '未检测到当前浏览的小红书笔记。'
+              : '未能解析当前小红书笔记的媒体元数据。';
+          console.warn('[Collect+] XHS capture unavailable:', errMsg);
+          return { ok: false, error: errMsg };
         }
 
-        await submitCapturedPayload(payload);
+        nativeCollectBuffer.cancelPending(payload.sourceId);
+        return await submitCapturedPayload(
+          payload,
+          autoSyncExclusion ? { autoSyncExclusion } : undefined,
+        );
       } catch (error) {
         console.warn('[Collect+] XHS manual capture failed:', error);
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
       } finally {
         updateState((prev) => ({ ...prev, isCapturing: false }));
       }
@@ -758,11 +800,7 @@ export default defineContentScript({
         }
       }
 
-      try {
-        await submitCapturedPayload(payload);
-      } catch (error) {
-        console.warn('[Collect+] XHS native collect sync failed:', error);
-      }
+      nativeCollectBuffer.enqueue(payload);
     };
 
     ctx.addEventListener(window, 'message', (event: MessageEvent<unknown>) => {
@@ -850,25 +888,17 @@ export default defineContentScript({
           break;
         }
 
-        case 'CONTENT_REMOTE_UNCOLLECT': {
-          void requestRemoteUncollectFromMainWorld(message.items)
-            .then((response) => {
-              if (!response) {
-                sendResponse({
-                  ok: false,
-                  error: '小红书页面桥接响应超时，未能同步取消收藏。',
-                });
-                return;
-              }
-              sendResponse({ ok: true, results: response.results });
-            })
-            .catch((error: unknown) => {
-              sendResponse({
-                ok: false,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            });
-          return true;
+        case 'REMOTE_UNCOLLECT_RESPONSE': {
+          isMainBridgeReady = true;
+          const pending = pendingRemoteUncollectRequests.get(
+            event.data.requestId,
+          );
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingRemoteUncollectRequests.delete(event.data.requestId);
+            pending.resolve(event.data);
+          }
+          break;
         }
       }
     });
@@ -906,6 +936,13 @@ export default defineContentScript({
 
       switch (message.type) {
         case 'CONTENT_TRIGGER_CAPTURE':
+          if (message.autoSyncExclusion) {
+            void triggerManualCapture(
+              message.triggerSource,
+              message.autoSyncExclusion,
+            ).then(sendResponse);
+            return true;
+          }
           void triggerManualCapture(message.triggerSource);
           sendResponse({ ok: true });
           return false;
@@ -913,6 +950,7 @@ export default defineContentScript({
         case 'CONTENT_PREFERENCES_UPDATED': {
           const prevAutoSync = autoSyncAllCollections;
           autoSyncAllCollections = message.autoSyncAllCollections;
+          nativeCollectBuffer.setEnabled(message.nativeCollectToastEnabled);
           updateState((prev) => ({
             ...prev,
             floatingButtonEnabled: message.floatingButtonEnabled,
@@ -930,17 +968,25 @@ export default defineContentScript({
           return false;
         }
 
-        case 'REMOTE_UNCOLLECT_RESPONSE': {
-          isMainBridgeReady = true;
-          const pending = pendingRemoteUncollectRequests.get(
-            event.data.requestId,
-          );
-          if (pending) {
-            clearTimeout(pending.timer);
-            pendingRemoteUncollectRequests.delete(event.data.requestId);
-            pending.resolve(event.data);
-          }
-          break;
+        case 'CONTENT_REMOTE_UNCOLLECT': {
+          void requestRemoteUncollectFromMainWorld(message.items)
+            .then((response) => {
+              if (!response) {
+                sendResponse({
+                  ok: false,
+                  error: '小红书页面桥接响应超时，未能同步取消收藏。',
+                });
+                return;
+              }
+              sendResponse({ ok: true, results: response.results });
+            })
+            .catch((error: unknown) => {
+              sendResponse({
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+          return true;
         }
       }
     };
@@ -968,6 +1014,7 @@ export default defineContentScript({
     ctx.onInvalidated(() => {
       chrome.runtime.onMessage.removeListener(runtimeMessageListener);
       window.removeEventListener('keydown', keydownListener, true);
+      nativeCollectBuffer.dispose();
       clearBannerTimer();
       if (activeSyncId !== null) {
         postToMainWorld({
@@ -1027,6 +1074,12 @@ export default defineContentScript({
         pendingOversizedPayload = null;
         updateState((prev) => ({ ...prev, oversizedPrompt: null }));
       },
+      onSkipNativeCollectPersistence: (reason) => {
+        nativeCollectBuffer.skipWithReason(reason);
+      },
+      onSaveNativeCollectNow: () => {
+        nativeCollectBuffer.flushNow();
+      },
     };
 
     try {
@@ -1037,6 +1090,9 @@ export default defineContentScript({
       if (prefResponse && prefResponse.ok) {
         autoSyncAllCollections =
           prefResponse.preferences.autoSyncAllCollections;
+        nativeCollectBuffer.setEnabled(
+          prefResponse.preferences.nativeCollectToastEnabled,
+        );
         updateState((prev) => ({
           ...prev,
           floatingButtonEnabled: prefResponse.preferences.floatingButtonEnabled,

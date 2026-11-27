@@ -9,14 +9,19 @@ import {
   BookmarkPlus,
   CheckCircle2,
   ChevronLeft,
+  Clock,
+  CloudOff,
   ExternalLink,
   HardDrive,
+  Heart,
   Loader2,
   RefreshCw,
   X,
 } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { formatBytes } from '../entrypoints/library/utils/format.ts';
+import type { AutoSyncExclusionReason } from '../types/schema.ts';
+import type { NativeCollectToastState } from './native-collect-buffer.ts';
 
 /** 视频过大提示弹窗自动消失时间（毫秒） */
 const OVERSIZED_PROMPT_AUTO_DISMISS_MS = 5000;
@@ -54,6 +59,7 @@ export interface CaptureOverlaySnapshot {
   syncPrompt: SyncPromptState | null;
   syncBanner: SyncBannerState | null;
   oversizedPrompt?: OversizedPromptState | null;
+  nativeCollectToast?: NativeCollectToastState | null;
 }
 
 /** 轻量外部状态存储接口，供 Content Script 驱动 React Shadow DOM 渲染 */
@@ -72,6 +78,8 @@ export interface CaptureOverlayActions {
   onDismissSyncBanner: () => void;
   onConfirmOversizedSave?: () => void;
   onSkipOversized?: () => void;
+  onSkipNativeCollectPersistence?: (reason: AutoSyncExclusionReason) => void;
+  onSaveNativeCollectNow?: () => void;
 }
 
 export interface CaptureOverlayProps {
@@ -86,11 +94,15 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
     syncPrompt,
     syncBanner,
     oversizedPrompt = null,
+    nativeCollectToast = null,
   } = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [fabCollapsed, setFabCollapsed] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState(5);
+  const [nativeToastSeconds, setNativeToastSeconds] = useState(5);
 
   const oversizedPromptId = oversizedPrompt?.id ?? null;
+  const nativeToastId = nativeCollectToast?.id ?? null;
+  const nativeToastDurationMs = nativeCollectToast?.durationMs ?? 5000;
 
   useEffect(() => {
     if (!oversizedPromptId) {
@@ -115,14 +127,116 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
     };
   }, [oversizedPromptId, actions]);
 
-  if (!floatingButtonEnabled && !syncPrompt && !syncBanner && !oversizedPrompt) {
+  useEffect(() => {
+    if (!nativeToastId) {
+      return;
+    }
+
+    const deadline = Date.now() + nativeToastDurationMs;
+    setNativeToastSeconds(Math.ceil(nativeToastDurationMs / 1000));
+
+    const tickInterval = setInterval(() => {
+      const leftMs = deadline - Date.now();
+      setNativeToastSeconds(Math.max(1, Math.ceil(leftMs / 1000)));
+    }, 200);
+
+    return () => {
+      clearInterval(tickInterval);
+    };
+  }, [nativeToastId, nativeToastDurationMs]);
+
+  if (
+    !floatingButtonEnabled &&
+    !syncPrompt &&
+    !syncBanner &&
+    !oversizedPrompt &&
+    !nativeCollectToast
+  ) {
     return null;
   }
 
   return (
     <div className="cp-overlay-root">
-      {(oversizedPrompt || syncPrompt || syncBanner) && (
+      {(nativeCollectToast || oversizedPrompt || syncPrompt || syncBanner) && (
         <div className="cp-toast-stack">
+          {nativeCollectToast && (
+            <div
+              className="cp-native-collect-toast"
+              role="status"
+              aria-label="原站收藏取消本地持久化快捷提示"
+              data-testid="cp-native-collect-toast"
+            >
+              <div className="cp-sync-card-head">
+                <span className="cp-sync-icon-badge" aria-hidden="true">
+                  <BookmarkPlus size={15} />
+                </span>
+                <div className="cp-sync-card-title-wrap">
+                  <div className="cp-sync-card-title">
+                    已捕获收藏 · {nativeToastSeconds}s 后本地保存
+                  </div>
+                  <div
+                    className="cp-oversized-title"
+                    title={nativeCollectToast.title}
+                  >
+                    {nativeCollectToast.title}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="cp-sync-close-btn"
+                  title="立即本地保存并关闭提示"
+                  aria-label="立即本地保存并关闭提示"
+                  onClick={() => actions.onSaveNativeCollectNow?.()}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <div className="cp-native-toast-hint">
+                不想下载到本地？点选原因仅保留元数据：
+              </div>
+              <div className="cp-native-toast-reasons">
+                <button
+                  type="button"
+                  className="cp-native-reason-btn"
+                  data-testid="cp-skip-reason-support-author"
+                  onClick={() =>
+                    actions.onSkipNativeCollectPersistence?.('support_author')
+                  }
+                >
+                  <Heart size={12} />
+                  <span>支持作者</span>
+                </button>
+                <button
+                  type="button"
+                  className="cp-native-reason-btn"
+                  data-testid="cp-skip-reason-watch-later"
+                  onClick={() =>
+                    actions.onSkipNativeCollectPersistence?.('watch_later')
+                  }
+                >
+                  <Clock size={12} />
+                  <span>稍后观看</span>
+                </button>
+                <button
+                  type="button"
+                  className="cp-native-reason-btn"
+                  data-testid="cp-skip-reason-skip-local"
+                  onClick={() =>
+                    actions.onSkipNativeCollectPersistence?.('skip_local_save')
+                  }
+                >
+                  <CloudOff size={12} />
+                  <span>仅存元数据</span>
+                </button>
+              </div>
+              <div className="cp-oversized-progress-track" aria-hidden="true">
+                <div
+                  key={nativeCollectToast.id}
+                  className="cp-native-progress-bar"
+                />
+              </div>
+            </div>
+          )}
           {oversizedPrompt && (
             <div
               className="cp-oversized-prompt"

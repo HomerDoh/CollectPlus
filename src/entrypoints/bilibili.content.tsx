@@ -19,6 +19,7 @@ import {
   type CaptureOverlaySnapshot,
   type CaptureOverlayStore,
 } from '../components/CaptureOverlay.tsx';
+import { createNativeCollectBuffer } from '../components/native-collect-buffer.ts';
 import {
   isPageBridgeMessage,
   PAGE_BRIDGE_CHANNEL,
@@ -38,7 +39,11 @@ import {
   type RequestLoginStateMessage,
   type RequestRemoteUncollectMessage,
 } from '../types/adapter.ts';
-import { isContentMessage, sendToBackground } from '../types/messages.ts';
+import {
+  isContentMessage,
+  sendToBackground,
+  type CaptureAutoSyncExclusionInput,
+} from '../types/messages.ts';
 
 const MANUAL_CAPTURE_THROTTLE_MS = 600;
 const REQUEST_CURRENT_ITEM_TIMEOUT_MS = 6000;
@@ -539,6 +544,7 @@ export default defineContentScript({
       }
       for (const id of sourceIds) {
         recentNativeCaptures.delete(id);
+        nativeCollectBuffer.cancelPending(id);
       }
       try {
         await sendToBackground({
@@ -612,23 +618,28 @@ export default defineContentScript({
 
     const submitCapturedPayload = async (
       payload: CapturedPayload,
-      options?: { forceSave?: boolean },
-    ): Promise<void> => {
+      options?: {
+        forceSave?: boolean;
+        autoSyncExclusion?: CaptureAutoSyncExclusionInput;
+      },
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       const captureResponse = await sendToBackground({
         target: 'background',
         type: 'CAPTURE_ITEM',
         payload,
         ...(options?.forceSave ? { forceSave: true } : {}),
+        ...(options?.autoSyncExclusion
+          ? { autoSyncExclusion: options.autoSyncExclusion }
+          : {}),
       });
 
       if (!captureResponse || !captureResponse.ok) {
-        console.warn(
-          '[Collect+] Failed to submit Bilibili item:',
+        const error =
           captureResponse && !captureResponse.ok
             ? captureResponse.error
-            : 'Background service did not acknowledge capture.',
-        );
-        return;
+            : 'Background service did not acknowledge capture.';
+        console.warn('[Collect+] Failed to submit Bilibili item:', error);
+        return { ok: false, error };
       }
 
       if (captureResponse.skippedOversized) {
@@ -645,13 +656,32 @@ export default defineContentScript({
             },
           }));
         }
-        return;
+        return { ok: true };
       }
 
-      if (!captureResponse.deduplicated && payload.kind === 'video') {
+      if (
+        !captureResponse.deduplicated &&
+        captureResponse.skippedReason !== 'auto_sync_excluded' &&
+        payload.kind === 'video'
+      ) {
         void fetchAndSaveVideoComments(captureResponse.itemId, payload.sourceId);
       }
+
+      return { ok: true };
     };
+
+    const nativeCollectBuffer = createNativeCollectBuffer({
+      initialEnabled: true,
+      onToastChange: (nativeCollectToast) => {
+        updateState((prev) => ({ ...prev, nativeCollectToast }));
+      },
+      onSubmit: async (payload, autoSyncExclusion) => {
+        await submitCapturedPayload(
+          payload,
+          autoSyncExclusion ? { autoSyncExclusion } : undefined,
+        );
+      },
+    });
 
     const requestCurrentItemFromMainWorld = (
       triggerSource: CaptureTriggerSource,
@@ -678,13 +708,17 @@ export default defineContentScript({
 
     const triggerManualCapture = async (
       triggerSource: CaptureTriggerSource,
-    ): Promise<void> => {
+      autoSyncExclusion?: CaptureAutoSyncExclusionInput,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       const now = Date.now();
-      if (now - lastManualTriggerAt < MANUAL_CAPTURE_THROTTLE_MS) {
-        return;
+      if (
+        !autoSyncExclusion &&
+        now - lastManualTriggerAt < MANUAL_CAPTURE_THROTTLE_MS
+      ) {
+        return { ok: true };
       }
       if (getState().isCapturing) {
-        return;
+        return { ok: false, error: '当前正在处理采集请求，请稍候。' };
       }
 
       lastManualTriggerAt = now;
@@ -692,32 +726,45 @@ export default defineContentScript({
 
       try {
         const response = await requestCurrentItemFromMainWorld(triggerSource);
-        if (!response) {
-          console.warn(
-            isMainBridgeReady
-              ? '[Collect+] Timed out reading current Bilibili video.'
-              : '[Collect+] Bilibili main world bridge is not ready yet.',
+        let payload: CapturedPayload | null = null;
+        if (
+          response &&
+          response.rawData !== null &&
+          response.rawData !== undefined
+        ) {
+          payload = bilibiliAdapter.normalizeRawData(
+            response.rawData,
+            triggerSource,
           );
-          return;
         }
-        if (response.rawData === null || response.rawData === undefined) {
-          console.warn(
-            '[Collect+] No active Bilibili video found:',
-            response.error ?? 'empty rawData',
-          );
-          return;
+
+        if (!payload && autoSyncExclusion) {
+          payload = nativeCollectBuffer.peekPendingPayload();
         }
-        const payload = bilibiliAdapter.normalizeRawData(
-          response.rawData,
-          triggerSource,
-        );
+
         if (!payload) {
-          console.warn('[Collect+] Failed to normalize Bilibili video payload.');
-          return;
+          const errMsg = !response
+            ? isMainBridgeReady
+              ? '读取当前 B站视频超时，请稍后重试。'
+              : 'B站页面采集桥接尚未就绪，请刷新页面后重试。'
+            : response.rawData === null || response.rawData === undefined
+              ? '未检测到当前播放的 B站视频。'
+              : '未能解析当前 B站视频的媒体元数据。';
+          console.warn('[Collect+] Bilibili capture unavailable:', errMsg);
+          return { ok: false, error: errMsg };
         }
-        await submitCapturedPayload(payload);
+
+        nativeCollectBuffer.cancelPending(payload.sourceId);
+        return await submitCapturedPayload(
+          payload,
+          autoSyncExclusion ? { autoSyncExclusion } : undefined,
+        );
       } catch (error) {
         console.warn('[Collect+] Bilibili manual capture failed:', error);
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
       } finally {
         updateState((prev) => ({ ...prev, isCapturing: false }));
       }
@@ -754,11 +801,7 @@ export default defineContentScript({
         }
       }
 
-      try {
-        await submitCapturedPayload(payload);
-      } catch (error) {
-        console.warn('[Collect+] Bilibili native collect sync failed:', error);
-      }
+      nativeCollectBuffer.enqueue(payload);
     };
 
     // 1. 监听 Main World 桥接消息（严格隔离 platform === 'bilibili'）
@@ -892,6 +935,13 @@ export default defineContentScript({
       }
 
       if (message.type === 'CONTENT_TRIGGER_CAPTURE') {
+        if (message.autoSyncExclusion) {
+          void triggerManualCapture(
+            message.triggerSource,
+            message.autoSyncExclusion,
+          ).then(sendResponse);
+          return true;
+        }
         void triggerManualCapture(message.triggerSource);
         sendResponse({ ok: true });
         return false;
@@ -899,6 +949,7 @@ export default defineContentScript({
 
       if (message.type === 'CONTENT_PREFERENCES_UPDATED') {
         autoSyncAllCollections = message.autoSyncAllCollections;
+        nativeCollectBuffer.setEnabled(message.nativeCollectToastEnabled);
         updateState((prev) => ({
           ...prev,
           floatingButtonEnabled: message.floatingButtonEnabled,
@@ -964,6 +1015,9 @@ export default defineContentScript({
       });
       if (prefRes && prefRes.ok) {
         autoSyncAllCollections = prefRes.preferences.autoSyncAllCollections;
+        nativeCollectBuffer.setEnabled(
+          prefRes.preferences.nativeCollectToastEnabled,
+        );
         updateState((prev) => ({
           ...prev,
           floatingButtonEnabled: prefRes.preferences.floatingButtonEnabled,
@@ -1012,6 +1066,12 @@ export default defineContentScript({
         pendingOversizedPayload = null;
         updateState((prev) => ({ ...prev, oversizedPrompt: null }));
       },
+      onSkipNativeCollectPersistence: (reason) => {
+        nativeCollectBuffer.skipWithReason(reason);
+      },
+      onSaveNativeCollectNow: () => {
+        nativeCollectBuffer.flushNow();
+      },
     };
 
     const ui = await createShadowRootUi(ctx, {
@@ -1032,6 +1092,7 @@ export default defineContentScript({
 
     ctx.onInvalidated(() => {
       chrome.runtime.onMessage.removeListener(handleRuntimeMessage);
+      nativeCollectBuffer.dispose();
       clearBannerTimer();
       for (const pending of pendingRequests.values()) {
         clearTimeout(pending.timer);
