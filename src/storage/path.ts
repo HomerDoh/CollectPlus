@@ -5,7 +5,11 @@
  */
 
 import type { CapturedAssetInput, CapturedPayload } from '../types/adapter.ts';
-import type { MediaAsset, PlatformId } from '../types/schema.ts';
+import {
+  sanitizeAssetRequestHeaders,
+  type MediaAsset,
+  type PlatformId,
+} from '../types/schema.ts';
 
 /**
  * Windows / macOS 与 Chromium File System Access API（IsSafePathComponent / IsFilenameLegal）
@@ -188,11 +192,14 @@ export function buildItemRelativeDir(
   title: string,
   collectedAt: number,
 ): string {
+  const safePlatform = sanitizeFilenameSegment(platform, 32, 'web')
+    .toLowerCase()
+    .replace(/\s+/g, '-');
   const yearMonth = formatYearMonth(collectedAt);
   const yearMonthDay = formatYearMonthDay(collectedAt);
   const safeSourceId = sanitizeFilenameSegment(sourceId, 40, 'item');
   const safeTitle = sanitizeTitle(title, 36);
-  return `items/${platform}/${yearMonth}/${yearMonthDay}_${safeSourceId}_${safeTitle}`;
+  return `items/${safePlatform}/${yearMonth}/${yearMonthDay}_${safeSourceId}_${safeTitle}`;
 }
 
 /**
@@ -205,12 +212,17 @@ export function buildFallbackItemRelativeDir(
   collectedAt: number,
   itemId: string,
 ): string {
+  const safePlatform =
+    platform
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '')
+      .slice(0, 32) || 'web';
   const yearMonth = formatYearMonth(collectedAt);
   const yearMonthDay = formatYearMonthDay(collectedAt);
   const asciiSourceId = sourceId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
   const asciiItemId = itemId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
   const safeId = asciiSourceId || asciiItemId || 'item';
-  return `items/${platform}/${yearMonth}/${yearMonthDay}_${safeId}`;
+  return `items/${safePlatform}/${yearMonth}/${yearMonthDay}_${safeId}`;
 }
 
 function isSafeVaultDirSegment(segment: string): boolean {
@@ -346,6 +358,9 @@ export function buildMediaAssetsFromPayload(payload: CapturedPayload): {
   const assets: MediaAsset[] = [];
   let coverRelativePath: string | undefined;
 
+  const defaultHeaders = sanitizeAssetRequestHeaders(
+    payload.defaultRequestHeaders,
+  );
   const trimmedCoverUrl = payload.coverUrl?.trim();
   if (trimmedCoverUrl) {
     const coverExt =
@@ -365,6 +380,7 @@ export function buildMediaAssetsFromPayload(payload: CapturedPayload): {
       ...(payload.coverFallbackUrls && payload.coverFallbackUrls.length > 0
         ? { fallbackUrls: [...payload.coverFallbackUrls] }
         : {}),
+      ...(defaultHeaders ? { requestHeaders: defaultHeaders } : {}),
     };
 
     assets.push(coverAsset);
@@ -417,6 +433,9 @@ export function buildMediaAssetsFromPayload(payload: CapturedPayload): {
       }
     }
 
+    const resolvedHeaders =
+      sanitizeAssetRequestHeaders(input.requestHeaders) ?? defaultHeaders;
+
     const mediaAsset: MediaAsset = {
       id: input.id,
       kind: input.kind,
@@ -442,6 +461,7 @@ export function buildMediaAssetsFromPayload(payload: CapturedPayload): {
       input.sizeBytes > 0
         ? { sizeBytes: Math.floor(input.sizeBytes) }
         : {}),
+      ...(resolvedHeaders ? { requestHeaders: resolvedHeaders } : {}),
     };
 
     assets.push(mediaAsset);

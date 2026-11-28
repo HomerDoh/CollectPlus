@@ -1125,8 +1125,14 @@ export function matchesDouyinUrl(url: string): boolean {
 /** 抖音平台标准适配器实现 */
 export const douyinAdapter: PlatformAdapter = {
   id: 'douyin',
+  tier: 'deep',
   displayName: '抖音',
   hostPatterns: DOUYIN_HOST_PATTERNS,
+  uiMeta: {
+    entryUrl: 'https://www.douyin.com/',
+    badgeClass: 'bg-slate-900/80 text-white backdrop-blur-xs',
+  },
+  remoteUncollectEntryUrl: 'https://www.douyin.com/',
   matchesUrl: matchesDouyinUrl,
   getDnrRules(): readonly DnrHeaderRuleSpec[] {
     return DOUYIN_DNR_RULES;

@@ -16,18 +16,14 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
     await expect
       .poll(
         async () => {
-          return serviceWorker.evaluate(async (): Promise<DnrRuleSummary[]> => {
+          return serviceWorker.evaluate(async (): Promise<number> => {
             const rules = await chrome.declarativeNetRequest.getSessionRules();
-            return rules.map((rule) => ({
-              id: rule.id,
-              urlFilter: rule.condition.urlFilter,
-              initiatorDomains: rule.condition.initiatorDomains,
-            }));
+            return rules.length;
           });
         },
-        { message: '等待 Background 同步抖音/B站/V2EX/小红书/知乎 会话级 DNR 规则' },
+        { message: '等待 Background 同步全部已注册平台静态会话级 DNR 规则' },
       )
-      .toHaveLength(18);
+      .toBeGreaterThanOrEqual(20);
 
     const rules = await serviceWorker.evaluate(
       async (): Promise<DnrRuleSummary[]> => {
@@ -41,6 +37,8 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
     );
 
     for (const rule of rules) {
+      expect(rule.id).toBeGreaterThanOrEqual(1000);
+      expect(rule.id).toBeLessThan(30000);
       expect(rule.initiatorDomains).toEqual([extensionId]);
       expect(rule.urlFilter).toBeTruthy();
     }

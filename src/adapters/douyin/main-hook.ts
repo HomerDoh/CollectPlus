@@ -28,7 +28,12 @@ import {
   type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
-type UnknownRecord = Record<string, unknown>;
+import {
+  isRecord,
+  postBridgeMessage,
+  sleepAbortable,
+  type UnknownRecord,
+} from '../shared/main-bridge.ts';
 
 const INSTALL_LOCK_KEY = Symbol.for('collect-plus:douyin-main-hook-installed');
 const LRU_DEFAULT_CAPACITY = 200;
@@ -199,9 +204,7 @@ function extractCommentId(record: UnknownRecord): string | null {
   return null;
 }
 
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+
 
 function extractAwemeId(record: UnknownRecord): string | null {
   const raw = record.aweme_id ?? record.awemeId;
@@ -383,25 +386,7 @@ export function harvestAwemeObjects(payload: unknown): number {
   return harvestedCount;
 }
 
-function getBridgeTargetOrigin(): string {
-  try {
-    const origin = window.location.origin;
-    if (origin && origin !== 'null') {
-      return origin;
-    }
-  } catch {
-    // 忽略异常并回退到通配 origin
-  }
-  return '*';
-}
 
-function postBridgeMessage(message: PageBridgeMessage): void {
-  try {
-    window.postMessage(message, getBridgeTargetOrigin());
-  } catch {
-    // 静默忽略，避免影响宿主页面
-  }
-}
 
 function resolveRequestUrl(rawUrl: string): URL | null {
   try {
@@ -867,23 +852,7 @@ function handlePassiveCollectionListResponse(payload: unknown): void {
   postBridgeMessage(message);
 }
 
-function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(new DOMException('Aborted', 'AbortError'));
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      window.clearTimeout(timer);
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
+
 
 async function runFullCollectionSync(syncId: string): Promise<void> {
   if (activeSyncId !== null) {

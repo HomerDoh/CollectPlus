@@ -948,8 +948,14 @@ export function matchesXiaohongshuUrl(url: string): boolean {
 /** 小红书平台标准适配器实现 */
 export const xiaohongshuAdapter: PlatformAdapter = {
   id: 'xiaohongshu',
+  tier: 'deep',
   displayName: '小红书',
   hostPatterns: XHS_HOST_PATTERNS,
+  uiMeta: {
+    entryUrl: 'https://www.xiaohongshu.com/',
+    badgeClass: 'bg-rose-600/85 text-white backdrop-blur-xs',
+  },
+  remoteUncollectEntryUrl: 'https://www.xiaohongshu.com/',
   matchesUrl: matchesXiaohongshuUrl,
   getDnrRules(): readonly DnrHeaderRuleSpec[] {
     return XHS_DNR_RULES;

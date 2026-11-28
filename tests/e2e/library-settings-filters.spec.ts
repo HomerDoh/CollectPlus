@@ -21,6 +21,7 @@ interface SeedItemInput {
   collectedAt: number;
   totalSizeBytes: number;
   tags?: string[];
+  sourceUrl?: string;
 }
 
 function buildSeedRecord(input: SeedItemInput): Record<string, unknown> {
@@ -30,7 +31,8 @@ function buildSeedRecord(input: SeedItemInput): Record<string, unknown> {
     dedupeKey: `${input.platform}:${input.sourceId}`,
     platform: input.platform,
     sourceId: input.sourceId,
-    sourceUrl: `https://example.com/${input.platform}/${input.sourceId}`,
+    sourceUrl:
+      input.sourceUrl ?? `https://example.com/${input.platform}/${input.sourceId}`,
     kind: input.kind,
     title: input.title,
     description: input.description,
@@ -424,6 +426,116 @@ test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证',
     await searchInput.fill('新增剪辑标签');
     await expect(libraryPage.locator('article')).toHaveCount(1);
     await expect(libraryPage.getByText('抖音短视频样本')).toBeVisible();
+
+    expect(pageErrors).toEqual([]);
+  });
+
+  test('NSFW 内容过滤开关默认关闭，开启后隐藏 NSFW 标签与 pornhub/xvideos 来源条目', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const libraryPage = await context.newPage();
+    await libraryPage.goto(extensionUrl('library.html'));
+
+    const now = Date.now();
+    const seedItems = [
+      buildSeedRecord({
+        id: '01JNSFWITEM000000000000001',
+        platform: 'douyin',
+        sourceId: 'nsfw-safe',
+        kind: 'video',
+        title: '普通安全条目',
+        description: '安全',
+        authorName: '作者A',
+        collectedAt: now - 1000,
+        totalSizeBytes: 1024,
+      }),
+      buildSeedRecord({
+        id: '01JNSFWITEM000000000000002',
+        platform: 'zhihu',
+        sourceId: 'nsfw-tag',
+        kind: 'article',
+        title: '带标签条目',
+        description: '标签',
+        authorName: '作者B',
+        collectedAt: now - 2000,
+        totalSizeBytes: 1024,
+        tags: ['nsfw'],
+      }),
+      buildSeedRecord({
+        id: '01JNSFWITEM000000000000003',
+        platform: 'twitter',
+        sourceId: 'nsfw-host',
+        kind: 'video',
+        title: '域名来源条目',
+        description: '域名',
+        authorName: '作者C',
+        collectedAt: now - 3000,
+        totalSizeBytes: 1024,
+        sourceUrl: 'https://cn.pornhub.com/view_video.php?viewkey=x',
+      }),
+      buildSeedRecord({
+        id: '01JNSFWITEM000000000000004',
+        platform: 'twitter',
+        sourceId: 'nsfw-lookalike',
+        kind: 'video',
+        title: '相似域名条目',
+        description: '不应被过滤',
+        authorName: '作者D',
+        collectedAt: now - 4000,
+        totalSizeBytes: 1024,
+        sourceUrl: 'https://notxvideos.com/x',
+      }),
+    ];
+
+    await libraryPage.evaluate(async (records) => {
+      await new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open('CollectPlusDB');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const idb = req.result;
+          const tx = idb.transaction('items', 'readwrite');
+          const store = tx.objectStore('items');
+          for (const rec of records) {
+            store.put(rec);
+          }
+          tx.oncomplete = () => {
+            idb.close();
+            resolve();
+          };
+          tx.onerror = () => {
+            idb.close();
+            reject(tx.error);
+          };
+        };
+      });
+    }, seedItems);
+
+    await libraryPage.reload();
+    await expect(libraryPage.locator('article')).toHaveCount(4);
+
+    await libraryPage.getByRole('button', { name: '设置', exact: true }).click();
+    const nsfwSwitch = libraryPage.getByRole('switch', { name: 'NSFW 内容过滤' });
+    await expect(nsfwSwitch).toHaveAttribute('aria-checked', 'false');
+    await nsfwSwitch.click();
+    await expect(nsfwSwitch).toHaveAttribute('aria-checked', 'true');
+
+    await libraryPage.getByRole('button', { name: '全部收藏' }).first().click();
+    await expect(libraryPage.locator('article')).toHaveCount(2);
+    await expect(libraryPage.getByText('普通安全条目')).toBeVisible();
+    await expect(libraryPage.getByText('相似域名条目')).toBeVisible();
+    await expect(libraryPage.getByText('带标签条目')).toHaveCount(0);
+    await expect(libraryPage.getByText('域名来源条目')).toHaveCount(0);
+
+    // 刷新后偏好持久化，关闭后全部恢复
+    await libraryPage.reload();
+    await expect(libraryPage.locator('article')).toHaveCount(2);
+    await libraryPage.getByRole('button', { name: '设置', exact: true }).click();
+    await nsfwSwitch.click();
+    await expect(nsfwSwitch).toHaveAttribute('aria-checked', 'false');
+    await libraryPage.getByRole('button', { name: '全部收藏' }).first().click();
+    await expect(libraryPage.locator('article')).toHaveCount(4);
 
     expect(pageErrors).toEqual([]);
   });

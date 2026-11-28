@@ -143,6 +143,7 @@ test.describe('Collect+ 小红书独立插件全链路 E2E 验证', () => {
 
       // 原生取消收藏 -> 移入回收站
       await xhsPage.click('#mock-xhs-uncollect');
+      await libraryPage.getByTestId('sidebar-more-toggle').click();
       await expect(
         libraryPage.locator('aside').getByRole('button', { name: /^回收站/ }),
       ).toContainText('1', { timeout: 10_000 });

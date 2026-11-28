@@ -1,9 +1,38 @@
 @import "tailwindcss";
+@import "./platform-detail-themes.css";
 
+/* 让 Tailwind v4 `dark:` 变体由根元素 `html[data-theme="dark"]` 驱动 */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * Collect+ Swiss Precision（瑞士极简）设计令牌
+ * 持久化规范见 `design-system/collect-plus/MASTER.md`
+ */
 @layer base {
   :root {
     color-scheme: light;
+    --cp-canvas: #f4f9f8;
+    --cp-surface: #ffffff;
+    --cp-surface-hover: #f9fcfc;
+    --cp-muted: #eaf3f2;
+    --cp-input: #f4f9f8;
+    --cp-active: #e0f5f2;
+    --cp-text: #0f2625;
+    --cp-text-secondary: #375250;
+    --cp-text-muted: #587270;
+    --cp-text-active: #0b7a70;
+    --cp-accent: #0d9488;
+    --cp-accent-hover: #0f766e;
+    --cp-accent-soft: rgba(13, 148, 136, 0.1);
+    --cp-on-accent: #ffffff;
+    --cp-accent-2: #ea580c;
+    --cp-border: #d2e4e1;
+    --cp-border-strong: #9cd0c8;
+    --cp-divider: #e3efed;
+    --cp-scrim: rgba(10, 17, 18, 0.5);
+
     font-family:
+      "Inter",
       "PingFang SC",
       "Hiragino Sans GB",
       "Microsoft YaHei UI",
@@ -19,16 +48,39 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  html[data-theme='dark'] {
+    color-scheme: dark;
+    --cp-canvas: #0a1112;
+    --cp-surface: #0f1819;
+    --cp-surface-hover: #152224;
+    --cp-muted: #19282b;
+    --cp-input: #0b1314;
+    --cp-active: rgba(20, 184, 166, 0.16);
+    --cp-text: #ecfdfb;
+    --cp-text-secondary: #a9c5c2;
+    --cp-text-muted: #7c9d9a;
+    --cp-text-active: #2dd4bf;
+    --cp-accent: #14b8a6;
+    --cp-accent-hover: #2dd4bf;
+    --cp-accent-soft: rgba(20, 184, 166, 0.16);
+    --cp-on-accent: #05201e;
+    --cp-accent-2: #fb923c;
+    --cp-border: #203437;
+    --cp-border-strong: #2e4b4f;
+    --cp-divider: #1a2b2e;
+    --cp-scrim: rgba(2, 8, 9, 0.72);
+  }
+
   body {
     margin: 0;
-    background-color: #f8fafc;
-    color: #0f172a;
+    background-color: var(--cp-canvas);
+    color: var(--cp-text);
     line-height: 1.5;
   }
 
   * {
     scrollbar-width: thin;
-    scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
+    scrollbar-color: var(--cp-border-strong) transparent;
   }
 
   *::-webkit-scrollbar {
@@ -41,11 +93,11 @@
   }
 
   *::-webkit-scrollbar-thumb {
-    background-color: rgba(148, 163, 184, 0.45);
-    border-radius: 9999px;
+    background-color: var(--cp-border-strong);
+    border-radius: 3px;
   }
 
   *::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(100, 116, 139, 0.65);
+    background-color: var(--cp-text-muted);
   }
 }

@@ -29,7 +29,12 @@ import {
   type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
-type UnknownRecord = Record<string, unknown>;
+import {
+  isRecord,
+  postBridgeMessage,
+  sleepAbortable,
+  type UnknownRecord,
+} from '../shared/main-bridge.ts';
 
 const INSTALL_LOCK_KEY = Symbol.for(
   'collect-plus:xiaohongshu-main-hook-installed',
@@ -87,9 +92,7 @@ let internalUncollectFetchInFlight = 0;
 /** 仅存内存的 noteId -> xsec_token 映射（不落盘、不随元数据发送） */
 const memoryXsecTokens = new Map<string, string>();
 
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+
 
 function readString(record: UnknownRecord, key: string): string | undefined {
   const value = record[key];
@@ -426,25 +429,7 @@ function harvestNoteObjects(payload: unknown): number {
   return harvestedCount;
 }
 
-function getBridgeTargetOrigin(): string {
-  try {
-    const origin = window.location.origin;
-    if (origin && origin !== 'null') {
-      return origin;
-    }
-  } catch {
-    // 忽略异常
-  }
-  return '*';
-}
 
-function postBridgeMessage(message: PageBridgeMessage): void {
-  try {
-    window.postMessage(message, getBridgeTargetOrigin());
-  } catch {
-    // 静默忽略，避免干扰宿主页
-  }
-}
 
 function resolveRequestUrl(rawUrl: string): URL | null {
   try {
@@ -966,22 +951,7 @@ function handleInterceptedApiResponse(
   harvestNoteObjects(payload);
 }
 
-function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  }
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
+
 
 async function fetchCommentsForNote(
   noteId: string,

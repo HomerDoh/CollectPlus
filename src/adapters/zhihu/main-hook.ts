@@ -29,7 +29,12 @@ import {
   type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
-type UnknownRecord = Record<string, unknown>;
+import {
+  isRecord,
+  postBridgeMessage,
+  sleepAbortable,
+  type UnknownRecord,
+} from '../shared/main-bridge.ts';
 type ZhihuEntityType = 'answer' | 'article' | 'pin' | 'zvideo';
 
 const INSTALL_LOCK_KEY = Symbol.for('collect-plus:zhihu-main-hook-installed');
@@ -81,9 +86,7 @@ let internalSyncFetchInFlight = 0;
 let internalCommentFetchInFlight = 0;
 let internalUncollectFetchInFlight = 0;
 
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+
 
 function readString(record: UnknownRecord, key: string): string | undefined {
   const value = record[key];
@@ -408,25 +411,7 @@ function harvestEntities(payload: unknown): number {
   return harvestedCount;
 }
 
-function getBridgeTargetOrigin(): string {
-  try {
-    const origin = window.location.origin;
-    if (origin && origin !== 'null') {
-      return origin;
-    }
-  } catch {
-    // 忽略异常
-  }
-  return '*';
-}
 
-function postBridgeMessage(message: PageBridgeMessage): void {
-  try {
-    window.postMessage(message, getBridgeTargetOrigin());
-  } catch {
-    // 静默忽略
-  }
-}
 
 function resolveRequestUrl(rawUrl: string): URL | null {
   try {
@@ -1026,22 +1011,7 @@ function handleInterceptedApiResponse(
   harvestEntities(payload);
 }
 
-function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  }
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
+
 
 function toSameOriginEndpoint(nextUrl: string): string {
   try {

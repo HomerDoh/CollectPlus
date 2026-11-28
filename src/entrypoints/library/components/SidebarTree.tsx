@@ -5,45 +5,46 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Clock,
   CloudOff,
   Film,
   Folder,
   FolderOpen,
   FolderPlus,
-  FolderSync,
   Images,
   Inbox,
   Layers,
+  Monitor,
+  Moon,
   Pencil,
   Plus,
   Settings,
+  SlidersHorizontal,
+  Sun,
   Trash2,
   X,
 } from 'lucide-react';
+import { getAllSiteAdapters } from '@/adapters/registry.ts';
+import { i18n } from '@/i18n/index.ts';
+import { setThemeMode, useTheme, type ThemeMode } from '@/theme/index.ts';
 import {
   getItemFolderIds,
   isAutoSyncExcluded,
   type CollectionItemRecord,
   type FolderNode,
+  type PlatformId,
 } from '@/types/schema.ts';
+import { platformMeta } from '../utils/format.ts';
 
 export type QuickNavView =
   | 'all'
+  | 'recent'
   | 'uncategorized'
-  | 'pending_sync'
   | 'excluded'
   | 'trash';
 export type SidebarSyncStatus = 'syncing' | 'failed';
 export type MediaKindFilter = 'all' | 'video' | 'image_text';
-export type PlatformFilter =
-  | 'all'
-  | 'douyin'
-  | 'bilibili'
-  | 'v2ex'
-  | 'xiaohongshu'
-  | 'zhihu'
-  | 'youtube'
-  | 'twitter';
+export type PlatformFilter = 'all' | PlatformId;
 
 export interface SidebarTreeProps {
   items: readonly CollectionItemRecord[];
@@ -66,6 +67,7 @@ export interface SidebarTreeProps {
   ) => Promise<void | FolderNode>;
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;
+  onEditFolderAutoRule?: (folder: FolderNode) => void;
 }
 
 interface FolderTreeNode {
@@ -118,6 +120,7 @@ export function SidebarTree({
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder,
+  onEditFolderAutoRule,
 }: SidebarTreeProps) {
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -131,19 +134,21 @@ export function SidebarTree({
   const [deletingFolder, setDeletingFolder] = useState<FolderNode | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [syncTipOpen, setSyncTipOpen] = useState(false);
+  const [moreNavExpanded, setMoreNavExpanded] = useState(false);
+  const { mode: themeMode } = useTheme();
 
   // 计算快捷视图计数与每个文件夹含子级去重计数（支持单条目同时属于多个文件夹）
   const {
     allCount,
+    recentCount,
     uncategorizedCount,
-    pendingSyncCount,
     excludedCount,
     trashCount,
     folderDirectItemIds,
   } = useMemo(() => {
     let all = 0;
+    let recent = 0;
     let uncategorized = 0;
-    let pendingSync = 0;
     let excluded = 0;
     let trash = 0;
     const directMap = new Map<string, Set<string>>();
@@ -158,6 +163,9 @@ export function SidebarTree({
         continue;
       }
       all += 1;
+      if (item.openedAt == null) {
+        recent += 1;
+      }
       const itemFolderIds = getItemFolderIds(item);
       if (itemFolderIds.length === 0) {
         uncategorized += 1;
@@ -171,18 +179,12 @@ export function SidebarTree({
           bucket.add(item.id);
         }
       }
-      if (
-        item.syncStatus === 'opfs_staged' ||
-        item.syncStatus === 'meta_dirty'
-      ) {
-        pendingSync += 1;
-      }
     }
 
     return {
       allCount: all,
+      recentCount: recent,
       uncategorizedCount: uncategorized,
-      pendingSyncCount: pendingSync,
       excludedCount: excluded,
       trashCount: trash,
       folderDirectItemIds: directMap,
@@ -283,10 +285,10 @@ export function SidebarTree({
 
   const renderInlineCreateInput = (depth: number) => (
     <div
-      className="my-1 flex items-center gap-1 rounded-lg border border-indigo-300 bg-indigo-50/40 px-2 py-1"
+      className="my-1 flex items-center gap-1 rounded border border-[var(--cp-accent)] bg-[var(--cp-active)] px-2 py-1"
       style={{ marginLeft: `${depth * 14}px` }}
     >
-      <FolderPlus className="h-3.5 w-3.5 shrink-0 text-indigo-600" />
+      <FolderPlus className="h-3.5 w-3.5 shrink-0 text-[var(--cp-accent)]" />
       <input
         type="text"
         value={newFolderName}
@@ -300,16 +302,16 @@ export function SidebarTree({
             setNewFolderName('');
           }
         }}
-        placeholder="输入文件夹名称"
+        placeholder={i18n.t('sidebar.folderNamePlaceholder')}
         autoFocus
-        className="min-w-0 flex-1 bg-transparent text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none"
+        className="min-w-0 flex-1 bg-transparent text-xs text-[var(--cp-text)] placeholder:text-[var(--cp-text-muted)] focus:outline-none"
       />
       <button
         type="button"
         onClick={() => void submitCreateFolder()}
         disabled={submitting}
-        className="rounded p-0.5 text-indigo-600 hover:bg-indigo-100"
-        title="确认创建"
+        className="rounded p-0.5 text-[var(--cp-accent)] hover:bg-[var(--cp-surface)]"
+        title={i18n.t('sidebar.confirmCreateFolderTitle')}
       >
         <Check className="h-3.5 w-3.5" />
       </button>
@@ -319,8 +321,8 @@ export function SidebarTree({
           setCreatingParentId(undefined);
           setNewFolderName('');
         }}
-        className="rounded p-0.5 text-slate-400 hover:bg-slate-200/70 hover:text-slate-600"
-        title="取消"
+        className="rounded p-0.5 text-[var(--cp-text-muted)] hover:bg-[var(--cp-muted)] hover:text-[var(--cp-text)]"
+        title={i18n.t('common.cancel')}
       >
         <X className="h-3.5 w-3.5" />
       </button>
@@ -340,7 +342,7 @@ export function SidebarTree({
       <div key={folder.id}>
         {isRenaming ? (
           <div
-            className="my-0.5 flex items-center gap-1 rounded-lg border border-indigo-300 bg-white px-2 py-1"
+            className="my-0.5 flex items-center gap-1 rounded border border-[var(--cp-accent)] bg-[var(--cp-surface)] px-2 py-1"
             style={{ marginLeft: `${depth * 14}px` }}
           >
             <input
@@ -356,42 +358,46 @@ export function SidebarTree({
                 }
               }}
               autoFocus
-              className="min-w-0 flex-1 bg-transparent text-xs text-slate-900 focus:outline-none"
+              className="min-w-0 flex-1 bg-transparent text-xs text-[var(--cp-text)] focus:outline-none"
             />
             <button
               type="button"
               onClick={() => void submitRenameFolder()}
               disabled={submitting}
-              className="rounded p-0.5 text-indigo-600 hover:bg-indigo-50"
-              title="保存重命名"
+              className="rounded p-0.5 text-[var(--cp-accent)] hover:bg-[var(--cp-active)]"
+              title={i18n.t('sidebar.saveRenameFolderTitle')}
             >
               <Check className="h-3.5 w-3.5" />
             </button>
             <button
               type="button"
               onClick={() => setRenamingFolderId(null)}
-              className="rounded p-0.5 text-slate-400 hover:bg-slate-100"
-              title="取消"
+              className="rounded p-0.5 text-[var(--cp-text-muted)] hover:bg-[var(--cp-muted)]"
+              title={i18n.t('common.cancel')}
             >
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
         ) : (
           <div
-            className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition ${
+            className={`group flex items-center gap-1 rounded px-2 py-1.5 text-xs transition ${
               isSelected
-                ? 'bg-indigo-50 font-semibold text-indigo-700'
-                : 'text-slate-700 hover:bg-slate-100/80'
+                ? 'bg-[var(--cp-active)] font-semibold text-[var(--cp-text-active)]'
+                : 'text-[var(--cp-text-secondary)] hover:bg-[var(--cp-muted)] hover:text-[var(--cp-text)]'
             }`}
             style={{ paddingLeft: `${8 + depth * 14}px` }}
           >
             <button
               type="button"
               onClick={() => toggleExpand(folder.id)}
-              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-400 hover:text-slate-600 ${
+              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cp-text-muted)] hover:text-[var(--cp-text)] ${
                 hasChildren ? 'visible' : 'invisible'
               }`}
-              aria-label={isExpanded ? '折叠子文件夹' : '展开子文件夹'}
+              aria-label={
+                isExpanded
+                  ? i18n.t('sidebar.collapseSubfoldersAria')
+                  : i18n.t('sidebar.expandSubfoldersAria')
+              }
             >
               {isExpanded ? (
                 <ChevronDown className="h-3.5 w-3.5" />
@@ -408,25 +414,49 @@ export function SidebarTree({
               {isSelected || isExpanded ? (
                 <FolderOpen
                   className={`h-3.5 w-3.5 shrink-0 ${
-                    isSelected ? 'text-indigo-600' : 'text-amber-500'
+                    isSelected ? 'text-[var(--cp-accent)]' : 'text-[var(--cp-accent-2)]'
                   }`}
                 />
               ) : (
-                <Folder className="h-3.5 w-3.5 shrink-0 text-slate-400 group-hover:text-amber-500" />
+                <Folder className="h-3.5 w-3.5 shrink-0 text-[var(--cp-text-muted)] group-hover:text-[var(--cp-accent-2)]" />
               )}
               <span className="truncate">{folder.name}</span>
+              {folder.autoRule && (
+                <span
+                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cp-accent)]"
+                  title={i18n.t('sidebar.autoRuleActiveTitle')}
+                />
+              )}
             </button>
 
             {/* 悬浮快捷操作 */}
             <div className="hidden items-center gap-0.5 group-hover:flex">
+              {onEditFolderAutoRule && (
+                <button
+                  type="button"
+                  data-testid={`sidebar-folder-rule-${folder.id}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onEditFolderAutoRule(folder);
+                  }}
+                  title={i18n.t('sidebar.autoRuleFolderTitle')}
+                  className={`rounded p-0.5 transition hover:bg-[var(--cp-surface)] hover:text-[var(--cp-accent)] ${
+                    folder.autoRule
+                      ? 'text-[var(--cp-accent)]'
+                      : 'text-[var(--cp-text-muted)]'
+                  }`}
+                >
+                  <SlidersHorizontal className="h-3 w-3" />
+                </button>
+              )}
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   startCreateFolder(folder.id);
                 }}
-                title="新建子文件夹"
-                className="rounded p-0.5 text-slate-400 hover:bg-white hover:text-indigo-600"
+                title={i18n.t('sidebar.newSubfolderTitle')}
+                className="rounded p-0.5 text-[var(--cp-text-muted)] hover:bg-[var(--cp-surface)] hover:text-[var(--cp-accent)]"
               >
                 <FolderPlus className="h-3 w-3" />
               </button>
@@ -436,8 +466,8 @@ export function SidebarTree({
                   e.stopPropagation();
                   startRenameFolder(folder);
                 }}
-                title="重命名文件夹"
-                className="rounded p-0.5 text-slate-400 hover:bg-white hover:text-indigo-600"
+                title={i18n.t('sidebar.renameFolderTitle')}
+                className="rounded p-0.5 text-[var(--cp-text-muted)] hover:bg-[var(--cp-surface)] hover:text-[var(--cp-accent)]"
               >
                 <Pencil className="h-3 w-3" />
               </button>
@@ -447,8 +477,8 @@ export function SidebarTree({
                   e.stopPropagation();
                   setDeletingFolder(folder);
                 }}
-                title="删除文件夹"
-                className="rounded p-0.5 text-slate-400 hover:bg-white hover:text-rose-600"
+                title={i18n.t('sidebar.deleteFolderTitle')}
+                className="rounded p-0.5 text-[var(--cp-text-muted)] hover:bg-[var(--cp-surface)] hover:text-rose-600 dark:hover:text-rose-400"
               >
                 <Trash2 className="h-3 w-3" />
               </button>
@@ -456,7 +486,7 @@ export function SidebarTree({
 
             <span
               className={`shrink-0 text-[11px] tabular-nums group-hover:hidden ${
-                isSelected ? 'text-indigo-600' : 'text-slate-400'
+                isSelected ? 'text-[var(--cp-text-active)]' : 'text-[var(--cp-text-muted)]'
               }`}
             >
               {count}
@@ -473,49 +503,112 @@ export function SidebarTree({
     );
   };
 
-  const navItems: Array<{
+  const primaryNavItems: Array<{
     key: QuickNavView;
     label: string;
     count: number;
     icon: typeof Layers;
-    highlightAmber?: boolean;
   }> = [
-    { key: 'all', label: '全部收藏', count: allCount, icon: Layers },
+    { key: 'all', label: i18n.t('sidebar.navAll'), count: allCount, icon: Layers },
+    {
+      key: 'recent',
+      label: i18n.t('sidebar.navRecent'),
+      count: recentCount,
+      icon: Clock,
+    },
     {
       key: 'uncategorized',
-      label: '未分类',
+      label: i18n.t('sidebar.navUncategorized'),
       count: uncategorizedCount,
       icon: Inbox,
     },
-    {
-      key: 'pending_sync',
-      label: '待同步',
-      count: pendingSyncCount,
-      icon: FolderSync,
-      highlightAmber: pendingSyncCount > 0,
-    },
+  ];
+
+  const collapsedNavItems: Array<{
+    key: QuickNavView;
+    label: string;
+    count: number;
+    icon: typeof Layers;
+  }> = [
     {
       key: 'excluded',
-      label: '不自动同步',
+      label: i18n.t('sidebar.navExcluded'),
       count: excludedCount,
       icon: CloudOff,
     },
-    { key: 'trash', label: '回收站', count: trashCount, icon: Trash2 },
+    { key: 'trash', label: i18n.t('sidebar.navTrash'), count: trashCount, icon: Trash2 },
+  ];
+
+  const renderNavItem = (nav: {
+    key: QuickNavView;
+    label: string;
+    count: number;
+    icon: typeof Layers;
+  }) => {
+    const Icon = nav.icon;
+    const isActive =
+      !isSettingsOpen &&
+      selectedFolderId === null &&
+      activeView === nav.key;
+    return (
+      <button
+        key={nav.key}
+        type="button"
+        onClick={() => onSelectView(nav.key)}
+        className={`flex w-full items-center justify-between rounded px-2.5 py-2 text-xs font-medium transition ${
+          isActive
+            ? 'bg-[var(--cp-active)] text-[var(--cp-text-active)] font-semibold'
+            : 'text-[var(--cp-text-secondary)] hover:bg-[var(--cp-muted)] hover:text-[var(--cp-text)]'
+        }`}
+      >
+        <span className="flex items-center gap-2">
+          <Icon
+            className={`h-4 w-4 ${
+              isActive
+                ? 'text-[var(--cp-accent)]'
+                : 'text-[var(--cp-text-muted)]'
+            }`}
+          />
+          <span>{nav.label}</span>
+        </span>
+        <span
+          className={`rounded px-1.5 py-0.5 text-[11px] tabular-nums ${
+            isActive
+              ? 'bg-[var(--cp-accent-soft)] font-semibold text-[var(--cp-text-active)]'
+              : 'text-[var(--cp-text-muted)]'
+          }`}
+        >
+          {nav.count}
+        </span>
+      </button>
+    );
+  };
+
+  const themeOptions: ReadonlyArray<{
+    value: ThemeMode;
+    label: string;
+    icon: typeof Monitor;
+  }> = [
+    { value: 'system', label: i18n.t('sidebar.themeSystem'), icon: Monitor },
+    { value: 'light', label: i18n.t('sidebar.themeLight'), icon: Sun },
+    { value: 'dark', label: i18n.t('sidebar.themeDark'), icon: Moon },
   ];
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-slate-200 bg-white">
+    <aside className="flex w-64 shrink-0 flex-col border-r border-[var(--cp-border)] bg-[var(--cp-surface)]">
       {/* 品牌头部 */}
-      <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3.5">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--cp-divider)] px-4 py-3.5">
         <div className="flex min-w-0 items-center gap-2.5">
-          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-xs">
+          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded bg-[var(--cp-accent)] text-[var(--cp-on-accent)]">
             <BookmarkPlus className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-bold tracking-tight text-slate-900">
+            <h1 className="truncate text-sm font-bold tracking-tight text-[var(--cp-text)]">
               Collect+
             </h1>
-            <p className="truncate text-[11px] text-slate-500">本地离线媒体库</p>
+            <p className="truncate text-[11px] text-[var(--cp-text-muted)]">
+              {i18n.t('sidebar.subtitle')}
+            </p>
           </div>
         </div>
 
@@ -535,19 +628,25 @@ export function SidebarTree({
             type="button"
             data-testid="sidebar-sync-status"
             aria-describedby={syncTipOpen ? 'sidebar-sync-tooltip' : undefined}
-            className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[11px] font-medium transition ${
+            className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium transition ${
               syncStatus === 'syncing'
-                ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100/80'
-                : 'bg-rose-50 text-rose-700 hover:bg-rose-100/80'
+                ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100/80 dark:bg-emerald-950/70 dark:text-emerald-300 dark:hover:bg-emerald-950'
+                : 'bg-rose-50 text-rose-700 hover:bg-rose-100/80 dark:bg-rose-950/70 dark:text-rose-300 dark:hover:bg-rose-950'
             }`}
           >
             <span
-              className={`h-2 w-2 shrink-0 rounded-full ${
-                syncStatus === 'syncing' ? 'bg-emerald-500' : 'bg-rose-500'
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                syncStatus === 'syncing'
+                  ? 'bg-emerald-500 dark:bg-emerald-400'
+                  : 'bg-rose-500 dark:bg-rose-400'
               }`}
               aria-hidden="true"
             />
-            <span>{syncStatus === 'syncing' ? '同步中' : '同步失败'}</span>
+            <span>
+              {syncStatus === 'syncing'
+                ? i18n.t('sidebar.syncing')
+                : i18n.t('sidebar.syncFailed')}
+            </span>
           </button>
 
           {syncTipOpen && (
@@ -555,13 +654,13 @@ export function SidebarTree({
               <div
                 id="sidebar-sync-tooltip"
                 role="tooltip"
-                className="rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-700 shadow-lg"
+                className="rounded-md border border-[var(--cp-border-strong)] bg-[var(--cp-surface)] p-3 text-xs leading-relaxed text-[var(--cp-text-secondary)]"
               >
                 {syncStatus === 'syncing' ? (
-                  <p>收藏内容正在同步保存到本地文件夹</p>
+                  <p>{i18n.t('sidebar.syncingTooltip')}</p>
                 ) : (
                   <div>
-                    <p>请选择本地同步文件夹</p>
+                    <p>{i18n.t('sidebar.syncFailedTooltip')}</p>
                     <a
                       href="#settings-vault-section"
                       onClick={(e) => {
@@ -569,9 +668,9 @@ export function SidebarTree({
                         setSyncTipOpen(false);
                         onOpenVaultSettings();
                       }}
-                      className="mt-1.5 inline-flex items-center font-medium text-indigo-600 underline decoration-indigo-300 underline-offset-2 transition hover:text-indigo-700"
+                      className="mt-1.5 inline-flex items-center font-medium text-[var(--cp-accent)] underline underline-offset-2 transition hover:text-[var(--cp-accent-hover)]"
                     >
-                      前往本地同步目录设置
+                      {i18n.t('sidebar.goToVaultSettings')}
                     </a>
                   </div>
                 )}
@@ -584,67 +683,81 @@ export function SidebarTree({
       {/* 可滚动导航区 */}
       <div className="flex flex-1 flex-col gap-5 overflow-y-auto px-3 py-4">
         {/* 快捷视图导航 */}
-        <nav className="flex flex-col gap-0.5" aria-label="快捷视图">
-          {navItems.map((nav) => {
-            const Icon = nav.icon;
-            const isActive =
-              !isSettingsOpen &&
-              selectedFolderId === null &&
-              activeView === nav.key;
-            return (
-              <button
-                key={nav.key}
-                type="button"
-                onClick={() => onSelectView(nav.key)}
-                className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
-                  isActive
-                    ? 'bg-indigo-50 text-indigo-700'
-                    : 'text-slate-700 hover:bg-slate-100/80'
+        <nav className="flex flex-col gap-0.5" aria-label={i18n.t('sidebar.quickNavAria')}>
+          {primaryNavItems.map(renderNavItem)}
+
+          {moreNavExpanded && (
+            <div className="flex flex-col gap-0.5">
+              {collapsedNavItems.map(renderNavItem)}
+            </div>
+          )}
+
+          <button
+            type="button"
+            data-testid="sidebar-more-toggle"
+            aria-expanded={moreNavExpanded}
+            aria-label={
+              moreNavExpanded
+                ? i18n.t('sidebar.navCollapseMore')
+                : i18n.t('sidebar.navExpandMore')
+            }
+            title={
+              moreNavExpanded
+                ? i18n.t('sidebar.navCollapseMore')
+                : i18n.t('sidebar.navExpandMore')
+            }
+            onClick={() => setMoreNavExpanded((prev) => !prev)}
+            className="group mt-0.5 flex h-[26px] w-full cursor-pointer items-center justify-center rounded bg-transparent text-[var(--cp-text-muted)] transition-colors duration-200 hover:text-[var(--cp-accent)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--cp-accent)]"
+          >
+            <span
+              className="inline-flex flex-col items-center justify-center transition-[transform,filter] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:-translate-y-[2.5px] group-hover:drop-shadow-[0_2px_3px_rgba(13,148,136,0.25)] motion-reduce:transition-none motion-reduce:group-hover:translate-y-0"
+              aria-hidden="true"
+            >
+              <svg
+                className={`-my-[1.5px] block h-2 w-3.5 transition-opacity duration-200 group-hover:opacity-100 ${
+                  moreNavExpanded ? 'opacity-90' : 'opacity-50'
                 }`}
+                viewBox="0 0 14 8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                strokeLinecap="round"
+                strokeLinejoin="round"
               >
-                <span className="flex items-center gap-2">
-                  <Icon
-                    className={`h-4 w-4 ${
-                      isActive
-                        ? 'text-indigo-600'
-                        : nav.highlightAmber
-                          ? 'text-amber-500'
-                          : 'text-slate-400'
-                    }`}
-                  />
-                  <span>{nav.label}</span>
-                </span>
-                <span
-                  className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
-                    isActive
-                      ? 'bg-indigo-100 font-semibold text-indigo-700'
-                      : nav.highlightAmber
-                        ? 'bg-amber-100 font-semibold text-amber-800'
-                        : 'text-slate-400'
-                  }`}
-                >
-                  {nav.count}
-                </span>
-              </button>
-            );
-          })}
+                <path d={moreNavExpanded ? 'M2 6L7 2L12 6' : 'M2 2L7 6L12 2'} />
+              </svg>
+              <svg
+                className={`-my-[1.5px] block h-2 w-3.5 transition-opacity duration-200 group-hover:opacity-100 ${
+                  moreNavExpanded ? 'opacity-50' : 'opacity-90'
+                }`}
+                viewBox="0 0 14 8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d={moreNavExpanded ? 'M2 6L7 2L12 6' : 'M2 2L7 6L12 2'} />
+              </svg>
+            </span>
+          </button>
         </nav>
 
         {/* 媒体类型与平台筛选 */}
         <section>
-          <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-            媒体类型
+          <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--cp-text-muted)]">
+            {i18n.t('sidebar.mediaTypeHeading')}
           </p>
           <div
-            className="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1"
+            className="grid grid-cols-3 gap-1 rounded bg-[var(--cp-muted)] p-1"
             role="group"
-            aria-label="媒体类型筛选"
+            aria-label={i18n.t('sidebar.mediaTypeFilterAria')}
           >
             {(
               [
-                { value: 'all', label: '全部', icon: null },
-                { value: 'video', label: '视频', icon: Film },
-                { value: 'image_text', label: '图文', icon: Images },
+                { value: 'all', label: i18n.t('common.all'), icon: null },
+                { value: 'video', label: i18n.t('format.mediaKind.video'), icon: Film },
+                { value: 'image_text', label: i18n.t('format.mediaKind.imageText'), icon: Images },
               ] as const
             ).map((opt) => {
               const Icon = opt.icon;
@@ -654,10 +767,10 @@ export function SidebarTree({
                   key={opt.value}
                   type="button"
                   onClick={() => onSelectMediaKind(opt.value)}
-                  className={`flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition ${
+                  className={`flex items-center justify-center gap-1 rounded px-2 py-1 text-xs font-medium transition ${
                     active
-                      ? 'bg-white text-indigo-700 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                      ? 'bg-[var(--cp-surface)] text-[var(--cp-text-active)] font-semibold'
+                      : 'text-[var(--cp-text-secondary)] hover:text-[var(--cp-text)]'
                   }`}
                 >
                   {Icon && <Icon className="h-3 w-3" />}
@@ -669,44 +782,74 @@ export function SidebarTree({
 
           <div className="mt-2.5">
             <div className="mb-1.5 flex items-center justify-between px-2">
-              <p className="text-[11px] font-medium text-slate-400">来源平台</p>
+              <p className="text-[11px] font-medium text-[var(--cp-text-muted)]">
+                {i18n.t('sidebar.platformHeading')}
+              </p>
               {platformFilter !== 'all' && (
                 <button
                   type="button"
                   onClick={() => onSelectPlatform('all')}
-                  className="text-[11px] font-medium text-indigo-600 hover:underline"
+                  className="text-[11px] font-medium text-[var(--cp-accent)] hover:underline"
                 >
-                  重置
+                  {i18n.t('common.reset')}
                 </button>
               )}
             </div>
             <div
               className="flex flex-wrap gap-1 px-1"
               role="group"
-              aria-label="来源平台筛选"
+              aria-label={i18n.t('sidebar.platformFilterAria')}
             >
-              {(
-                [
-                  { value: 'all', label: '全部' },
-                  { value: 'douyin', label: '抖音' },
-                  { value: 'bilibili', label: 'B站' },
-                  { value: 'v2ex', label: 'V2EX' },
-                  { value: 'xiaohongshu', label: '小红书' },
-                  { value: 'zhihu', label: '知乎' },
-                  { value: 'youtube', label: 'YouTube' },
-                  { value: 'twitter', label: 'X' },
-                ] as const
-              ).map((opt) => {
+              {(() => {
+                const seen = new Set<string>();
+                const options: Array<{ value: PlatformFilter; label: string }> = [
+                  { value: 'all', label: i18n.t('common.all') },
+                ];
+                for (const adapter of getAllSiteAdapters()) {
+                  seen.add(adapter.id);
+                  options.push({
+                    value: adapter.id,
+                    label: platformMeta(adapter.id).label,
+                  });
+                }
+                // 动态补充通用网页与任意已采集自定义 Recipe 站点
+                for (const item of items) {
+                  if (item.deletedAt != null || seen.has(item.platform)) {
+                    continue;
+                  }
+                  seen.add(item.platform);
+                  options.push({
+                    value: item.platform,
+                    label:
+                      item.platform === 'web'
+                        ? i18n.t('platform.web')
+                        : platformMeta(item.platform).label,
+                  });
+                }
+                if (
+                  platformFilter !== 'all' &&
+                  !seen.has(platformFilter)
+                ) {
+                  options.push({
+                    value: platformFilter,
+                    label:
+                      platformFilter === 'web'
+                        ? i18n.t('platform.web')
+                        : platformMeta(platformFilter).label,
+                  });
+                }
+                return options;
+              })().map((opt) => {
                 const active = platformFilter === opt.value;
                 return (
                   <button
                     key={opt.value}
                     type="button"
                     onClick={() => onSelectPlatform(opt.value)}
-                    className={`rounded-md border px-2 py-1 text-[11px] font-medium transition ${
+                    className={`rounded border px-2 py-1 text-[11px] font-medium transition ${
                       active
-                        ? 'border-indigo-500 bg-indigo-50 text-indigo-700 shadow-2xs'
-                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900'
+                        ? 'border-[var(--cp-accent)] bg-[var(--cp-active)] text-[var(--cp-text-active)] font-semibold'
+                        : 'border-[var(--cp-border)] bg-[var(--cp-surface)] text-[var(--cp-text-secondary)] hover:border-[var(--cp-border-strong)] hover:text-[var(--cp-text)]'
                     }`}
                   >
                     {opt.label}
@@ -720,25 +863,25 @@ export function SidebarTree({
         {/* 多级文件夹分类树 */}
         <section>
           <div className="mb-1.5 flex items-center justify-between px-2">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              文件夹
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--cp-text-muted)]">
+              {i18n.t('sidebar.foldersHeading')}
             </p>
             <button
               type="button"
               onClick={() => startCreateFolder(null)}
-              title="新建顶级文件夹"
-              className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-indigo-600 transition hover:bg-indigo-50"
+              title={i18n.t('sidebar.newRootFolderTitle')}
+              className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] font-medium text-[var(--cp-accent)] transition hover:bg-[var(--cp-active)]"
             >
               <Plus className="h-3 w-3" />
-              <span>新建</span>
+              <span>{i18n.t('common.create')}</span>
             </button>
           </div>
 
           {creatingParentId === null && renderInlineCreateInput(0)}
 
           {folderTree.length === 0 && creatingParentId !== null ? (
-            <p className="px-2 py-2 text-xs text-slate-400">
-              暂无文件夹，点击「新建」整理收藏
+            <p className="px-2 py-2 text-xs text-[var(--cp-text-muted)]">
+              {i18n.t('sidebar.emptyFoldersHint')}
             </p>
           ) : (
             <div className="flex flex-col gap-0.5">
@@ -748,46 +891,84 @@ export function SidebarTree({
         </section>
       </div>
 
-      {/* 底部固定设置入口 */}
-      <div className="border-t border-slate-200 p-3">
+      {/* 底部固定区域：设置入口与 tRPC 风格胶囊明暗切换同一行排列 */}
+      <div
+        data-testid="sidebar-footer-bar"
+        className="flex items-center justify-between gap-2 border-t border-[var(--cp-divider)] p-3"
+      >
         <button
           type="button"
+          data-testid="sidebar-settings-btn"
           onClick={onOpenSettings}
-          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-medium transition ${
+          className={`flex min-w-0 flex-1 items-center gap-2 rounded px-2.5 py-2 text-xs font-medium transition ${
             isSettingsOpen
-              ? 'bg-indigo-50 text-indigo-700'
-              : 'text-slate-700 hover:bg-slate-100/80'
+              ? 'bg-[var(--cp-active)] font-semibold text-[var(--cp-text-active)]'
+              : 'text-[var(--cp-text-secondary)] hover:bg-[var(--cp-muted)] hover:text-[var(--cp-text)]'
           }`}
         >
           <Settings
-            className={`h-4 w-4 ${
-              isSettingsOpen ? 'text-indigo-600' : 'text-slate-400'
+            className={`h-4 w-4 shrink-0 ${
+              isSettingsOpen ? 'text-[var(--cp-accent)]' : 'text-[var(--cp-text-muted)]'
             }`}
           />
-          <span>设置</span>
+          <span className="truncate">{i18n.t('sidebar.settings')}</span>
         </button>
+
+        <div
+          data-testid="sidebar-theme-switcher"
+          role="group"
+          aria-label={i18n.t('sidebar.themeSwitchAria')}
+          className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-[var(--cp-border)] bg-[var(--cp-surface)] p-0.5"
+        >
+          {themeOptions.map((opt) => {
+            const Icon = opt.icon;
+            const active = themeMode === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                data-testid={`theme-option-${opt.value}`}
+                aria-pressed={active}
+                aria-label={opt.label}
+                title={opt.label}
+                onClick={() => void setThemeMode(opt.value)}
+                className={`inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cp-accent)] ${
+                  active
+                    ? 'bg-[var(--cp-muted)] text-[var(--cp-text)]'
+                    : 'text-[var(--cp-text-muted)] hover:text-[var(--cp-text)]'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden="true" />
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* 删除文件夹二次确认框 */}
       {deletingFolder && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[1px]"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--cp-scrim)] p-4"
           onClick={() => !submitting && setDeletingFolder(null)}
         >
           <div
-            className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            className="w-full max-w-sm rounded-md border border-[var(--cp-border-strong)] bg-[var(--cp-surface)] p-5"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
-              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-600">
+              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded bg-rose-50 text-rose-600 dark:bg-rose-950/70 dark:text-rose-400">
                 <AlertTriangle className="h-5 w-5" />
               </span>
               <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  删除文件夹「{deletingFolder.name}」？
+                <h3 className="text-sm font-semibold text-[var(--cp-text)]">
+                  {i18n.t('sidebar.deleteFolderConfirmTitle', {
+                    name: deletingFolder.name,
+                  })}
                 </h3>
-                <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                  该文件夹及其所有子文件夹将被移除；其中的收藏条目不会被删除，仅从该文件夹移出（若未归属其他文件夹将进入「未分类」）。
+                <p className="mt-1.5 text-xs leading-relaxed text-[var(--cp-text-secondary)]">
+                  {i18n.t('sidebar.deleteFolderConfirmDesc')}
                 </p>
               </div>
             </div>
@@ -796,17 +977,17 @@ export function SidebarTree({
                 type="button"
                 onClick={() => setDeletingFolder(null)}
                 disabled={submitting}
-                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                className="rounded border border-[var(--cp-border)] bg-[var(--cp-surface)] px-3 py-1.5 text-xs font-medium text-[var(--cp-text-secondary)] transition hover:border-[var(--cp-border-strong)] hover:text-[var(--cp-text)]"
               >
-                取消
+                {i18n.t('common.cancel')}
               </button>
               <button
                 type="button"
                 onClick={() => void confirmDeleteFolder()}
                 disabled={submitting}
-                className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-60"
+                className="rounded bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:opacity-60"
               >
-                确认删除
+                {i18n.t('sidebar.confirmDelete')}
               </button>
             </div>
           </div>

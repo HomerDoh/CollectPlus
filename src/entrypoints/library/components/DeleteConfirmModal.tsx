@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Loader2, Trash2 } from 'lucide-react';
-import { i18n } from '#i18n';
+import { getRemoteUncollectEntryUrl } from '@/adapters/registry.ts';
+import { i18n } from '@/i18n/index.ts';
 import type { CollectionItemRecord, PlatformId } from '@/types/schema.ts';
 import { platformMeta } from '../utils/format.ts';
 
@@ -13,14 +14,6 @@ export interface DeleteConfirmModalProps {
   onCancel: () => void;
   onConfirm: (syncPlatformUncollect: boolean) => Promise<void>;
 }
-
-const REMOTE_UNCOLLECT_PLATFORMS: ReadonlySet<PlatformId> = new Set([
-  'douyin',
-  'bilibili',
-  'xiaohongshu',
-  'zhihu',
-  'v2ex',
-]);
 
 export function DeleteConfirmModal({
   items,
@@ -48,11 +41,11 @@ export function DeleteConfirmModal({
     const labels: string[] = [];
     for (const item of items) {
       if (
-        REMOTE_UNCOLLECT_PLATFORMS.has(item.platform) &&
+        getRemoteUncollectEntryUrl(item.platform) !== undefined &&
         !seen.has(item.platform)
       ) {
         seen.add(item.platform);
-        labels.push(platformMeta(item.platform).label);
+        labels.push(platformMeta(item.platform, item.platformExtra).label);
       }
     }
     return labels;
@@ -72,7 +65,7 @@ export function DeleteConfirmModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-[1px]"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--cp-scrim)] p-4"
       onClick={() => !submitting && onCancel()}
       role="dialog"
       aria-modal="true"
@@ -80,11 +73,11 @@ export function DeleteConfirmModal({
       data-testid="delete-confirm-modal"
     >
       <div
-        className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"
+        className="w-full max-w-md rounded-md border border-[var(--cp-border-strong)] bg-[var(--cp-surface)] p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
-          <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-600">
+          <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded bg-rose-50 text-rose-600 dark:bg-rose-950/70 dark:text-rose-400">
             {isPermanent ? (
               <AlertTriangle className="h-5 w-5" />
             ) : (
@@ -94,16 +87,16 @@ export function DeleteConfirmModal({
           <div className="min-w-0 flex-1">
             <h3
               id="delete-confirm-modal-title"
-              className="text-sm font-semibold text-slate-900"
+              className="text-sm font-semibold text-[var(--cp-text)]"
             >
               {heading}
             </h3>
             {singleItem && (
-              <p className="mt-1 truncate text-xs font-medium text-slate-700">
+              <p className="mt-1 truncate text-xs font-medium text-[var(--cp-text-secondary)]">
                 「{singleItem.title}」
               </p>
             )}
-            <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+            <p className="mt-1.5 text-xs leading-relaxed text-[var(--cp-text-muted)]">
               {isPermanent
                 ? syncPlatformUncollect
                   ? i18n.t('deleteModal.descPermanentWithUncollect')
@@ -114,20 +107,20 @@ export function DeleteConfirmModal({
         </div>
 
         {/* 同步取消账号收藏复选框（默认勾选） */}
-        <label className="mt-4 flex cursor-pointer items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50/80 p-3 transition hover:border-indigo-200 hover:bg-indigo-50/30">
+        <label className="mt-4 flex cursor-pointer items-start gap-2.5 rounded border border-[var(--cp-border)] bg-[var(--cp-muted)] p-3 transition hover:border-[var(--cp-accent)]">
           <input
             type="checkbox"
             checked={syncPlatformUncollect}
             disabled={submitting}
             onChange={(e) => setSyncPlatformUncollect(e.target.checked)}
             data-testid="delete-sync-uncollect-checkbox"
-            className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-[var(--cp-border-strong)] accent-[var(--cp-accent)]"
           />
           <div className="min-w-0 flex-1">
-            <span className="block text-xs font-semibold text-slate-900">
+            <span className="block text-xs font-semibold text-[var(--cp-text)]">
               {i18n.t('deleteModal.syncUncollectLabel')}
             </span>
-            <span className="mt-0.5 block text-[11px] leading-relaxed text-slate-500">
+            <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--cp-text-muted)]">
               {supportedPlatformLabels.length > 0
                 ? i18n.t('deleteModal.syncUncollectSupportedDesc', {
                     platforms: supportedPlatformLabels.join(
@@ -144,7 +137,7 @@ export function DeleteConfirmModal({
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            className="rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            className="rounded border border-[var(--cp-border)] bg-[var(--cp-surface)] px-3.5 py-1.5 text-xs font-medium text-[var(--cp-text-secondary)] transition hover:border-[var(--cp-border-strong)] hover:text-[var(--cp-text)] disabled:opacity-50"
           >
             {i18n.t('common.cancel')}
           </button>
@@ -153,7 +146,7 @@ export function DeleteConfirmModal({
             onClick={() => void onConfirm(syncPlatformUncollect)}
             disabled={submitting}
             data-testid="delete-confirm-submit"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs transition hover:bg-rose-700 disabled:opacity-60"
+            className="inline-flex items-center gap-1.5 rounded bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:opacity-60"
           >
             {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             <span>

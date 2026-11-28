@@ -682,8 +682,14 @@ export function parseBilibiliComments(
 /** Bilibili 平台适配器实例 */
 export const bilibiliAdapter: PlatformAdapter = {
   id: 'bilibili',
+  tier: 'deep',
   displayName: 'B站',
   hostPatterns: BILIBILI_HOST_PATTERNS,
+  uiMeta: {
+    entryUrl: 'https://www.bilibili.com/',
+    badgeClass: 'bg-pink-600/85 text-white backdrop-blur-xs',
+  },
+  remoteUncollectEntryUrl: 'https://www.bilibili.com/',
 
   matchesUrl(url: string): boolean {
     try {

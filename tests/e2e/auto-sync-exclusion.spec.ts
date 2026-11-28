@@ -73,6 +73,7 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
       await expect(deleteModal).toBeHidden();
 
       const sidebar = libraryPage.locator('aside');
+      await sidebar.getByTestId('sidebar-more-toggle').click();
       await expect(
         sidebar.getByRole('button', { name: /全部收藏/ }),
       ).toContainText('0');
@@ -185,6 +186,7 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
       await softModal.getByTestId('delete-confirm-submit').click();
       await expect(softModal).toBeHidden();
 
+      await sidebar.getByTestId('sidebar-more-toggle').click();
       await sidebar.getByRole('button', { name: /回收站/ }).click();
       const trashCard = libraryPage
         .locator('article')
@@ -254,7 +256,7 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
       expect(vaultInspection.exclusionReason).toBe('deleted_keep_remote');
       expect(vaultInspection.exclusionDetail).toContain('保留原平台账号收藏');
 
-      // 5. 切入「不自动同步」特殊分类，核对元数据、原因与详情抽屉
+      // 5. 切入「未同步」特殊分类，核对元数据、原因与详情抽屉
       await expect(
         sidebar.getByRole('button', { name: /全部收藏/ }),
       ).toContainText('0');
@@ -262,10 +264,10 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
         sidebar.getByRole('button', { name: /回收站/ }),
       ).toContainText('0');
       await expect(
-        sidebar.getByRole('button', { name: /不自动同步/ }),
+        sidebar.getByRole('button', { name: /未同步/ }),
       ).toContainText('1');
 
-      await sidebar.getByRole('button', { name: /不自动同步/ }).click();
+      await sidebar.getByRole('button', { name: /未同步/ }).click();
       const excludedCard = libraryPage
         .locator('article')
         .filter({ hasText: MOCK_VIDEO_TITLE });
@@ -309,7 +311,7 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
         sidebar.getByRole('button', { name: /全部收藏/ }),
       ).toContainText('0');
       await expect(
-        sidebar.getByRole('button', { name: /不自动同步/ }),
+        sidebar.getByRole('button', { name: /未同步/ }),
       ).toContainText('1');
 
       // 7. 清空浏览器缓存索引 -> 从本地重建索引 -> 验证「不自动同步」条目与原因无损恢复
@@ -330,7 +332,7 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
         sidebar.getByRole('button', { name: /全部收藏/ }),
       ).toContainText('0');
       await expect(
-        sidebar.getByRole('button', { name: /不自动同步/ }),
+        sidebar.getByRole('button', { name: /未同步/ }),
       ).toContainText('1');
 
       // 8. 用户手动在原网页点击悬浮按钮重新采集 -> 自动解除「不自动同步」并重新下载入库
@@ -348,7 +350,7 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
         sidebar.getByRole('button', { name: /全部收藏/ }),
       ).toContainText('1', { timeout: 20_000 });
       await expect(
-        sidebar.getByRole('button', { name: /不自动同步/ }),
+        sidebar.getByRole('button', { name: /未同步/ }),
       ).toContainText('0');
 
       expect(pageErrors).toEqual([]);
@@ -448,14 +450,15 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
     await pendingCard.getByTitle('取消同步到插件').click();
 
     const sidebar = libraryPage.locator('aside');
+    await sidebar.getByTestId('sidebar-more-toggle').click();
     await expect(
       sidebar.getByRole('button', { name: /全部收藏/ }),
     ).toContainText('0');
     await expect(
-      sidebar.getByRole('button', { name: /不自动同步/ }),
+      sidebar.getByRole('button', { name: /未同步/ }),
     ).toContainText('1');
 
-    await sidebar.getByRole('button', { name: /不自动同步/ }).click();
+    await sidebar.getByRole('button', { name: /未同步/ }).click();
     const excludedCard = libraryPage
       .locator('article')
       .filter({ hasText: title });
@@ -493,7 +496,7 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
     await excludedCard.hover();
     await excludedCard.getByTitle('允许再次自动同步').click();
     await expect(
-      sidebar.getByRole('button', { name: /不自动同步/ }),
+      sidebar.getByRole('button', { name: /未同步/ }),
     ).toContainText('0');
 
     const allowedRes = await libraryPage.evaluate(async (sid) => {
@@ -561,15 +564,16 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
       const libraryPage = await context.newPage();
       await libraryPage.goto(extensionUrl('library.html'));
       const sidebar = libraryPage.locator('aside');
+      await sidebar.getByTestId('sidebar-more-toggle').click();
       await expect(
-        sidebar.getByRole('button', { name: /不自动同步/ }),
+        sidebar.getByRole('button', { name: /未同步/ }),
       ).toContainText('1', { timeout: 15_000 });
       await expect(
         sidebar.getByRole('button', { name: /全部收藏/ }),
       ).toContainText('0');
       expect(tracker.requestedMediaUrls).toEqual([]);
 
-      await sidebar.getByRole('button', { name: /不自动同步/ }).click();
+      await sidebar.getByRole('button', { name: /未同步/ }).click();
       const excludedCard = libraryPage
         .locator('article')
         .filter({ hasText: MOCK_VIDEO_TITLE });
@@ -661,10 +665,10 @@ test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采�
         sidebar.getByRole('button', { name: /全部收藏/ }),
       ).toContainText('0', { timeout: 10_000 });
       await expect(
-        sidebar.getByRole('button', { name: /不自动同步/ }),
+        sidebar.getByRole('button', { name: /未同步/ }),
       ).toContainText('1');
 
-      await sidebar.getByRole('button', { name: /不自动同步/ }).click();
+      await sidebar.getByRole('button', { name: /未同步/ }).click();
       const watchLaterCard = libraryPage
         .locator('article')
         .filter({ hasText: MOCK_VIDEO_TITLE });

@@ -9,11 +9,13 @@ import { ulid } from 'ulid';
 import {
   getItemFolderIds,
   isAutoSyncExcluded,
+  normalizeFolderAutoRule,
   normalizeFolderIds,
   type AutoSyncExclusion,
   type AutoSyncExclusionReason,
   type CollectionItemRecord,
   type DownloadTask,
+  type FolderAutoRule,
   type FolderNode,
   type MediaAsset,
   type PlatformAccountSyncEntry,
@@ -99,11 +101,13 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   autoSyncOnLibraryOpen: true,
   floatingButtonEnabled: true,
   nativeCollectToastEnabled: true,
+  nsfwFilterEnabled: false,
   autoSyncAllCollections: false,
   syncUncollectToPlugin: false,
   skipOversizedVideoAutoSave: false,
   oversizedVideoThresholdMb: DEFAULT_OVERSIZED_VIDEO_THRESHOLD_MB,
   oversizedVideoNotifyMode: 'popup',
+  autoClassifyEnabled: true,
   defaultFolderId: null,
   maxConcurrentDownloads: 2,
   defaultViewMode: 'grid',
@@ -205,8 +209,15 @@ export async function getUserPreferences(): Promise<UserPreferences> {
     ...DEFAULT_USER_PREFERENCES,
     ...saved,
   };
+  const resolvedAutoClassify =
+    typeof saved.autoClassifyEnabled === 'boolean'
+      ? saved.autoClassifyEnabled
+      : saved.defaultFolderId
+        ? false
+        : DEFAULT_USER_PREFERENCES.autoClassifyEnabled;
   return {
     ...merged,
+    autoClassifyEnabled: resolvedAutoClassify,
     oversizedVideoThresholdMb: clampOversizedVideoThresholdMb(
       merged.oversizedVideoThresholdMb,
     ),
@@ -366,6 +377,29 @@ export async function renameFolder(
   });
 }
 
+/** 更新文件夹自动分类显式微规则（全空规则时清除 `autoRule` 字段） */
+export async function updateFolderAutoRule(
+  id: string,
+  autoRule: FolderAutoRule | null | undefined,
+): Promise<FolderNode | null> {
+  return db.transaction('rw', db.folders, async () => {
+    const existing = await db.folders.get(id);
+    if (!existing) {
+      return null;
+    }
+    const normalizedRule = normalizeFolderAutoRule(autoRule);
+    const { autoRule: _prevAutoRule, ...baseFolder } = existing;
+    void _prevAutoRule;
+    const updated: FolderNode = {
+      ...baseFolder,
+      ...(normalizedRule ? { autoRule: normalizedRule } : {}),
+      updatedAt: Date.now(),
+    };
+    await db.folders.put(updated);
+    return updated;
+  });
+}
+
 /**
  * 递归删除指定文件夹及其所有子文件夹：
  * - 将所有受影响条目的 `folderId` 置为 `null`
@@ -473,6 +507,8 @@ export async function updateItemClassification(
       patch.title !== undefined ? patch.title.trim() || existing.title : existing.title;
 
     let nextFolderIds = getItemFolderIds(existing);
+    const foldersExplicitlyEdited =
+      patch.folderIds !== undefined || patch.folderId !== undefined;
     if (patch.folderIds !== undefined) {
       nextFolderIds = normalizeFolderIds(patch.folderIds);
     } else if (patch.folderId !== undefined) {
@@ -483,6 +519,7 @@ export async function updateItemClassification(
       ...existing,
       folderIds: nextFolderIds,
       folderId: nextFolderIds[0] ?? null,
+      ...(foldersExplicitlyEdited ? { folderAssignedBy: 'manual' as const } : {}),
       tags: nextTags,
       note: patch.note !== undefined ? patch.note : existing.note,
       title: nextTitle,
@@ -534,7 +571,8 @@ export async function addItemsToFolders(
       const unchanged =
         mergedFolderIds.length === currentFolderIds.length &&
         Array.isArray(existing.folderIds) &&
-        existing.folderId === (mergedFolderIds[0] ?? null);
+        existing.folderId === (mergedFolderIds[0] ?? null) &&
+        existing.folderAssignedBy !== 'auto';
       if (unchanged) {
         continue;
       }
@@ -543,6 +581,7 @@ export async function addItemsToFolders(
         ...existing,
         folderIds: mergedFolderIds,
         folderId: mergedFolderIds[0] ?? null,
+        folderAssignedBy: 'manual',
         updatedAt: now,
         syncStatus:
           existing.syncStatus === 'vault_synced'
@@ -589,6 +628,7 @@ export async function removeItemsFromFolder(
         ...existing,
         folderIds: nextFolderIds,
         folderId: nextFolderIds[0] ?? null,
+        folderAssignedBy: 'manual',
         updatedAt: now,
         syncStatus:
           existing.syncStatus === 'vault_synced'
@@ -748,11 +788,13 @@ export async function markItemsAutoSyncExcluded(
         commentsRelativePath: _commentsRelativePath,
         savedCommentCount: _savedCommentCount,
         commentsSizeBytes: _commentsSizeBytes,
+        folderAssignedBy: _folderAssignedBy,
         ...baseRecord
       } = existing;
       void _commentsRelativePath;
       void _savedCommentCount;
       void _commentsSizeBytes;
+      void _folderAssignedBy;
 
       updatedList.push({
         ...baseRecord,
@@ -816,6 +858,30 @@ export async function hardDeleteItemsFromDb(
       await db.tasks.bulkDelete(relatedTasks);
     }
     await db.items.bulkDelete(uniqueIds);
+  });
+}
+
+/** 标记条目已在管理台打开查看（幂等，已打开过则跳过）；已落盘条目自动置为 `meta_dirty` */
+export async function markItemOpened(
+  itemId: string,
+): Promise<CollectionItemRecord | null> {
+  return db.transaction('rw', db.items, async () => {
+    const existing = await db.items.get(itemId);
+    if (!existing || existing.openedAt != null) {
+      return null;
+    }
+    const now = Date.now();
+    const updated: CollectionItemRecord = {
+      ...existing,
+      openedAt: now,
+      updatedAt: now,
+      syncStatus:
+        existing.syncStatus === 'vault_synced'
+          ? 'meta_dirty'
+          : existing.syncStatus,
+    };
+    await db.items.put(updated);
+    return updated;
   });
 }
 

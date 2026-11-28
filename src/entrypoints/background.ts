@@ -11,14 +11,34 @@
 
 import { ulid } from 'ulid';
 import {
+  i18n,
+  initI18n,
+  loadLocaleMessagesFromAsset,
+} from '../i18n/index.ts';
+import {
+  buildClassifierIndex,
+  classifyPayloadWithIndex,
+  type ClassifierIndex,
+} from '../classify/auto-folder.ts';
+import {
   collectAllPlatformDnrSpecs,
-  matchAdapterByUrl,
+  getRemoteUncollectEntryUrl,
+  matchSiteAdapterByUrl,
 } from '../adapters/registry.ts';
+import {
+  isUniversalCapturableUrl,
+  universalWebAdapter,
+} from '../adapters/universal/parser.ts';
 import {
   scheduleActionIconSync,
   startActionIconLiveSync,
 } from '../download/action-icon.ts';
-import { syncSessionDnrRules } from '../download/dnr.ts';
+import {
+  clearAllTaskDnrRules,
+  registerTaskDnrRules,
+  releaseTaskDnrRules,
+  syncSessionDnrRules,
+} from '../download/dnr.ts';
 import {
   ensureOffscreenDocument,
   hasOffscreenDocument,
@@ -34,6 +54,9 @@ import {
   upsertTags,
 } from '../storage/db.ts';
 import { removeItemFromOpfs } from '../storage/opfs.ts';
+import { handleCloudflareR2BackgroundAuthAction } from '../storage/providers/cloudflare-r2/index.ts';
+import { handleGoogleDriveBackgroundAuthAction } from '../storage/providers/google-drive/index.ts';
+import { hasConfiguredActiveVault } from '../storage/providers/registry.ts';
 import {
   buildItemRelativeDir,
   buildMediaAssetsFromPayload,
@@ -50,6 +73,8 @@ import {
 import type {
   CollectionItemRecord,
   DownloadTask,
+  FolderAssignedBy,
+  FolderNode,
   MediaAsset,
   PlatformId,
 } from '../types/schema.ts';
@@ -196,6 +221,8 @@ async function recoverStaleTasksOnStartup(): Promise<void> {
   }
 
   startupRecoveryPromise = (async () => {
+    await clearAllTaskDnrRules().catch(() => undefined);
+
     const staleTasks = await db.tasks
       .where('status')
       .anyOf(['downloading', 'processing'])
@@ -216,7 +243,7 @@ async function recoverStaleTasksOnStartup(): Promise<void> {
             await db.tasks.put({
               ...task,
               status: 'failed',
-              errorMessage: '后台下载在重启时中断且已达到最大自动重试次数。',
+              errorMessage: i18n.t('background.downloadInterruptedMaxRetry'),
               updatedAt: now,
             });
             const item = await db.items.get(task.itemId);
@@ -257,6 +284,7 @@ async function markDispatchFailure(
   item: CollectionItemRecord,
   error: unknown,
 ): Promise<void> {
+  void releaseTaskDnrRules(task.id);
   const errorMessage = formatErrorMessage(error);
   const now = Date.now();
 
@@ -339,7 +367,7 @@ async function pumpDownloadQueue(): Promise<void> {
           await db.tasks.put({
             ...task,
             status: 'cancelled',
-            errorMessage: '关联收藏条目不存在、已移入回收站或已设为不自动同步。',
+            errorMessage: i18n.t('background.itemUnavailableForDownload'),
             updatedAt: Date.now(),
           });
           void scheduleActionIconSync();
@@ -365,6 +393,16 @@ async function pumpDownloadQueue(): Promise<void> {
           });
           void scheduleActionIconSync();
 
+          // 为带有防盗链请求头（如 Tier 1 通用网页/无静态规则 Recipe）的资产动态挂载任务级 DNR
+          await registerTaskDnrRules(latestTask.id, item.assets).catch(
+            (dnrErr) => {
+              console.warn(
+                '[Collect+] Failed to register dynamic task DNR rules:',
+                dnrErr,
+              );
+            },
+          );
+
           const response = await sendToOffscreen({
             target: 'offscreen',
             type: 'OFFSCREEN_START_DOWNLOAD',
@@ -380,7 +418,7 @@ async function pumpDownloadQueue(): Promise<void> {
             const errText =
               response && !response.ok
                 ? response.error
-                : 'Offscreen 拒绝启动下载任务。';
+                : i18n.t('background.offscreenDownloadRejected');
             throw new Error(errText);
           }
 
@@ -429,8 +467,12 @@ async function resolveVideoAssetsSizeBytes(
     );
   }
 
+  const probeRuleKey = `probe-${ulid()}`;
   try {
     await ensureDnrReady();
+    await registerTaskDnrRules(probeRuleKey, videoAssets).catch(
+      () => undefined,
+    );
     await ensureOffscreenDocument();
     const probeRes = await sendToOffscreen({
       target: 'offscreen',
@@ -442,13 +484,24 @@ async function resolveVideoAssetsSizeBytes(
     }
   } catch (error) {
     console.warn('[Collect+] Failed to probe video size before auto-save:', error);
+  } finally {
+    void releaseTaskDnrRules(probeRuleKey);
   }
 
   return undefined;
 }
 
+async function loadFreshClassifierIndex(): Promise<ClassifierIndex> {
+  const [folders, items] = await Promise.all([
+    db.folders.toArray(),
+    db.items.toArray(),
+  ]);
+  return buildClassifierIndex(folders, items);
+}
+
 async function handleCaptureItem(
   message: Extract<BackgroundMessage, { type: 'CAPTURE_ITEM' }>,
+  prebuiltClassifierIndex?: ClassifierIndex,
 ): Promise<BackgroundResponseMap['CAPTURE_ITEM']> {
   const { payload } = message;
   const dedupeKey = `${payload.platform}:${payload.sourceId}`;
@@ -460,7 +513,7 @@ async function handleCaptureItem(
   if (message.autoSyncExclusion) {
     const { reason, detail } = message.autoSyncExclusion;
     if (!isAutoSyncExclusionReason(reason)) {
-      return { ok: false, error: '无效的取消本地持久化原因。' };
+      return { ok: false, error: i18n.t('background.invalidExclusionReason') };
     }
 
     const trimmedDetail = detail?.trim();
@@ -487,13 +540,14 @@ async function handleCaptureItem(
 
       if (activeTaskIdsToAbort.length > 0 && (await hasOffscreenDocument())) {
         await Promise.all(
-          activeTaskIdsToAbort.map((taskId) =>
-            sendToOffscreen({
+          activeTaskIdsToAbort.map((taskId) => {
+            void releaseTaskDnrRules(taskId);
+            return sendToOffscreen({
               target: 'offscreen',
               type: 'OFFSCREEN_ABORT_DOWNLOAD',
               taskId,
-            }).catch(() => undefined),
-          ),
+            }).catch(() => undefined);
+          }),
         );
       }
 
@@ -682,12 +736,36 @@ async function handleCaptureItem(
   const upsertedTags = await upsertTags(mergedRawTags);
   const tagNames = upsertedTags.map((tag) => tag.name);
 
-  let resolvedFolderId: string | null =
-    message.folderId !== undefined ? message.folderId : prefs.defaultFolderId;
-  if (resolvedFolderId !== null) {
-    const existingFolder = await db.folders.get(resolvedFolderId);
-    if (!existingFolder) {
-      resolvedFolderId = null;
+  let resolvedFolderId: string | null = null;
+  let resolvedFolderAssignedBy: FolderAssignedBy | undefined;
+
+  if (message.folderId !== undefined) {
+    // 前置手动指定目标文件夹（或显式选定「未分类」null）-> 跳过自动分类
+    resolvedFolderId = message.folderId;
+    if (resolvedFolderId !== null) {
+      const existingFolder = await db.folders.get(resolvedFolderId);
+      if (!existingFolder) {
+        resolvedFolderId = null;
+      }
+    }
+    resolvedFolderAssignedBy = 'manual';
+  } else if (prefs.autoClassifyEnabled) {
+    // 未手动指定且开启自动分类 -> 走本地四级分类器；未达置信阈值严格兜底未分类
+    const classifierIndex =
+      prebuiltClassifierIndex ?? (await loadFreshClassifierIndex());
+    const classified = classifyPayloadWithIndex(payload, classifierIndex);
+    if (classified.folderId !== null) {
+      const existingFolder = await db.folders.get(classified.folderId);
+      if (existingFolder) {
+        resolvedFolderId = existingFolder.id;
+        resolvedFolderAssignedBy = 'auto';
+      }
+    }
+  } else if (prefs.defaultFolderId !== null) {
+    const existingFolder = await db.folders.get(prefs.defaultFolderId);
+    if (existingFolder) {
+      resolvedFolderId = existingFolder.id;
+      resolvedFolderAssignedBy = 'manual';
     }
   }
 
@@ -709,6 +787,9 @@ async function handleCaptureItem(
     updatedAt: now,
     folderId: resolvedFolderId,
     folderIds: resolvedFolderId ? [resolvedFolderId] : [],
+    ...(resolvedFolderAssignedBy !== undefined
+      ? { folderAssignedBy: resolvedFolderAssignedBy }
+      : {}),
     tags: tagNames,
     note: existing && existing.deletedAt == null ? existing.note : '',
     relativeDir,
@@ -766,12 +847,22 @@ async function handleCaptureBatchItems(
   let deduplicatedCount = 0;
   let skippedOversizedCount = 0;
 
+  // 批量全量同步时只构建一次分类画像，避免逐条重扫 IndexedDB
+  const prefs = await getUserPreferences();
+  const batchClassifierIndex =
+    prefs.autoClassifyEnabled && message.payloads.length > 0
+      ? await loadFreshClassifierIndex()
+      : undefined;
+
   for (const payload of message.payloads) {
-    const res = await handleCaptureItem({
-      target: 'background',
-      type: 'CAPTURE_ITEM',
-      payload,
-    });
+    const res = await handleCaptureItem(
+      {
+        target: 'background',
+        type: 'CAPTURE_ITEM',
+        payload,
+      },
+      batchClassifierIndex,
+    );
     if (res.ok) {
       if (res.skippedOversized) {
         skippedOversizedCount += 1;
@@ -852,7 +943,7 @@ async function handleUncollectItems(
           await db.tasks.put({
             ...task,
             status: 'cancelled',
-            errorMessage: '原站已取消收藏，任务已取消。',
+            errorMessage: i18n.t('background.remoteUncollectedTaskCancelled'),
             updatedAt: now,
           });
         }
@@ -862,13 +953,14 @@ async function handleUncollectItems(
 
   if (activeTaskIdsToAbort.length > 0 && (await hasOffscreenDocument())) {
     await Promise.all(
-      activeTaskIdsToAbort.map((taskId) =>
-        sendToOffscreen({
+      activeTaskIdsToAbort.map((taskId) => {
+        void releaseTaskDnrRules(taskId);
+        return sendToOffscreen({
           target: 'offscreen',
           type: 'OFFSCREEN_ABORT_DOWNLOAD',
           taskId,
-        }).catch(() => undefined),
-      ),
+        }).catch(() => undefined);
+      }),
     );
   }
 
@@ -883,15 +975,6 @@ async function handleUncollectItems(
     skipped: false,
   };
 }
-
-/** 支持后台同步取消原平台账号收藏的平台及其入口 URL */
-const REMOTE_UNCOLLECT_ENTRY_URLS: Partial<Record<PlatformId, string>> = {
-  douyin: 'https://www.douyin.com/',
-  bilibili: 'https://www.bilibili.com/',
-  xiaohongshu: 'https://www.xiaohongshu.com/',
-  zhihu: 'https://www.zhihu.com/',
-  v2ex: 'https://www.v2ex.com/',
-};
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -957,7 +1040,7 @@ async function sendRemoteUncollectToTabWithRetry(
   | { ok: true; results: Array<{ sourceId: string; ok: boolean; reason?: string }> }
   | { ok: false; error: string; connectionError: boolean }
 > {
-  let lastError = '无法连接到平台页面脚本';
+  let lastError = i18n.t('background.cannotConnectPlatformScript');
   let connectionError = false;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -978,7 +1061,7 @@ async function sendRemoteUncollectToTabWithRetry(
         error:
           response && !response.ok
             ? response.error
-            : '平台页面未能处理取消收藏请求',
+            : i18n.t('background.platformUncollectFailed'),
         connectionError: false,
       };
     } catch (error) {
@@ -1026,7 +1109,7 @@ async function handleCancelItemDownloadTasks(
         await db.tasks.put({
           ...task,
           status: 'cancelled',
-          errorMessage: '关联条目已删除，下载任务已取消。',
+          errorMessage: i18n.t('background.itemDeletedTaskCancelled'),
           updatedAt: now,
         });
       }
@@ -1035,13 +1118,14 @@ async function handleCancelItemDownloadTasks(
 
   if (activeTaskIdsToAbort.length > 0 && (await hasOffscreenDocument())) {
     await Promise.all(
-      activeTaskIdsToAbort.map((taskId) =>
-        sendToOffscreen({
+      activeTaskIdsToAbort.map((taskId) => {
+        void releaseTaskDnrRules(taskId);
+        return sendToOffscreen({
           target: 'offscreen',
           type: 'OFFSCREEN_ABORT_DOWNLOAD',
           taskId,
-        }).catch(() => undefined),
-      ),
+        }).catch(() => undefined);
+      }),
     );
   }
 
@@ -1067,13 +1151,13 @@ async function executePlatformRemoteUncollect(
     reason?: string;
   }>
 > {
-  const entryUrl = REMOTE_UNCOLLECT_ENTRY_URLS[platform];
+  const entryUrl = getRemoteUncollectEntryUrl(platform);
   if (!entryUrl) {
     return targets.map((t) => ({
       platform,
       sourceId: t.sourceId,
       ok: false,
-      reason: '暂不支持该平台自动取消账号收藏',
+      reason: i18n.t('background.platformUncollectUnsupported'),
     }));
   }
 
@@ -1085,7 +1169,7 @@ async function executePlatformRemoteUncollect(
       (tab) =>
         tab.id !== undefined &&
         typeof tab.url === 'string' &&
-        matchAdapterByUrl(tab.url)?.id === platform,
+        matchSiteAdapterByUrl(tab.url)?.id === platform,
     );
     const readyTab =
       matchingTabs.find((tab) => tab.status === 'complete') ?? matchingTabs[0];
@@ -1128,7 +1212,7 @@ async function executePlatformRemoteUncollect(
         platform,
         sourceId: t.sourceId,
         ok: false,
-        reason: '无法创建后台临时标签页',
+        reason: i18n.t('background.tempTabCreateFailed'),
       }));
     }
     tempTabId = created.id;
@@ -1139,7 +1223,7 @@ async function executePlatformRemoteUncollect(
         platform,
         sourceId: t.sourceId,
         ok: false,
-        reason: '后台临时标签页在完成前被关闭',
+        reason: i18n.t('background.tempTabClosedEarly'),
       }));
     }
 
@@ -1317,20 +1401,54 @@ async function handleReportAccountSyncResult(
   return { ok: true };
 }
 
+function extractHostFromHttpUrl(rawUrl: string): string | undefined {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.hostname.toLowerCase().replace(/^www\./, '');
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 async function handleGetStatusSummary(
   message: Extract<BackgroundMessage, { type: 'GET_STATUS_SUMMARY' }>,
 ): Promise<BackgroundResponseMap['GET_STATUS_SUMMARY']> {
-  const supportedPlatform = message.tabUrl
-    ? (matchAdapterByUrl(message.tabUrl)?.id ?? null)
-    : null;
+  const matchedSite = message.tabUrl
+    ? matchSiteAdapterByUrl(message.tabUrl)
+    : undefined;
+  const isUniversalPage =
+    !matchedSite &&
+    typeof message.tabUrl === 'string' &&
+    isUniversalCapturableUrl(message.tabUrl);
 
-  const [allItems, activeTaskCount, vaultHandleCount] = await Promise.all([
+  const supportedPlatform: PlatformId | null = matchedSite
+    ? matchedSite.id
+    : isUniversalPage
+      ? 'web'
+      : null;
+  const captureMode: 'deep' | 'recipe' | 'universal' | 'unsupported' =
+    matchedSite
+      ? matchedSite.tier === 'recipe'
+        ? 'recipe'
+        : 'deep'
+      : isUniversalPage
+        ? 'universal'
+        : 'unsupported';
+  const siteHost =
+    isUniversalPage && message.tabUrl
+      ? extractHostFromHttpUrl(message.tabUrl)
+      : undefined;
+
+  const [allItems, activeTaskCount, hasActiveVault] = await Promise.all([
     db.items.toArray(),
     db.tasks
       .where('status')
       .anyOf(['queued', 'downloading', 'processing'])
       .count(),
-    db.settings.where('key').equals('vault_directory_handle').count(),
+    hasConfiguredActiveVault().catch(() => false),
   ]);
 
   let totalItems = 0;
@@ -1352,12 +1470,76 @@ async function handleGetStatusSummary(
   return {
     ok: true,
     supportedPlatform,
+    captureMode,
+    ...(siteHost ? { siteHost } : {}),
     totalItems,
     stagedCount,
     metaDirtyCount,
     activeTaskCount: activeTaskCount + inFlightCommentItemIds.size,
-    hasVaultDirectory: vaultHandleCount > 0,
+    hasVaultDirectory: hasActiveVault,
   };
+}
+
+/**
+ * Tier 1 通用全网按需采集：通过 `chrome.scripting.executeScript` 按需注入零 React 提取脚本，
+ * 归一化后直接送入 `handleCaptureItem`（平时零常驻内存与 DOM 污染）。
+ */
+async function executeUniversalTabCapture(
+  tab: chrome.tabs.Tab,
+  triggerSource: CaptureTriggerSource,
+  options?: {
+    folderId?: string | null;
+    autoSyncExclusion?: Extract<
+      BackgroundMessage,
+      { type: 'TRIGGER_ACTIVE_TAB_CAPTURE' }
+    >['autoSyncExclusion'];
+  },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (tab.id === undefined || !tab.url || !isUniversalCapturableUrl(tab.url)) {
+    return { ok: false, error: i18n.t('background.unsupportedPageForCapture') };
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['universal-capture.js'],
+    });
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const g = globalThis as unknown as Record<string, unknown>;
+        const extractor = g.__COLLECT_PLUS_EXTRACT_UNIVERSAL__;
+        return typeof extractor === 'function'
+          ? (extractor as () => unknown)()
+          : null;
+      },
+    });
+
+    const rawData = results[0]?.result ?? null;
+    const payload = universalWebAdapter.normalizeRawData(rawData, triggerSource);
+    if (!payload) {
+      return { ok: false, error: i18n.t('background.universalExtractFailed') };
+    }
+
+    const captureRes = await handleCaptureItem({
+      target: 'background',
+      type: 'CAPTURE_ITEM',
+      payload,
+      ...(options?.folderId !== undefined
+        ? { folderId: options.folderId }
+        : {}),
+      ...(options?.autoSyncExclusion !== undefined
+        ? { autoSyncExclusion: options.autoSyncExclusion }
+        : {}),
+    });
+    if (!captureRes.ok) {
+      return { ok: false, error: captureRes.error };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: formatErrorMessage(error) };
+  }
 }
 
 async function handleTriggerActiveTabCapture(
@@ -1369,39 +1551,148 @@ async function handleTriggerActiveTabCapture(
     try {
       targetTab = await chrome.tabs.get(message.tabId);
     } catch {
-      return { ok: false, error: '目标标签页不存在或已关闭。' };
+      return { ok: false, error: i18n.t('background.targetTabNotFound') };
     }
   } else {
     targetTab = await queryActiveTab();
   }
 
   if (!targetTab || targetTab.id === undefined) {
-    return { ok: false, error: '未找到当前活动标签页。' };
+    return { ok: false, error: i18n.t('background.activeTabNotFound') };
   }
 
-  if (!targetTab.url || !matchAdapterByUrl(targetTab.url)) {
-    return { ok: false, error: '当前页面暂不支持一键采集。' };
+  if (!targetTab.url) {
+    return { ok: false, error: i18n.t('background.unsupportedPageForCapture') };
   }
 
-  try {
-    const response = await sendToTab(targetTab.id, {
-      target: 'content',
-      type: 'CONTENT_TRIGGER_CAPTURE',
-      triggerSource: 'popup',
+  // 1. 命中已注册 Tier 2/3 站点：转发至页面内容脚本执行专属提取
+  if (matchSiteAdapterByUrl(targetTab.url)) {
+    try {
+      const response = await sendToTab(targetTab.id, {
+        target: 'content',
+        type: 'CONTENT_TRIGGER_CAPTURE',
+        triggerSource: 'popup',
+        ...(message.folderId !== undefined
+          ? { folderId: message.folderId }
+          : {}),
+        ...(message.autoSyncExclusion !== undefined
+          ? { autoSyncExclusion: message.autoSyncExclusion }
+          : {}),
+      });
+      if (response && !response.ok) {
+        return { ok: false, error: response.error };
+      }
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        error: i18n.t('background.cannotConnectCaptureScript'),
+      };
+    }
+  }
+
+  // 2. 任意 HTTP/HTTPS 网页：按需走 Tier 1 通用全网提取引擎
+  if (isUniversalCapturableUrl(targetTab.url)) {
+    return executeUniversalTabCapture(targetTab, 'popup', {
+      ...(message.folderId !== undefined ? { folderId: message.folderId } : {}),
       ...(message.autoSyncExclusion !== undefined
         ? { autoSyncExclusion: message.autoSyncExclusion }
         : {}),
     });
-    if (response && !response.ok) {
-      return { ok: false, error: response.error };
-    }
-    return { ok: true };
-  } catch {
+  }
+
+  return { ok: false, error: i18n.t('background.unsupportedPageForCapture') };
+}
+
+async function listSortedFolders(): Promise<FolderNode[]> {
+  const folders = await db.folders.toArray();
+  return folders.sort(
+    (a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt,
+  );
+}
+
+async function handleGetCaptureFolders(): Promise<
+  BackgroundResponseMap['GET_CAPTURE_FOLDERS']
+> {
+  const [folders, prefs] = await Promise.all([
+    listSortedFolders(),
+    getUserPreferences(),
+  ]);
+  return {
+    ok: true,
+    folders,
+    autoClassifyEnabled: prefs.autoClassifyEnabled,
+    defaultFolderId: prefs.defaultFolderId,
+  };
+}
+
+async function handlePreviewAutoClassify(
+  message: Extract<BackgroundMessage, { type: 'PREVIEW_AUTO_CLASSIFY' }>,
+): Promise<BackgroundResponseMap['PREVIEW_AUTO_CLASSIFY']> {
+  const [folders, prefs] = await Promise.all([
+    listSortedFolders(),
+    getUserPreferences(),
+  ]);
+
+  if (prefs.autoClassifyEnabled) {
+    const items = await db.items.toArray();
+    const index = buildClassifierIndex(folders, items);
+    const result = classifyPayloadWithIndex(message.payload, index);
+    const matched = result.folderId
+      ? folders.find((f) => f.id === result.folderId)
+      : undefined;
     return {
-      ok: false,
-      error: '无法连接到页面采集脚本，请刷新当前页面后重试。',
+      ok: true,
+      folderId: matched?.id ?? null,
+      folderName: matched?.name ?? null,
+      autoClassifyEnabled: true,
     };
   }
+
+  const fallback = prefs.defaultFolderId
+    ? folders.find((f) => f.id === prefs.defaultFolderId)
+    : undefined;
+  return {
+    ok: true,
+    folderId: fallback?.id ?? null,
+    folderName: fallback?.name ?? null,
+    autoClassifyEnabled: false,
+  };
+}
+
+async function handleNotifyTaxonomyUpdated(): Promise<
+  BackgroundResponseMap['NOTIFY_TAXONOMY_UPDATED']
+> {
+  const [folders, preferences] = await Promise.all([
+    listSortedFolders(),
+    getUserPreferences(),
+  ]);
+
+  try {
+    const tabs = await chrome.tabs.query({});
+    await Promise.all(
+      tabs.map(async (tab) => {
+        if (
+          tab.id === undefined ||
+          !tab.url ||
+          !matchSiteAdapterByUrl(tab.url)
+        ) {
+          return;
+        }
+        await sendToTab(tab.id, {
+          target: 'content',
+          type: 'CONTENT_FOLDERS_UPDATED',
+          folders,
+          autoClassifyEnabled: preferences.autoClassifyEnabled,
+          defaultFolderId: preferences.defaultFolderId,
+        }).catch(() => undefined);
+      }),
+    );
+  } catch {
+    // 忽略标签页广播异常
+  }
+
+  return { ok: true };
 }
 
 async function handleRetryDownloadTask(
@@ -1409,14 +1700,14 @@ async function handleRetryDownloadTask(
 ): Promise<BackgroundResponseMap['RETRY_DOWNLOAD_TASK']> {
   const task = await db.tasks.get(message.taskId);
   if (!task) {
-    return { ok: false, error: '未找到对应的下载任务。' };
+    return { ok: false, error: i18n.t('background.downloadTaskNotFound') };
   }
 
   const item = await db.items.get(task.itemId);
   if (!item || item.deletedAt != null || isAutoSyncExcluded(item)) {
     return {
       ok: false,
-      error: '关联收藏条目不存在、已移入回收站或已设为不自动同步。',
+      error: i18n.t('background.itemUnavailableForDownload'),
     };
   }
 
@@ -1455,7 +1746,7 @@ async function handleCancelDownloadTask(
 ): Promise<BackgroundResponseMap['CANCEL_DOWNLOAD_TASK']> {
   const task = await db.tasks.get(message.taskId);
   if (!task) {
-    return { ok: false, error: '未找到对应的下载任务。' };
+    return { ok: false, error: i18n.t('background.downloadTaskNotFound') };
   }
 
   if (task.status === 'completed' || task.status === 'cancelled') {
@@ -1465,9 +1756,11 @@ async function handleCancelDownloadTask(
   await db.tasks.put({
     ...task,
     status: 'cancelled',
-    errorMessage: '下载任务已取消。',
+    errorMessage: i18n.t('background.downloadTaskCancelled'),
     updatedAt: Date.now(),
   });
+
+  void releaseTaskDnrRules(task.id);
 
   if (await hasOffscreenDocument()) {
     await sendToOffscreen({
@@ -1490,7 +1783,7 @@ async function handleCancelDownloadTask(
       {
         itemId: relatedItem.id,
         reason: 'sync_cancelled_by_user',
-        detail: '下载同步过程中已手动取消同步到插件',
+        detail: i18n.t('library.cancelSyncDetail'),
       },
     ]);
   }
@@ -1553,7 +1846,11 @@ async function handleNotifyPreferencesUpdated(): Promise<
     const tabs = await chrome.tabs.query({});
     await Promise.all(
       tabs.map(async (tab) => {
-        if (tab.id === undefined || !tab.url || !matchAdapterByUrl(tab.url)) {
+        if (
+          tab.id === undefined ||
+          !tab.url ||
+          !matchSiteAdapterByUrl(tab.url)
+        ) {
           return;
         }
         await sendToTab(tab.id, {
@@ -1563,6 +1860,8 @@ async function handleNotifyPreferencesUpdated(): Promise<
           nativeCollectToastEnabled: preferences.nativeCollectToastEnabled,
           autoSyncAllCollections: preferences.autoSyncAllCollections,
           syncUncollectToPlugin: preferences.syncUncollectToPlugin,
+          autoClassifyEnabled: preferences.autoClassifyEnabled,
+          defaultFolderId: preferences.defaultFolderId,
         }).catch(() => undefined);
       }),
     );
@@ -1684,6 +1983,7 @@ async function handleOffscreenComplete(
   } catch (error) {
     console.error('[Collect+] Failed to handle OFFSCREEN_COMPLETE:', error);
   } finally {
+    void releaseTaskDnrRules(message.taskId);
     void scheduleActionIconSync();
     void pumpDownloadQueue();
   }
@@ -1728,6 +2028,7 @@ async function handleOffscreenError(
   } catch (error) {
     console.error('[Collect+] Failed to handle OFFSCREEN_ERROR:', error);
   } finally {
+    void releaseTaskDnrRules(message.taskId);
     void scheduleActionIconSync();
     void pumpDownloadQueue();
   }
@@ -1769,7 +2070,7 @@ async function handleSaveItemComments(
         error:
           response && !response.ok
             ? response.error
-            : 'Offscreen 拒绝启动评论暂存任务。',
+            : i18n.t('background.offscreenCommentsRejected'),
       };
     }
 
@@ -1863,6 +2164,12 @@ async function routeBackgroundMessage(
       return handleGetStatusSummary(message);
     case 'TRIGGER_ACTIVE_TAB_CAPTURE':
       return handleTriggerActiveTabCapture(message);
+    case 'GET_CAPTURE_FOLDERS':
+      return handleGetCaptureFolders();
+    case 'PREVIEW_AUTO_CLASSIFY':
+      return handlePreviewAutoClassify(message);
+    case 'NOTIFY_TAXONOMY_UPDATED':
+      return handleNotifyTaxonomyUpdated();
     case 'RETRY_DOWNLOAD_TASK':
       return handleRetryDownloadTask(message);
     case 'CANCEL_DOWNLOAD_TASK':
@@ -1873,6 +2180,28 @@ async function routeBackgroundMessage(
       return handleGetUserPreferences();
     case 'NOTIFY_PREFERENCES_UPDATED':
       return handleNotifyPreferencesUpdated();
+    case 'GET_LOCALE_MESSAGES': {
+      const messages = await loadLocaleMessagesFromAsset(message.locale);
+      return { ok: true, messages };
+    }
+    case 'STORAGE_PROVIDER_AUTH': {
+      if (message.providerId === 'google_drive') {
+        const token = await handleGoogleDriveBackgroundAuthAction(
+          message.action,
+          Boolean(message.interactive),
+          message.token,
+        );
+        return { ok: true, token };
+      }
+      if (message.providerId === 'cloudflare_r2') {
+        const token = await handleCloudflareR2BackgroundAuthAction(message.action);
+        return { ok: true, token };
+      }
+      return {
+        ok: false,
+        error: `Unsupported storage auth provider: "${message.providerId}"`,
+      };
+    }
     case 'OFFSCREEN_PROGRESS':
       return handleOffscreenProgress(message);
     case 'OFFSCREEN_COMPLETE':
@@ -1887,6 +2216,7 @@ async function routeBackgroundMessage(
 }
 
 export default defineBackground(() => {
+  void initI18n();
   startActionIconLiveSync();
 
   // 1. 扩展安装/更新与浏览器启动生命周期钩子
@@ -1921,15 +2251,17 @@ export default defineBackground(() => {
       if (!tab || tab.id === undefined || !tab.url) {
         return;
       }
-      if (!matchAdapterByUrl(tab.url)) {
+      if (matchSiteAdapterByUrl(tab.url)) {
+        await sendToTab(tab.id, {
+          target: 'content',
+          type: 'CONTENT_TRIGGER_CAPTURE',
+          triggerSource: 'hotkey',
+        }).catch(() => undefined);
         return;
       }
-
-      await sendToTab(tab.id, {
-        target: 'content',
-        type: 'CONTENT_TRIGGER_CAPTURE',
-        triggerSource: 'hotkey',
-      }).catch(() => undefined);
+      if (isUniversalCapturableUrl(tab.url)) {
+        await executeUniversalTabCapture(tab, 'hotkey').catch(() => undefined);
+      }
     })();
   });
 

@@ -1,0 +1,71 @@
+/* ================= X / Twitter ================= */
+[data-platform='twitter'] {
+  --pd-brand-bar: #1d9bf0;
+  --pd-badge-bg: #0f1419;
+  --pd-badge-text: #ffffff;
+  --pd-stage: #f7f9f9;
+  --pd-stage-bar: #ffffff;
+  --pd-stage-border: #eff3f4;
+  --pd-stage-text: #0f1419;
+  --pd-stage-muted: #536471;
+  --pd-media-control-bg: rgba(15, 20, 25, 0.76);
+  --pd-media-control-hover: rgba(29, 155, 240, 0.92);
+  --pd-media-control-text: #ffffff;
+  --pd-article-bg: #ffffff;
+  --pd-article-text: #0f1419;
+  --pd-article-muted: #536471;
+  --pd-surface: #ffffff;
+  --pd-surface-muted: #f7f9f9;
+  --pd-input: #eff3f4;
+  --pd-text: #0f1419;
+  --pd-text-secondary: #374151;
+  --pd-text-muted: #536471;
+  --pd-border: #cfd9de;
+  --pd-divider: #eff3f4;
+  --pd-accent: #1d9bf0;
+  --pd-accent-hover: #1a8cd8;
+  --pd-accent-soft: rgba(29, 155, 240, 0.12);
+  --pd-on-accent: #ffffff;
+  --pd-accent-secondary: #1d9bf0;
+  --pd-accent-secondary-soft: rgba(29, 155, 240, 0.12);
+  --pd-like-accent: #f91880;
+  --pd-scrollbar-thumb: #cfd9de;
+  --pd-dialog-shadow: 0 24px 60px -16px rgba(15, 20, 25, 0.24);
+  --pd-radius-dialog: 16px;
+  --pd-radius-control: 8px;
+  --pd-radius-pill: 9999px;
+}
+
+html[data-theme='dark'] [data-platform='twitter'] {
+  --pd-brand-bar: #1d9bf0;
+  --pd-badge-bg: #eff3f4;
+  --pd-badge-text: #0f1419;
+  --pd-stage: #000000;
+  --pd-stage-bar: #15202b;
+  --pd-stage-border: #2f3336;
+  --pd-stage-text: #e7e9ea;
+  --pd-stage-muted: #8b98a5;
+  --pd-media-control-bg: rgba(21, 32, 43, 0.85);
+  --pd-media-control-hover: rgba(29, 155, 240, 0.92);
+  --pd-media-control-text: #e7e9ea;
+  --pd-article-bg: #15202b;
+  --pd-article-text: #e7e9ea;
+  --pd-article-muted: #8b98a5;
+  --pd-surface: #15202b;
+  --pd-surface-muted: #1e2732;
+  --pd-input: #0e161f;
+  --pd-text: #e7e9ea;
+  --pd-text-secondary: #c5ccd3;
+  --pd-text-muted: #8b98a5;
+  --pd-border: #2f3336;
+  --pd-divider: #262c32;
+  --pd-accent: #1d9bf0;
+  --pd-accent-hover: #3ba9f4;
+  --pd-accent-soft: rgba(29, 155, 240, 0.18);
+  --pd-on-accent: #ffffff;
+  --pd-accent-secondary: #78c2f8;
+  --pd-accent-secondary-soft: rgba(29, 155, 240, 0.18);
+  --pd-like-accent: #f91880;
+  --pd-scrollbar-thumb: #3d4854;
+  --pd-dialog-shadow: 0 24px 64px -16px rgba(0, 0, 0, 0.82);
+}

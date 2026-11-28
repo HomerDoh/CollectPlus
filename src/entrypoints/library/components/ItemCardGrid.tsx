@@ -18,6 +18,7 @@ import {
   User,
   X,
 } from 'lucide-react';
+import { i18n } from '@/i18n/index.ts';
 import type {
   CollectionItemRecord,
   LibrarySortOption,
@@ -77,17 +78,19 @@ function getMediaBadgeText(item: CollectionItemRecord): string {
     if (videoAsset?.durationSec !== undefined && videoAsset.durationSec > 0) {
       return formatDuration(videoAsset.durationSec);
     }
-    return '视频';
+    return i18n.t('format.mediaKind.video');
   }
   if (item.kind === 'article') {
-    return '文章';
+    return i18n.t('format.mediaKind.article');
   }
 
   const imageCount = item.assets.filter((asset) => asset.kind === 'image').length;
   if (imageCount > 0) {
-    return `${imageCount} 图`;
+    return i18n.t('format.imageCountBadge', { count: imageCount });
   }
-  return item.kind === 'gallery' ? '图集' : '图片';
+  return item.kind === 'gallery'
+    ? i18n.t('format.mediaKind.gallery')
+    : i18n.t('format.mediaKind.image');
 }
 
 export function ItemCardGrid({
@@ -128,28 +131,28 @@ export function ItemCardGrid({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 顶部工具栏 */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/80 px-6 py-3 backdrop-blur-xs">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--cp-border)] bg-[var(--cp-surface)] px-6 py-3">
         {/* 搜索输入框 */}
         <div className="relative min-w-[260px] flex-1 max-w-xl">
-          <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-[var(--cp-text-muted)]" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="全文检索标题、正文、作者、标签、备注..."
-            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-24 pl-9 text-xs text-slate-900 placeholder:text-slate-400 transition focus:border-indigo-400 focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:outline-none"
+            placeholder={i18n.t('grid.searchPlaceholder')}
+            className="w-full rounded border border-[var(--cp-border)] bg-[var(--cp-input)] py-2 pr-24 pl-9 text-xs text-[var(--cp-text)] placeholder:text-[var(--cp-text-muted)] transition focus:border-[var(--cp-accent)] focus:bg-[var(--cp-surface)] focus:ring-2 focus:ring-[var(--cp-accent-soft)] focus:outline-none"
           />
           <div className="absolute top-1/2 right-2 flex -translate-y-1/2 items-center gap-1.5">
             {searchQuery.trim() && (
               <>
-                <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-indigo-700">
-                  {items.length} 命中
+                <span className="rounded bg-[var(--cp-active)] px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-[var(--cp-text-active)]">
+                  {i18n.t('grid.searchHits', { count: items.length })}
                 </span>
                 <button
                   type="button"
                   onClick={() => onSearchChange('')}
-                  className="rounded-md p-1 text-slate-400 hover:bg-slate-200/70 hover:text-slate-700"
-                  aria-label="清除搜索"
+                  className="rounded p-1 text-[var(--cp-text-muted)] hover:bg-[var(--cp-muted)] hover:text-[var(--cp-text)]"
+                  aria-label={i18n.t('grid.clearSearchAria')}
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -160,12 +163,12 @@ export function ItemCardGrid({
 
         {/* 右侧上下文统计 + 批量选择 + 排序 + 视图切换 */}
         <div className="flex items-center gap-2.5">
-          <span className="hidden text-xs text-slate-500 xl:inline">
+          <span className="hidden text-xs text-[var(--cp-text-muted)] xl:inline">
             {contextTitle} ·{' '}
-            <strong className="font-semibold tabular-nums text-slate-700">
+            <strong className="font-semibold tabular-nums text-[var(--cp-text)]">
               {items.length}
             </strong>{' '}
-            条
+            {i18n.t('grid.contextSummarySuffix')}
           </span>
 
           {/* 批量选择切换按钮 */}
@@ -174,42 +177,46 @@ export function ItemCardGrid({
               type="button"
               onClick={onToggleSelectionMode}
               data-testid="toggle-selection-mode"
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+              className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-xs font-medium transition ${
                 selectionMode
-                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
-                  : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
+                  ? 'border-[var(--cp-accent)] bg-[var(--cp-active)] text-[var(--cp-text-active)] font-semibold'
+                  : 'border-[var(--cp-border)] bg-[var(--cp-surface)] text-[var(--cp-text-secondary)] hover:border-[var(--cp-border-strong)] hover:text-[var(--cp-text)]'
               }`}
             >
               <CheckSquare className="h-3.5 w-3.5" />
-              <span>{selectionMode ? '退出批量选择' : '批量选择'}</span>
+              <span>
+                {selectionMode
+                  ? i18n.t('grid.exitSelectionMode')
+                  : i18n.t('grid.enterSelectionMode')}
+              </span>
             </button>
           )}
 
           {/* 排序选择器 */}
           <label className="relative inline-flex items-center">
-            <ArrowDownWideNarrow className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-slate-400" />
+            <ArrowDownWideNarrow className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--cp-text-muted)]" />
             <select
               value={sortBy}
               onChange={(e) => onSortChange(e.target.value as SortOption)}
-              aria-label="排序方式"
-              className="rounded-lg border border-slate-200 bg-white py-1.5 pr-7 pl-8 text-xs font-medium text-slate-700 transition hover:border-slate-300 focus:border-indigo-400 focus:outline-none"
+              aria-label={i18n.t('grid.sortAria')}
+              className="rounded border border-[var(--cp-border)] bg-[var(--cp-surface)] py-1.5 pr-7 pl-8 text-xs font-medium text-[var(--cp-text-secondary)] transition hover:border-[var(--cp-border-strong)] focus:border-[var(--cp-accent)] focus:outline-none"
             >
-              <option value="collectedAt">最近收藏</option>
-              <option value="publishedAt">原发布时间</option>
-              <option value="totalSizeBytes">文件体积</option>
+              <option value="collectedAt">{i18n.t('grid.sortCollectedAt')}</option>
+              <option value="publishedAt">{i18n.t('grid.sortPublishedAt')}</option>
+              <option value="totalSizeBytes">{i18n.t('grid.sortTotalSizeBytes')}</option>
             </select>
           </label>
 
           {/* 视图切换 */}
-          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5">
+          <div className="inline-flex rounded border border-[var(--cp-border)] bg-[var(--cp-muted)] p-0.5">
             <button
               type="button"
               onClick={() => onViewModeChange('grid')}
-              title="卡片网格视图"
-              className={`inline-flex items-center justify-center rounded-md p-1.5 transition ${
+              title={i18n.t('grid.gridViewTitle')}
+              className={`inline-flex items-center justify-center rounded p-1.5 transition ${
                 viewMode === 'grid'
-                  ? 'bg-white text-indigo-600 shadow-2xs'
-                  : 'text-slate-500 hover:text-slate-700'
+                  ? 'bg-[var(--cp-surface)] text-[var(--cp-accent)]'
+                  : 'text-[var(--cp-text-muted)] hover:text-[var(--cp-text)]'
               }`}
             >
               <LayoutGrid className="h-3.5 w-3.5" />
@@ -217,11 +224,11 @@ export function ItemCardGrid({
             <button
               type="button"
               onClick={() => onViewModeChange('list')}
-              title="紧凑列表视图"
-              className={`inline-flex items-center justify-center rounded-md p-1.5 transition ${
+              title={i18n.t('grid.listViewTitle')}
+              className={`inline-flex items-center justify-center rounded p-1.5 transition ${
                 viewMode === 'list'
-                  ? 'bg-white text-indigo-600 shadow-2xs'
-                  : 'text-slate-500 hover:text-slate-700'
+                  ? 'bg-[var(--cp-surface)] text-[var(--cp-accent)]'
+                  : 'text-[var(--cp-text-muted)] hover:text-[var(--cp-text)]'
               }`}
             >
               <List className="h-3.5 w-3.5" />
@@ -234,10 +241,10 @@ export function ItemCardGrid({
       {selectionMode && (
         <div
           data-testid="batch-action-bar"
-          className="flex flex-wrap items-center justify-between gap-2.5 border-b border-indigo-200 bg-indigo-50/90 px-6 py-2.5 text-xs"
+          className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--cp-border-strong)] bg-[var(--cp-active)] px-6 py-2.5 text-xs"
         >
           <div className="flex items-center gap-3">
-            <label className="inline-flex cursor-pointer items-center gap-2 font-medium text-indigo-900">
+            <label className="inline-flex cursor-pointer items-center gap-2 font-medium text-[var(--cp-text-active)]">
               <input
                 type="checkbox"
                 checked={allVisibleSelected}
@@ -245,16 +252,20 @@ export function ItemCardGrid({
                   allVisibleSelected ? onClearSelection() : onSelectAllVisible()
                 }
                 data-testid="batch-select-all"
-                className="h-4 w-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500"
+                className="h-4 w-4 rounded border-[var(--cp-border-strong)] accent-[var(--cp-accent)]"
               />
-              <span>{allVisibleSelected ? '取消全选' : '全选当前'}</span>
+              <span>
+                {allVisibleSelected
+                  ? i18n.t('grid.unselectAll')
+                  : i18n.t('grid.selectAllVisible')}
+              </span>
             </label>
-            <span className="text-indigo-800 tabular-nums">
-              已选{' '}
+            <span className="text-[var(--cp-text-active)] tabular-nums">
+              {i18n.t('grid.selectedPrefix')}{' '}
               <strong data-testid="batch-selected-count" className="font-bold">
                 {selectedCount}
               </strong>{' '}
-              / {items.length} 项
+              {i18n.t('grid.selectedSuffix', { total: items.length })}
             </span>
           </div>
 
@@ -266,10 +277,10 @@ export function ItemCardGrid({
                   disabled={selectedCount === 0}
                   onClick={() => void onAllowAutoSyncAgain(selectedVisibleItems)}
                   data-testid="batch-allow-sync-btn"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
+                  className="inline-flex items-center gap-1.5 rounded bg-[var(--cp-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--cp-on-accent)] transition hover:bg-[var(--cp-accent-hover)] disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
-                  <span>允许再次自动同步</span>
+                  <span>{i18n.t('grid.allowAutoSyncAgain')}</span>
                 </button>
                 <button
                   type="button"
@@ -278,10 +289,10 @@ export function ItemCardGrid({
                     void onRemoteUncollectAndClear(selectedVisibleItems)
                   }
                   data-testid="batch-remote-uncollect-clear-btn"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
+                  className="inline-flex items-center gap-1.5 rounded bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
-                  <span>取消原站收藏并清除</span>
+                  <span>{i18n.t('grid.remoteUncollectAndClear')}</span>
                 </button>
               </>
             ) : isTrashView ? (
@@ -291,10 +302,10 @@ export function ItemCardGrid({
                   disabled={selectedCount === 0}
                   onClick={() => void onBatchRestoreItems(selectedVisibleItems)}
                   data-testid="batch-restore-btn"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45"
+                  className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
-                  <span>批量恢复</span>
+                  <span>{i18n.t('grid.batchRestore')}</span>
                 </button>
                 <button
                   type="button"
@@ -303,10 +314,10 @@ export function ItemCardGrid({
                     onRequestDeleteItems(selectedVisibleItems, 'permanent')
                   }
                   data-testid="batch-permanent-delete-btn"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
+                  className="inline-flex items-center gap-1.5 rounded bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
-                  <span>彻底删除</span>
+                  <span>{i18n.t('grid.permanentDelete')}</span>
                 </button>
               </>
             ) : (
@@ -316,10 +327,10 @@ export function ItemCardGrid({
                   disabled={selectedCount === 0}
                   onClick={onOpenBatchFolderModal}
                   data-testid="batch-add-folder-btn"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
+                  className="inline-flex items-center gap-1.5 rounded bg-[var(--cp-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--cp-on-accent)] transition hover:bg-[var(--cp-accent-hover)] disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <FolderPlus className="h-3.5 w-3.5" />
-                  <span>加入分类文件夹</span>
+                  <span>{i18n.t('grid.addToFolders')}</span>
                 </button>
                 {currentFolderId !== null && (
                   <button
@@ -327,10 +338,10 @@ export function ItemCardGrid({
                     disabled={selectedCount === 0}
                     onClick={() => void onBatchRemoveFromCurrentFolder()}
                     data-testid="batch-remove-folder-btn"
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-45"
+                    className="inline-flex items-center gap-1.5 rounded border border-[var(--cp-border-strong)] bg-[var(--cp-surface)] px-3 py-1.5 text-xs font-medium text-[var(--cp-text-active)] transition hover:bg-[var(--cp-muted)] disabled:cursor-not-allowed disabled:opacity-45"
                   >
                     <FolderMinus className="h-3.5 w-3.5" />
-                    <span>移出当前文件夹</span>
+                    <span>{i18n.t('grid.removeFromCurrentFolder')}</span>
                   </button>
                 )}
                 <button
@@ -340,10 +351,10 @@ export function ItemCardGrid({
                     onRequestDeleteItems(selectedVisibleItems, 'soft')
                   }
                   data-testid="batch-delete-btn"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
+                  className="inline-flex items-center gap-1.5 rounded bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
-                  <span>删除</span>
+                  <span>{i18n.t('common.delete')}</span>
                 </button>
               </>
             )}
@@ -351,9 +362,9 @@ export function ItemCardGrid({
             <button
               type="button"
               onClick={onToggleSelectionMode}
-              className="rounded-lg border border-indigo-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+              className="rounded border border-[var(--cp-border)] bg-[var(--cp-surface)] px-2.5 py-1.5 text-xs font-medium text-[var(--cp-text-secondary)] transition hover:border-[var(--cp-border-strong)] hover:text-[var(--cp-text)]"
             >
-              完成
+              {i18n.t('common.done')}
             </button>
           </div>
         </div>
@@ -362,8 +373,8 @@ export function ItemCardGrid({
       {/* 内容展示区 */}
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {items.length === 0 ? (
-          <div className="mx-auto mt-12 flex max-w-md flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white px-8 py-12 text-center">
-            <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400">
+          <div className="mx-auto mt-12 flex max-w-md flex-col items-center justify-center rounded-md border border-dashed border-[var(--cp-border-strong)] bg-[var(--cp-surface)] px-8 py-12 text-center">
+            <span className="inline-flex h-12 w-12 items-center justify-center rounded-md bg-[var(--cp-muted)] text-[var(--cp-text-muted)]">
               {isTrashView ? (
                 <Trash2 className="h-6 w-6" />
               ) : isExcludedView ? (
@@ -372,39 +383,42 @@ export function ItemCardGrid({
                 <Inbox className="h-6 w-6" />
               )}
             </span>
-            <h3 className="mt-4 text-sm font-semibold text-slate-900">
+            <h3 className="mt-4 text-sm font-semibold text-[var(--cp-text)]">
               {hasActiveFilters
-                ? '没有符合当前筛选条件的收藏条目'
+                ? i18n.t('grid.emptyFilteredTitle')
                 : isTrashView
-                  ? '回收站为空'
+                  ? i18n.t('grid.emptyTrashTitle')
                   : isExcludedView
-                    ? '暂无不自动同步的内容'
-                    : '还没有收藏任何作品'}
+                    ? i18n.t('grid.emptyExcludedTitle')
+                    : i18n.t('grid.emptyAllTitle')}
             </h3>
-            <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+            <p className="mt-1.5 text-xs leading-relaxed text-[var(--cp-text-muted)]">
               {hasActiveFilters
-                ? '尝试更换检索关键词，或清除文件夹、媒体类型与来源平台筛选条件。'
+                ? i18n.t('grid.emptyFilteredDesc')
                 : isTrashView
-                  ? '移入回收站的条目会暂时保存在这里，自动同步不会重新拉回，随时可以恢复或彻底删除。'
+                  ? i18n.t('grid.emptyTrashDesc')
                   : isExcludedView
-                    ? '当你在管理台彻底删除媒体但保留原站账号收藏，或在收藏下载过程中取消同步到插件时，条目元数据与原因会保存在这里，避免重新打开网页时被自动采集。'
-                    : '打开已支持的平台页面（抖音、B站、V2EX、小红书、知乎）并点击收藏按钮或按下 Alt+S，内容将自动静默下载并归档到本地。'}
+                    ? i18n.t('grid.emptyExcludedDesc')
+                    : i18n.t('grid.emptyAllDesc')}
             </p>
             {hasActiveFilters && (
               <button
                 type="button"
                 onClick={onResetFilters}
-                className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-indigo-700"
+                className="mt-4 inline-flex items-center gap-1.5 rounded bg-[var(--cp-accent)] px-3.5 py-2 text-xs font-semibold text-[var(--cp-on-accent)] transition hover:bg-[var(--cp-accent-hover)]"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
-                <span>一键重置筛选</span>
+                <span>{i18n.t('grid.resetFiltersBtn')}</span>
               </button>
             )}
           </div>
         ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
             {items.map((item) => {
-              const platformInfo = platformMeta(item.platform);
+              const platformInfo = platformMeta(
+                item.platform,
+                item.platformExtra,
+              );
               const exclusion = item.autoSyncExclusion ?? null;
               const statusBadge = exclusion
                 ? autoSyncExclusionMeta(exclusion.reason)
@@ -424,25 +438,25 @@ export function ItemCardGrid({
                       onOpenItem(item);
                     }
                   }}
-                  className={`group relative flex cursor-pointer flex-col overflow-hidden rounded-2xl border bg-white shadow-2xs transition duration-200 ${
+                  className={`group relative flex cursor-pointer flex-col overflow-hidden rounded border bg-[var(--cp-surface)] transition duration-150 ${
                     isSelected
-                      ? 'border-indigo-500 ring-2 ring-indigo-200 shadow-md'
-                      : 'border-slate-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md'
+                      ? 'border-[var(--cp-accent)] ring-1 ring-[var(--cp-accent)]'
+                      : 'border-[var(--cp-border)] hover:border-[var(--cp-accent)]'
                   }`}
                 >
                   {/* 封面预览区 */}
-                  <div className="relative aspect-16/10 w-full overflow-hidden bg-slate-100">
+                  <div className="relative aspect-16/10 w-full overflow-hidden bg-[var(--cp-muted)]">
                     {item.thumbnailDataUrl ? (
                       <img
                         src={item.thumbnailDataUrl}
                         alt={item.title}
                         loading="lazy"
-                        className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                        className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
                       />
                     ) : (
-                      <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200/70 text-slate-300">
+                      <div className="flex h-full w-full items-center justify-center bg-[var(--cp-muted)] text-[var(--cp-text-muted)]">
                         {exclusion ? (
-                          <CloudOff className="h-10 w-10 text-slate-400" />
+                          <CloudOff className="h-10 w-10" />
                         ) : item.kind === 'video' ? (
                           <Film className="h-10 w-10" />
                         ) : item.kind === 'article' ? (
@@ -454,31 +468,33 @@ export function ItemCardGrid({
                     )}
 
                     {/* 左上角：批量选择复选框 + 平台徽标（并排不重叠） */}
-                    <div className="absolute top-2.5 left-2.5 z-10 flex items-center gap-1.5">
+                    <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5">
                       <button
                         type="button"
                         role="checkbox"
                         aria-checked={isSelected}
-                        aria-label={`选择 ${item.title}`}
+                        aria-label={i18n.t('grid.selectItemAria', {
+                          title: item.title,
+                        })}
                         data-testid="item-select-checkbox"
                         onClick={(e) => {
                           e.stopPropagation();
                           onToggleSelectItem(item.id, e.shiftKey);
                         }}
-                        className={`h-5 w-5 items-center justify-center rounded-md border shadow-xs transition ${
+                        className={`h-5 w-5 items-center justify-center rounded border transition ${
                           selectionMode || isSelected
                             ? 'inline-flex'
                             : 'hidden group-hover:inline-flex'
                         } ${
                           isSelected
-                            ? 'border-indigo-600 bg-indigo-600 text-white'
-                            : 'border-white/90 bg-slate-900/55 text-transparent backdrop-blur-xs hover:border-indigo-300 hover:bg-slate-900/75'
+                            ? 'border-[var(--cp-accent)] bg-[var(--cp-accent)] text-[var(--cp-on-accent)]'
+                            : 'border-white/90 bg-slate-900/60 text-transparent hover:border-teal-300 hover:bg-slate-900/80'
                         }`}
                       >
                         <Check className="h-3.5 w-3.5 stroke-[3]" />
                       </button>
                       <span
-                        className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${platformInfo.badgeClass}`}
+                        className={`rounded px-2 py-0.5 text-[10px] font-semibold ${platformInfo.badgeClass}`}
                       >
                         {platformInfo.label}
                       </span>
@@ -487,7 +503,7 @@ export function ItemCardGrid({
                     {/* 右上角状态 / 不自动同步原因角标 */}
                     <span
                       title={statusBadge.label}
-                      className={`absolute top-2.5 right-2.5 inline-flex items-center gap-1 rounded-full bg-white/95 px-2 py-0.5 text-[10px] font-medium shadow-xs backdrop-blur-xs ${statusBadge.badgeClass}`}
+                      className={`absolute top-2 right-2 inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium ${statusBadge.badgeClass}`}
                     >
                       <span
                         className={`h-1.5 w-1.5 rounded-full ${statusBadge.dotClass}`}
@@ -496,7 +512,7 @@ export function ItemCardGrid({
                     </span>
 
                     {/* 左下角媒体时长 / 图集数 / 文章 */}
-                    <span className="absolute bottom-2.5 left-2.5 inline-flex items-center gap-1 rounded-md bg-slate-950/75 px-2 py-0.5 text-[11px] font-medium tabular-nums text-white backdrop-blur-xs">
+                    <span className="absolute bottom-2 left-2 inline-flex items-center gap-1 rounded bg-slate-950/80 px-2 py-0.5 text-[11px] font-medium tabular-nums text-white">
                       {item.kind === 'video' ? (
                         <Film className="h-3 w-3" />
                       ) : item.kind === 'article' ? (
@@ -509,7 +525,7 @@ export function ItemCardGrid({
 
                     {/* 悬浮快捷动作（批量选择模式下隐藏避免误触） */}
                     {!selectionMode && (
-                      <div className="absolute right-2.5 bottom-2.5 flex items-center gap-1.5 opacity-0 transition group-hover:opacity-100">
+                      <div className="absolute right-2 bottom-2 flex items-center gap-1.5 opacity-0 transition group-hover:opacity-100">
                         {isExcludedView ? (
                           <>
                             <button
@@ -518,11 +534,11 @@ export function ItemCardGrid({
                                 e.stopPropagation();
                                 void onAllowAutoSyncAgain([item]);
                               }}
-                              title="允许再次自动同步"
-                              className="inline-flex items-center gap-1 rounded-lg bg-indigo-600/95 px-2 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-indigo-700"
+                              title={i18n.t('grid.allowAutoSyncAgain')}
+                              className="inline-flex items-center gap-1 rounded bg-[var(--cp-accent)] px-2 py-1 text-[11px] font-semibold text-[var(--cp-on-accent)] transition hover:bg-[var(--cp-accent-hover)]"
                             >
                               <RotateCcw className="h-3 w-3" />
-                              <span>允许同步</span>
+                              <span>{i18n.t('grid.allowSyncShort')}</span>
                             </button>
                             <button
                               type="button"
@@ -530,9 +546,9 @@ export function ItemCardGrid({
                                 e.stopPropagation();
                                 void onRemoteUncollectAndClear([item]);
                               }}
-                              title="取消原站收藏并清除"
-                              aria-label="取消原站收藏并清除"
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/75 text-white shadow-sm backdrop-blur-xs transition hover:bg-rose-600"
+                              title={i18n.t('grid.remoteUncollectAndClear')}
+                              aria-label={i18n.t('grid.remoteUncollectAndClear')}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded bg-slate-900/80 text-white transition hover:bg-rose-600"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
@@ -545,11 +561,11 @@ export function ItemCardGrid({
                                 e.stopPropagation();
                                 void onRestoreItem(item);
                               }}
-                              title="从回收站恢复"
-                              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600/95 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+                              title={i18n.t('grid.restoreFromTrashTitle')}
+                              className="inline-flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-emerald-700"
                             >
                               <RotateCcw className="h-3 w-3" />
-                              <span>恢复</span>
+                              <span>{i18n.t('grid.restoreShort')}</span>
                             </button>
                             <button
                               type="button"
@@ -557,9 +573,9 @@ export function ItemCardGrid({
                                 e.stopPropagation();
                                 onRequestDeleteItems([item], 'permanent');
                               }}
-                              title="彻底删除"
-                              aria-label="彻底删除"
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/75 text-white shadow-sm backdrop-blur-xs transition hover:bg-rose-600"
+                              title={i18n.t('grid.permanentDelete')}
+                              aria-label={i18n.t('grid.permanentDelete')}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded bg-slate-900/80 text-white transition hover:bg-rose-600"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
@@ -573,11 +589,11 @@ export function ItemCardGrid({
                                   e.stopPropagation();
                                   void onCancelItemSync(item);
                                 }}
-                                title="取消同步到插件"
-                                className="inline-flex items-center gap-1 rounded-lg bg-amber-600/95 px-2 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-amber-700"
+                                title={i18n.t('grid.cancelItemSyncTitle')}
+                                className="inline-flex items-center gap-1 rounded bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white transition hover:bg-amber-700"
                               >
                                 <CloudOff className="h-3 w-3" />
-                                <span>取消同步</span>
+                                <span>{i18n.t('grid.cancelItemSyncShort')}</span>
                               </button>
                             )}
                             <button
@@ -586,9 +602,9 @@ export function ItemCardGrid({
                                 e.stopPropagation();
                                 onRequestDeleteItems([item], 'soft');
                               }}
-                              title="移入回收站"
-                              aria-label="移入回收站"
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/75 text-white shadow-sm backdrop-blur-xs transition hover:bg-rose-600"
+                              title={i18n.t('grid.moveToTrash')}
+                              aria-label={i18n.t('grid.moveToTrash')}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded bg-slate-900/80 text-white transition hover:bg-rose-600"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
@@ -599,23 +615,23 @@ export function ItemCardGrid({
                   </div>
 
                   {/* 信息内容区 */}
-                  <div className="flex flex-1 flex-col justify-between gap-2.5 p-3.5">
+                  <div className="flex flex-1 flex-col justify-between gap-2.5 p-3">
                     <div>
-                      <h3 className="line-clamp-2 text-[13px] font-semibold leading-snug text-slate-900 group-hover:text-indigo-700">
+                      <h3 className="line-clamp-2 text-[13px] font-semibold leading-snug text-[var(--cp-text)] group-hover:text-[var(--cp-text-active)]">
                         {item.title}
                       </h3>
-                      <p className="mt-1 flex items-center gap-1 truncate text-xs text-slate-500">
-                        <User className="h-3 w-3 shrink-0 text-slate-400" />
+                      <p className="mt-1 flex items-center gap-1 truncate text-xs text-[var(--cp-text-muted)]">
+                        <User className="h-3 w-3 shrink-0 text-[var(--cp-text-muted)]" />
                         <span className="truncate">{item.author.name}</span>
                       </p>
                       {exclusion && (
                         <div
                           data-testid="item-exclusion-reason"
-                          className="mt-2 rounded-lg border border-amber-200/80 bg-amber-50/70 px-2 py-1.5 text-[11px] leading-snug text-amber-900"
+                          className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] leading-snug text-amber-900 dark:border-amber-900/80 dark:bg-amber-950/60 dark:text-amber-200"
                         >
                           <p className="font-medium">{statusBadge.label}</p>
                           {exclusion.detail && (
-                            <p className="mt-0.5 line-clamp-2 text-[10px] text-amber-800/90">
+                            <p className="mt-0.5 line-clamp-2 text-[10px] opacity-90">
                               {exclusion.detail}
                             </p>
                           )}
@@ -628,11 +644,11 @@ export function ItemCardGrid({
                       <div className="flex flex-wrap gap-1">
                         {visibleTags.map((tagName) => {
                           const tagColor =
-                            tagsByName.get(tagName)?.color ?? '#6366f1';
+                            tagsByName.get(tagName)?.color ?? '#0d9488';
                           return (
                             <span
                               key={tagName}
-                              className="inline-flex max-w-[110px] items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-700"
+                              className="inline-flex max-w-[110px] items-center gap-1 rounded bg-[var(--cp-muted)] px-2 py-0.5 text-[10px] font-medium text-[var(--cp-text-secondary)]"
                             >
                               <span
                                 className="h-1.5 w-1.5 shrink-0 rounded-full"
@@ -643,7 +659,7 @@ export function ItemCardGrid({
                           );
                         })}
                         {extraTagCount > 0 && (
-                          <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                          <span className="rounded bg-[var(--cp-muted)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--cp-text-muted)]">
                             +{extraTagCount}
                           </span>
                         )}
@@ -651,12 +667,12 @@ export function ItemCardGrid({
                     )}
 
                     {/* 底部体积与时间 */}
-                    <div className="flex items-center justify-between border-t border-slate-100 pt-2 text-[11px] text-slate-400">
+                    <div className="flex items-center justify-between border-t border-[var(--cp-divider)] pt-2 text-[11px] text-[var(--cp-text-muted)]">
                       {exclusion ? (
                         <>
-                          <span className="inline-flex items-center gap-1 text-amber-700">
+                          <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-300">
                             <CloudOff className="h-3 w-3" />
-                            <span>仅元数据</span>
+                            <span>{i18n.t('grid.metadataOnly')}</span>
                           </span>
                           <span>{formatRelativeTime(exclusion.excludedAt)}</span>
                         </>
@@ -679,7 +695,10 @@ export function ItemCardGrid({
           /* 紧凑列表视图 */
           <div className="flex flex-col gap-2">
             {items.map((item) => {
-              const platformInfo = platformMeta(item.platform);
+              const platformInfo = platformMeta(
+                item.platform,
+                item.platformExtra,
+              );
               const exclusion = item.autoSyncExclusion ?? null;
               const statusBadge = exclusion
                 ? autoSyncExclusionMeta(exclusion.reason)
@@ -697,10 +716,10 @@ export function ItemCardGrid({
                       onOpenItem(item);
                     }
                   }}
-                  className={`group flex cursor-pointer items-center gap-3.5 rounded-xl border bg-white p-2.5 shadow-2xs transition ${
+                  className={`group flex cursor-pointer items-center gap-3.5 rounded border bg-[var(--cp-surface)] p-2.5 transition ${
                     isSelected
-                      ? 'border-indigo-500 bg-indigo-50/25 ring-2 ring-indigo-200'
-                      : 'border-slate-200 hover:border-indigo-300 hover:shadow-xs'
+                      ? 'border-[var(--cp-accent)] bg-[var(--cp-active)] ring-1 ring-[var(--cp-accent)]'
+                      : 'border-[var(--cp-border)] hover:border-[var(--cp-accent)]'
                   }`}
                 >
                   {/* 左侧复选框 */}
@@ -708,27 +727,29 @@ export function ItemCardGrid({
                     type="button"
                     role="checkbox"
                     aria-checked={isSelected}
-                    aria-label={`选择 ${item.title}`}
+                    aria-label={i18n.t('grid.selectItemAria', {
+                      title: item.title,
+                    })}
                     data-testid="item-select-checkbox"
                     onClick={(e) => {
                       e.stopPropagation();
                       onToggleSelectItem(item.id, e.shiftKey);
                     }}
-                    className={`h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${
+                    className={`h-5 w-5 shrink-0 items-center justify-center rounded border transition ${
                       selectionMode || isSelected
                         ? 'inline-flex'
                         : 'hidden group-hover:inline-flex'
                     } ${
                       isSelected
-                        ? 'border-indigo-600 bg-indigo-600 text-white'
-                        : 'border-slate-300 bg-white text-transparent hover:border-indigo-400'
+                        ? 'border-[var(--cp-accent)] bg-[var(--cp-accent)] text-[var(--cp-on-accent)]'
+                        : 'border-[var(--cp-border-strong)] bg-[var(--cp-surface)] text-transparent hover:border-[var(--cp-accent)]'
                     }`}
                   >
                     <Check className="h-3.5 w-3.5 stroke-[3]" />
                   </button>
 
                   {/* 缩略图 */}
-                  <div className="relative h-16 w-28 shrink-0 overflow-hidden rounded-lg bg-slate-100">
+                  <div className="relative h-16 w-28 shrink-0 overflow-hidden rounded bg-[var(--cp-muted)]">
                     {item.thumbnailDataUrl ? (
                       <img
                         src={item.thumbnailDataUrl}
@@ -737,9 +758,9 @@ export function ItemCardGrid({
                         className="h-full w-full object-cover"
                       />
                     ) : (
-                      <div className="flex h-full w-full items-center justify-center text-slate-300">
+                      <div className="flex h-full w-full items-center justify-center text-[var(--cp-text-muted)]">
                         {exclusion ? (
-                          <CloudOff className="h-5 w-5 text-slate-400" />
+                          <CloudOff className="h-5 w-5" />
                         ) : item.kind === 'video' ? (
                           <Film className="h-5 w-5" />
                         ) : item.kind === 'article' ? (
@@ -749,7 +770,7 @@ export function ItemCardGrid({
                         )}
                       </div>
                     )}
-                    <span className="absolute right-1 bottom-1 rounded bg-slate-950/75 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white">
+                    <span className="absolute right-1 bottom-1 rounded bg-slate-950/80 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white">
                       {mediaBadge}
                     </span>
                   </div>
@@ -762,23 +783,23 @@ export function ItemCardGrid({
                       >
                         {platformInfo.label}
                       </span>
-                      <h3 className="truncate text-sm font-semibold text-slate-900 group-hover:text-indigo-700">
+                      <h3 className="truncate text-sm font-semibold text-[var(--cp-text)] group-hover:text-[var(--cp-text-active)]">
                         {item.title}
                       </h3>
                     </div>
 
-                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--cp-text-muted)]">
                       <span className="inline-flex items-center gap-1">
-                        <User className="h-3 w-3 text-slate-400" />
+                        <User className="h-3 w-3" />
                         <span>{item.author.name}</span>
                       </span>
                       {exclusion ? (
                         <>
-                          <span className="font-medium text-amber-800">
+                          <span className="font-medium text-amber-800 dark:text-amber-300">
                             {statusBadge.label}
                           </span>
                           {exclusion.detail && (
-                            <span className="truncate text-[11px] text-amber-700">
+                            <span className="truncate text-[11px] text-amber-700 dark:text-amber-400">
                               {exclusion.detail}
                             </span>
                           )}
@@ -794,11 +815,11 @@ export function ItemCardGrid({
                       )}
                       {item.tags.slice(0, 4).map((tagName) => {
                         const tagColor =
-                          tagsByName.get(tagName)?.color ?? '#6366f1';
+                          tagsByName.get(tagName)?.color ?? '#0d9488';
                         return (
                           <span
                             key={tagName}
-                            className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-700"
+                            className="inline-flex items-center gap-1 rounded bg-[var(--cp-muted)] px-2 py-0.5 text-[10px] font-medium text-[var(--cp-text-secondary)]"
                           >
                             <span
                               className="h-1.5 w-1.5 rounded-full"
@@ -815,7 +836,7 @@ export function ItemCardGrid({
                   <div className="flex shrink-0 items-center gap-2">
                     <span
                       title={statusBadge.label}
-                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${statusBadge.badgeClass}`}
+                      className={`inline-flex items-center gap-1 rounded px-2.5 py-0.5 text-[11px] font-medium ${statusBadge.badgeClass}`}
                     >
                       <span
                         className={`h-1.5 w-1.5 rounded-full ${statusBadge.dotClass}`}
@@ -832,11 +853,11 @@ export function ItemCardGrid({
                               e.stopPropagation();
                               void onAllowAutoSyncAgain([item]);
                             }}
-                            title="允许再次自动同步"
-                            className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100"
+                            title={i18n.t('grid.allowAutoSyncAgain')}
+                            className="inline-flex items-center gap-1 rounded border border-[var(--cp-border-strong)] bg-[var(--cp-active)] px-2.5 py-1.5 text-xs font-medium text-[var(--cp-text-active)] transition hover:border-[var(--cp-accent)]"
                           >
                             <RotateCcw className="h-3.5 w-3.5" />
-                            <span>允许同步</span>
+                            <span>{i18n.t('grid.allowSyncShort')}</span>
                           </button>
                           <button
                             type="button"
@@ -844,9 +865,9 @@ export function ItemCardGrid({
                               e.stopPropagation();
                               void onRemoteUncollectAndClear([item]);
                             }}
-                            title="取消原站收藏并清除"
-                            aria-label="取消原站收藏并清除"
-                            className="rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                            title={i18n.t('grid.remoteUncollectAndClear')}
+                            aria-label={i18n.t('grid.remoteUncollectAndClear')}
+                            className="rounded p-1.5 text-[var(--cp-text-muted)] transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/60 dark:hover:text-rose-400"
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>
@@ -859,11 +880,11 @@ export function ItemCardGrid({
                               e.stopPropagation();
                               void onRestoreItem(item);
                             }}
-                            title="从回收站恢复"
-                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100"
+                            title={i18n.t('grid.restoreFromTrashTitle')}
+                            className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/70 dark:text-emerald-300"
                           >
                             <RotateCcw className="h-3.5 w-3.5" />
-                            <span>恢复</span>
+                            <span>{i18n.t('grid.restoreShort')}</span>
                           </button>
                           <button
                             type="button"
@@ -871,9 +892,9 @@ export function ItemCardGrid({
                               e.stopPropagation();
                               onRequestDeleteItems([item], 'permanent');
                             }}
-                            title="彻底删除"
-                            aria-label="彻底删除"
-                            className="rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                            title={i18n.t('grid.permanentDelete')}
+                            aria-label={i18n.t('grid.permanentDelete')}
+                            className="rounded p-1.5 text-[var(--cp-text-muted)] transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/60 dark:hover:text-rose-400"
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>
@@ -887,11 +908,11 @@ export function ItemCardGrid({
                                 e.stopPropagation();
                                 void onCancelItemSync(item);
                               }}
-                              title="取消同步到插件"
-                              className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-100"
+                              title={i18n.t('grid.cancelItemSyncTitle')}
+                              className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-100 dark:border-amber-900 dark:bg-amber-950/70 dark:text-amber-300"
                             >
                               <CloudOff className="h-3.5 w-3.5" />
-                              <span>取消同步</span>
+                              <span>{i18n.t('grid.cancelItemSyncShort')}</span>
                             </button>
                           )}
                           <button
@@ -900,9 +921,9 @@ export function ItemCardGrid({
                               e.stopPropagation();
                               onRequestDeleteItems([item], 'soft');
                             }}
-                            title="移入回收站"
-                            aria-label="移入回收站"
-                            className="rounded-lg p-1.5 text-slate-400 opacity-0 transition hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                            title={i18n.t('grid.moveToTrash')}
+                            aria-label={i18n.t('grid.moveToTrash')}
+                            className="rounded p-1.5 text-[var(--cp-text-muted)] opacity-0 transition hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 dark:hover:bg-rose-950/60 dark:hover:text-rose-400"
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>

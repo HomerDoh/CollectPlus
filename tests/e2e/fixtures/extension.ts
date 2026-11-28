@@ -63,6 +63,7 @@ export const test = base.extend<ExtensionFixtures>({
       args: [
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
+        '--lang=zh-CN',
         '--no-first-run',
         '--no-default-browser-check',
       ],

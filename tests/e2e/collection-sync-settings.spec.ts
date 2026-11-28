@@ -311,6 +311,7 @@ test.describe('Collect+ 自动同步全部收藏与取消收藏同步闭环验�
         timeout: 10_000,
       });
 
+      await libraryPage.getByTestId('sidebar-more-toggle').click();
       await libraryPage.getByRole('button', { name: /回收站/ }).click();
       await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible({
         timeout: 10_000,

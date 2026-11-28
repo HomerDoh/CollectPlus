@@ -10,6 +10,7 @@
  */
 
 import { liveQuery } from 'dexie';
+import { i18n } from '../i18n/index.ts';
 import { db } from '../storage/db.ts';
 import type { DownloadTask } from '../types/schema.ts';
 
@@ -101,8 +102,17 @@ export function computeActionIconState(
         : String(remainingCount)
       : null;
 
-  const title =
-    remainingCount >= 2
+  const hasI18n =
+    typeof chrome !== 'undefined' &&
+    typeof chrome.i18n?.getMessage === 'function';
+  const title = hasI18n
+    ? remainingCount >= 2
+      ? i18n.t('actionIcon.downloadingMulti', {
+          count: remainingCount,
+          progress,
+        })
+      : i18n.t('actionIcon.downloadingSingle', { progress })
+    : remainingCount >= 2
       ? `${DEFAULT_ACTION_TITLE} · 剩余 ${remainingCount} 项下载 (${progress}%)`
       : `${DEFAULT_ACTION_TITLE} · 下载中 ${progress}%`;
 

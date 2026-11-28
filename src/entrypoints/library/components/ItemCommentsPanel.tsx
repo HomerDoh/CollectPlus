@@ -6,10 +6,12 @@ import {
   RotateCcw,
   ThumbsUp,
 } from 'lucide-react';
+import { i18n } from '@/i18n/index.ts';
 import {
   readItemAssetFile,
   readItemComments,
   type VaultPermissionStatus,
+  type VaultStorageBackend,
 } from '@/storage/vault.ts';
 import type {
   CollectionItemRecord,
@@ -21,7 +23,7 @@ const AVATAR_LOAD_CONCURRENCY = 8;
 
 export interface ItemCommentsPanelProps {
   item: CollectionItemRecord;
-  vaultHandle: FileSystemDirectoryHandle | null;
+  vaultBackend: VaultStorageBackend | null;
   permissionState: VaultPermissionStatus;
   onRequestVaultAccess: () => Promise<boolean>;
 }
@@ -33,7 +35,7 @@ function getAvatarInitial(name: string): string {
 
 export function ItemCommentsPanel({
   item,
-  vaultHandle,
+  vaultBackend,
   permissionState,
   onRequestVaultAccess,
 }: ItemCommentsPanelProps) {
@@ -59,7 +61,7 @@ export function ItemCommentsPanel({
       setAvatarUrlByPath({});
 
       try {
-        const loaded = await readItemComments(item, vaultHandle);
+        const loaded = await readItemComments(item, vaultBackend);
         if (cancelled) {
           return;
         }
@@ -68,7 +70,7 @@ export function ItemCommentsPanel({
           const authBlocked =
             Boolean(item.commentsRelativePath) &&
             permissionState !== 'granted' &&
-            (vaultHandle !== null || item.syncStatus === 'vault_synced');
+            (vaultBackend !== null || item.syncStatus === 'vault_synced');
           setNeedsVaultAuth(authBlocked);
           return;
         }
@@ -99,7 +101,7 @@ export function ItemCommentsPanel({
               return;
             }
             try {
-              const file = await readItemAssetFile(item, relPath, vaultHandle);
+              const file = await readItemAssetFile(item, relPath, vaultBackend);
               if (cancelled || !file || file.size === 0) {
                 continue;
               }
@@ -142,7 +144,7 @@ export function ItemCommentsPanel({
     item.commentsRelativePath,
     item.savedCommentCount,
     item.syncStatus,
-    vaultHandle,
+    vaultBackend,
     permissionState,
     reloadTick,
   ]);
@@ -161,9 +163,9 @@ export function ItemCommentsPanel({
 
   if (loading) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2.5 px-5 py-10 text-xs text-slate-400">
-        <Loader2 className="h-5 w-5 animate-spin text-indigo-500" />
-        <span>正在加载离线评论...</span>
+      <div className="flex flex-1 flex-col items-center justify-center gap-2.5 px-5 py-10 text-xs text-[var(--pd-text-muted)]">
+        <Loader2 className="h-5 w-5 animate-spin text-[var(--pd-accent)]" />
+        <span>{i18n.t('comments.loading')}</span>
       </div>
     );
   }
@@ -171,27 +173,27 @@ export function ItemCommentsPanel({
   if (needsVaultAuth) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center">
-        <span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600">
+        <span className="inline-flex h-11 w-11 items-center justify-center rounded-md bg-[var(--pd-accent-soft)] text-[var(--pd-accent)]">
           <FolderKey className="h-5 w-5" />
         </span>
-        <p className="text-xs font-semibold text-slate-800">
-          需要授权本地 CollectVault 目录
+        <p className="text-xs font-semibold text-[var(--pd-text)]">
+          {i18n.t('detail.vaultAuthTitle')}
         </p>
-        <p className="max-w-xs text-[11px] leading-relaxed text-slate-500">
-          评论与头像已保存在本地同步目录中，授予读取权限后即可离线查看。
+        <p className="max-w-xs text-[11px] leading-relaxed text-[var(--pd-text-muted)]">
+          {i18n.t('comments.vaultAuthDesc')}
         </p>
         <button
           type="button"
           onClick={() => void handleAuthorizeAndReload()}
           disabled={authorizing}
-          className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60"
+          className="inline-flex items-center gap-1.5 rounded-[var(--pd-radius-control)] bg-[var(--pd-accent)] px-3.5 py-2 text-xs font-semibold text-[var(--pd-on-accent)] transition hover:bg-[var(--pd-accent-hover)] disabled:opacity-60"
         >
           {authorizing ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
             <FolderKey className="h-3.5 w-3.5" />
           )}
-          <span>授权本地目录并加载</span>
+          <span>{i18n.t('detail.vaultAuthBtn')}</span>
         </button>
       </div>
     );
@@ -200,20 +202,22 @@ export function ItemCommentsPanel({
   if (!commentsFile || commentsFile.comments.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-12 text-center">
-        <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+        <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-[var(--pd-surface-muted)] text-[var(--pd-text-muted)]">
           <MessageSquare className="h-5 w-5" />
         </span>
-        <p className="text-xs font-medium text-slate-600">暂无已保存的离线评论</p>
-        <p className="text-[11px] text-slate-400">
-          支持离线评论的平台在收藏时将自动同步保存前 100 条评论或回复。
+        <p className="text-xs font-medium text-[var(--pd-text-secondary)]">
+          {i18n.t('comments.emptyTitle')}
+        </p>
+        <p className="text-[11px] text-[var(--pd-text-muted)]">
+          {i18n.t('comments.emptyDesc')}
         </p>
         <button
           type="button"
           onClick={() => setReloadTick((prev) => prev + 1)}
-          className="mt-1 inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+          className="mt-1 inline-flex items-center gap-1 rounded border border-[var(--pd-border)] bg-[var(--pd-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--pd-text-secondary)] hover:border-[var(--pd-accent)] hover:text-[var(--pd-text)]"
         >
           <RotateCcw className="h-3 w-3" />
-          <span>刷新</span>
+          <span>{i18n.t('common.refresh')}</span>
         </button>
       </div>
     );
@@ -221,20 +225,22 @@ export function ItemCommentsPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/70 px-5 py-2 text-[11px] text-slate-500">
-        <span className="font-medium text-slate-700">
-          已离线保存 {commentsFile.comments.length} 条评论
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--pd-divider)] bg-[var(--pd-surface-muted)] px-5 py-2 text-[11px] text-[var(--pd-text-muted)]">
+        <span className="font-medium text-[var(--pd-text-secondary)]">
+          {i18n.t('comments.savedCount', { count: commentsFile.comments.length })}
         </span>
         {commentsFile.capturedAt > 0 && (
-          <span className="tabular-nums text-slate-400">
-            抓取于 {formatDateTime(commentsFile.capturedAt)}
+          <span className="tabular-nums text-[var(--pd-text-muted)]">
+            {i18n.t('comments.capturedAt', {
+              time: formatDateTime(commentsFile.capturedAt),
+            })}
           </span>
         )}
       </div>
 
       <ul
         data-testid="item-comments-list"
-        className="flex flex-1 flex-col divide-y divide-slate-100 overflow-y-auto px-5 py-2"
+        className="flex flex-1 flex-col divide-y divide-[var(--pd-divider)] overflow-y-auto px-5 py-2"
       >
         {commentsFile.comments.map((comment) => {
           const avatarSrc = comment.avatarRelativePath
@@ -250,12 +256,12 @@ export function ItemCommentsPanel({
                 <img
                   src={avatarSrc}
                   alt={comment.authorName}
-                  className="h-8 w-8 shrink-0 rounded-full border border-slate-200 bg-slate-100 object-cover"
+                  className="h-8 w-8 shrink-0 rounded-full border border-[var(--pd-border)] bg-[var(--pd-surface-muted)] object-cover"
                 />
               ) : (
                 <span
                   aria-hidden="true"
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-xs font-semibold text-indigo-600 ring-1 ring-inset ring-indigo-100"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--pd-accent-soft)] text-xs font-semibold text-[var(--pd-accent)]"
                 >
                   {getAvatarInitial(comment.authorName)}
                 </span>
@@ -263,21 +269,27 @@ export function ItemCommentsPanel({
 
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-xs font-semibold text-slate-800">
+                  <span className="truncate text-xs font-semibold text-[var(--pd-text)]">
                     {comment.authorName}
                   </span>
-                  <span className="inline-flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-slate-400">
+                  <span
+                    className={`inline-flex shrink-0 items-center gap-1 text-[11px] tabular-nums ${
+                      comment.likeCount > 0
+                        ? 'font-medium text-[var(--pd-like-accent)]'
+                        : 'text-[var(--pd-text-muted)]'
+                    }`}
+                  >
                     <ThumbsUp className="h-3 w-3" />
                     <span>{formatCompactCount(comment.likeCount)}</span>
                   </span>
                 </div>
 
-                <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-700">
+                <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-[var(--pd-text-secondary)]">
                   {comment.content}
                 </p>
 
                 {comment.createdAt !== undefined && comment.createdAt > 0 && (
-                  <p className="mt-1 text-[10px] tabular-nums text-slate-400">
+                  <p className="mt-1 text-[10px] tabular-nums text-[var(--pd-text-muted)]">
                     {formatDateTime(comment.createdAt)}
                   </p>
                 )}

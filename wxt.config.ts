@@ -1,65 +1,52 @@
 import { defineConfig } from 'wxt';
 import tailwindcss from '@tailwindcss/vite';
 
+const googleDriveClientId = process.env.VITE_GOOGLE_DRIVE_CLIENT_ID?.trim();
+const extensionPublicKey = process.env.VITE_EXTENSION_PUBLIC_KEY?.trim();
+
 export default defineConfig({
   srcDir: 'src',
   publicDir: 'src/public',
-  modules: ['@wxt-dev/module-react'],
+  modules: ['@wxt-dev/module-react', '@wxt-dev/i18n/module'],
   vite: () => ({
     plugins: [tailwindcss()],
   }),
   manifest: {
+    default_locale: 'zh_CN',
     name: 'Collect+',
     short_name: 'Collect+',
-    description: '本地优先的跨平台防失效收藏管理扩展',
+    description: '__MSG_extDescription__',
+    ...(extensionPublicKey ? { key: extensionPublicKey } : {}),
     permissions: [
       'storage',
       'unlimitedStorage',
       'offscreen',
       'declarativeNetRequest',
+      'scripting',
       'tabs',
       'activeTab',
+      'identity',
     ],
-    host_permissions: [
-      'https://www.douyin.com/*',
-      'https://*.douyin.com/*',
-      'https://*.douyinvod.com/*',
-      'https://*.byteimg.com/*',
-      'https://*.douyinpic.com/*',
-      'https://*.snssdk.com/*',
-      'https://*.pstatp.com/*',
-      'https://*.zjcdn.com/*',
-      'https://*.ibytedtos.com/*',
-      'https://www.bilibili.com/*',
-      'https://bilibili.com/*',
-      'https://space.bilibili.com/*',
-      'https://api.bilibili.com/*',
-      'https://*.bilivideo.com/*',
-      'https://*.bilivideo.cn/*',
-      'https://*.hdslb.com/*',
-      'https://*.akamaized.net/*',
-      'https://www.v2ex.com/*',
-      'https://v2ex.com/*',
-      'https://cdn.v2ex.com/*',
-      'https://i.v2ex.co/*',
-      'https://www.xiaohongshu.com/*',
-      'https://xiaohongshu.com/*',
-      'https://edith.xiaohongshu.com/*',
-      'https://*.xhscdn.com/*',
-      'https://*.xhscdn.net/*',
-      'https://www.zhihu.com/*',
-      'https://zhihu.com/*',
-      'https://zhuanlan.zhihu.com/*',
-      'https://*.zhimg.com/*',
-      'https://*.vzuu.com/*',
-      'https://lens.zhihu.com/*',
-    ],
+    ...(googleDriveClientId
+      ? {
+          oauth2: {
+            client_id: googleDriveClientId,
+            scopes: [
+              'https://www.googleapis.com/auth/drive.file',
+              'https://www.googleapis.com/auth/userinfo.email',
+            ],
+          },
+        }
+      : {}),
+    // 覆盖全网按需提取（scripting.executeScript）与 Offscreen 跨站防盗链下载；
+    // 静态内容脚本（site.content.tsx / site-main.content.ts）仍严格限定仅注入已注册的 Tier 2/3 站点。
+    host_permissions: ['https://*/*', 'http://*/*'],
     commands: {
       'capture-current-item': {
         suggested_key: {
           default: 'Alt+S',
         },
-        description: '立即收藏当前页面视频或图集到 Collect+',
+        description: '__MSG_commandCaptureDescription__',
       },
     },
     action: {

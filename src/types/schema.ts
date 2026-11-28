@@ -5,11 +5,13 @@
  * 元数据必须仅包含相对路径，禁止包含绝对路径或 Base64 缩略图数据。
  */
 
+import type { VaultProviderId } from './storage-provider.ts';
+
 /** 当前元数据 Schema 版本号 */
 export const SCHEMA_VERSION = 1 as const;
 
-/** 支持的内容平台标识列表 */
-export const PLATFORM_IDS = [
+/** 内置内容平台标识列表（包含通用网页 `'web'`） */
+export const BUILTIN_PLATFORM_IDS = [
   'douyin',
   'bilibili',
   'v2ex',
@@ -18,17 +20,85 @@ export const PLATFORM_IDS = [
   'xiaohongshu',
   'twitter',
   'instagram',
+  'xvideos',
+  'pornhub',
+  'web',
 ] as const;
 
-/** 支持的内容平台 ID */
-export type PlatformId = (typeof PLATFORM_IDS)[number];
+/** @deprecated 请优先使用 `BUILTIN_PLATFORM_IDS`；保留以兼容外部引用 */
+export const PLATFORM_IDS = BUILTIN_PLATFORM_IDS;
 
-/** 运行时校验是否为合法的 PlatformId */
+/** 内置内容平台 ID 联合类型 */
+export type BuiltinPlatformId = (typeof BUILTIN_PLATFORM_IDS)[number];
+
+/**
+ * 开放站点平台标识（内置短 ID、通用网页 `'web'` 或自定义 Recipe slug）。
+ * 必须满足安全目录命名约束 `^[a-z0-9][a-z0-9_-]{0,31}$`，严禁路径穿越或非法字符。
+ */
+export type PlatformId = string;
+
+const SAFE_PLATFORM_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const WINDOWS_RESERVED_PLATFORM_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+
+/** 运行时校验是否为合法且文件系统安全的 PlatformId */
 export function isPlatformId(value: unknown): value is PlatformId {
   return (
     typeof value === 'string' &&
-    (PLATFORM_IDS as readonly string[]).includes(value)
+    SAFE_PLATFORM_ID_RE.test(value) &&
+    !WINDOWS_RESERVED_PLATFORM_RE.test(value)
   );
+}
+
+/** 媒体资源下载时所需的非敏感防盗链请求头（严禁承载 Cookie/Authorization 等凭证） */
+export interface AssetRequestHeaders {
+  referer?: string;
+  origin?: string;
+}
+
+function sanitizeHttpHeaderUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.href;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/** 运行时清洗非敏感防盗链请求头（仅放行合法 http/https 的 referer 与 origin） */
+export function sanitizeAssetRequestHeaders(
+  raw: unknown,
+): AssetRequestHeaders | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const rec = raw as Record<string, unknown>;
+  const referer = sanitizeHttpHeaderUrl(rec.referer);
+  const rawOrigin = sanitizeHttpHeaderUrl(rec.origin);
+  let origin: string | undefined;
+  if (rawOrigin) {
+    try {
+      origin = new URL(rawOrigin).origin;
+    } catch {
+      origin = undefined;
+    }
+  }
+  if (!referer && !origin) {
+    return undefined;
+  }
+  return {
+    ...(referer ? { referer } : {}),
+    ...(origin ? { origin } : {}),
+  };
 }
 
 /** 不自动同步（忽略自动采集）的原因枚举 */
@@ -118,6 +188,8 @@ export interface MediaAsset {
   height?: number;
   /** 音视频时长（秒） */
   durationSec?: number;
+  /** 下载该资产时需动态注入的非敏感防盗链头（Referer / Origin） */
+  requestHeaders?: AssetRequestHeaders;
   /** 是否已完成本地落盘（OPFS 或 Vault） */
   downloaded: boolean;
 }
@@ -208,6 +280,8 @@ export interface CollectionItemMeta {
   folderId: string | null;
   /** 所属分类文件夹 ID 列表（去重；空数组表示未分类，支持单条目同时归属多个文件夹） */
   folderIds: string[];
+  /** 文件夹归属来源：'manual' 为用户前置指定或管理台手动整理，'auto' 为本地分类器自动归类（防自学习误差漂移） */
+  folderAssignedBy?: FolderAssignedBy;
   /** 标签名称列表 */
   tags: string[];
   /** 用户备注 */
@@ -228,6 +302,8 @@ export interface CollectionItemMeta {
   syncStatus: SyncStatus;
   /** 条目媒体文件总字节数 */
   totalSizeBytes: number;
+  /** 在管理台首次打开查看的时间戳（毫秒），null 或 undefined 表示尚未在后台打开过 */
+  openedAt?: number | null;
   /** 软删除时间戳（毫秒），null 或 undefined 表示未删除 */
   deletedAt?: number | null;
   /** 不自动同步标记：非空表示网页账号仍可能收藏，但插件不再自动同步，仅保留轻量元数据 */
@@ -241,6 +317,24 @@ export function isAutoSyncExcluded(
   item: Pick<CollectionItemMeta, 'autoSyncExclusion'>,
 ): boolean {
   return item.autoSyncExclusion != null;
+}
+
+const NSFW_HOSTS = ['xvideos.com', 'pornhub.com'];
+
+/** 判断条目是否属于 NSFW 内容（来源域名含子域名，或带 NSFW 标签，不区分大小写） */
+export function isNsfwItem(
+  item: Pick<CollectionItemMeta, 'sourceUrl' | 'tags'>,
+): boolean {
+  if (item.tags.some((tag) => tag.trim().toLowerCase() === 'nsfw')) {
+    return true;
+  }
+  let host: string;
+  try {
+    host = new URL(item.sourceUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return NSFW_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
 }
 
 /**
@@ -303,6 +397,89 @@ export function getItemFolderIds(
   return normalizeFolderIds(item.folderIds, item.folderId);
 }
 
+/** 条目文件夹归属来源（用于区分人工确认样本与自动分类结果，避免误差滚雪球） */
+export type FolderAssignedBy = 'manual' | 'auto';
+
+/** 运行时校验是否为合法的 FolderAssignedBy */
+export function isFolderAssignedBy(value: unknown): value is FolderAssignedBy {
+  return value === 'manual' || value === 'auto';
+}
+
+/** 文件夹自动分类显式微规则（可选，随 `taxonomy.json` 持久化，全空时省略） */
+export interface FolderAutoRule {
+  /** 标题 / 标签 / 正文前段关键词（英文按词边界匹配，中文按子串匹配） */
+  keywords?: string[];
+  /** 精确匹配的标签 / 话题 / 节点名（忽略大小写与前导 `#`） */
+  tags?: string[];
+  /** 精确匹配的作者 ID 或作者名（忽略大小写） */
+  authors?: string[];
+  /** 限定来源平台列表（与其他条件组合时作前置过滤，单独配置时按平台直通） */
+  platforms?: PlatformId[];
+}
+
+function normalizeRuleStrings(
+  values?: readonly string[] | null,
+  stripHash = false,
+): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of values) {
+    if (typeof raw !== 'string') {
+      continue;
+    }
+    const cleaned = (stripHash ? raw.trim().replace(/^#+/, '') : raw).trim();
+    if (!cleaned) {
+      continue;
+    }
+    const dedupe = cleaned.toLowerCase();
+    if (seen.has(dedupe)) {
+      continue;
+    }
+    seen.add(dedupe);
+    result.push(cleaned);
+  }
+  return result;
+}
+
+/** 规范化文件夹自动分类规则；若全部维度为空则返回 `undefined` */
+export function normalizeFolderAutoRule(
+  raw?: FolderAutoRule | null,
+): FolderAutoRule | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const keywords = normalizeRuleStrings(raw.keywords, false);
+  const tags = normalizeRuleStrings(raw.tags, true);
+  const authors = normalizeRuleStrings(raw.authors, false);
+  const platforms: PlatformId[] = [];
+  if (Array.isArray(raw.platforms)) {
+    const seen = new Set<PlatformId>();
+    for (const p of raw.platforms) {
+      if (isPlatformId(p) && !seen.has(p)) {
+        seen.add(p);
+        platforms.push(p);
+      }
+    }
+  }
+  if (
+    keywords.length === 0 &&
+    tags.length === 0 &&
+    authors.length === 0 &&
+    platforms.length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    ...(keywords.length > 0 ? { keywords } : {}),
+    ...(tags.length > 0 ? { tags } : {}),
+    ...(authors.length > 0 ? { authors } : {}),
+    ...(platforms.length > 0 ? { platforms } : {}),
+  };
+}
+
 /** 树形文件夹节点 */
 export interface FolderNode {
   /** 文件夹唯一 ID（ULID） */
@@ -317,6 +494,8 @@ export interface FolderNode {
   createdAt: number;
   /** 更新时间戳（毫秒） */
   updatedAt: number;
+  /** 可选自动分类显式微规则（随 taxonomy.json 落盘，重建索引不丢失） */
+  autoRule?: FolderAutoRule;
 }
 
 /** 标签元数据 */
@@ -406,6 +585,8 @@ export interface UserPreferences {
   floatingButtonEnabled: boolean;
   /** 原站原生收藏时是否显示 5 秒取消本地持久化提示 Toast（默认开启） */
   nativeCollectToastEnabled: boolean;
+  /** NSFW 内容过滤（默认关闭）：开启后管理台隐藏 xvideos/pornhub 来源或带 NSFW 标签的条目 */
+  nsfwFilterEnabled: boolean;
   /** 自动同步全部收藏（默认关闭，跨平台全量同步总开关） */
   autoSyncAllCollections: boolean;
   /** 取消收藏时同步至插件（默认关闭，开启后原站取消收藏自动移入回收站） */
@@ -416,7 +597,9 @@ export interface UserPreferences {
   oversizedVideoThresholdMb: number;
   /** 视频过大取消自动保存时的通知方式（弹窗 / 静默，默认弹窗） */
   oversizedVideoNotifyMode: OversizedVideoNotifyMode;
-  /** 快捷收藏默认归属的文件夹 ID */
+  /** 未手动指定文件夹时是否启用本地智能自动分类（无匹配时兜底进入未分类，默认开启） */
+  autoClassifyEnabled: boolean;
+  /** 快捷收藏默认归属的文件夹 ID（关闭自动分类时生效） */
   defaultFolderId: string | null;
   /** 最大并发下载任务数 */
   maxConcurrentDownloads: number;
@@ -474,6 +657,23 @@ export interface PlatformAccountSyncStateSetting {
   updatedAt: number;
 }
 
+/** IndexedDB `settings` 表：当前启用的持久化存储插件 ID（缺省为 `'local_fs'`） */
+export interface ActiveVaultProviderSetting {
+  key: 'active_vault_provider';
+  value: VaultProviderId;
+  updatedAt: number;
+}
+
+/**
+ * IndexedDB `settings` 表：各持久化存储插件的非敏感配置映射（按插件 ID 隔离）。
+ * 铁律：严禁在此存储任何 Access Token、Refresh Token、密码或 Client Secret。
+ */
+export interface VaultProviderConfigsSetting {
+  key: 'vault_provider_configs';
+  value: Partial<Record<VaultProviderId, Record<string, unknown>>>;
+  updatedAt: number;
+}
+
 /**
  * IndexedDB `settings` 表的强类型判别联合记录。
  * 通过 `key` 精确区分句柄、配置及偏好值类型。
@@ -483,7 +683,9 @@ export type SettingRecord =
   | VaultConfigSetting
   | LastSyncTimestampSetting
   | UserPreferencesSetting
-  | PlatformAccountSyncStateSetting;
+  | PlatformAccountSyncStateSetting
+  | ActiveVaultProviderSetting
+  | VaultProviderConfigsSetting;
 
 /** 所有受支持的设置键联合类型 */
 export type SettingKey = SettingRecord['key'];

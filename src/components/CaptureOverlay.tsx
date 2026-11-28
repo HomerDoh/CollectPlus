@@ -7,20 +7,26 @@
 import {
   AlertTriangle,
   BookmarkPlus,
+  Check,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   Clock,
   CloudOff,
   ExternalLink,
+  Folder,
   HardDrive,
   Heart,
   Loader2,
   RefreshCw,
+  Sparkles,
   X,
 } from 'lucide-react';
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { i18n, initI18n, useI18nLocale } from '@/i18n/index.ts';
 import { formatBytes } from '../entrypoints/library/utils/format.ts';
-import type { AutoSyncExclusionReason } from '../types/schema.ts';
+import type { AutoSyncExclusionReason, FolderNode } from '../types/schema.ts';
+import { flattenFolderOptions } from './folder-options.ts';
 import type { NativeCollectToastState } from './native-collect-buffer.ts';
 
 /** 视频过大提示弹窗自动消失时间（毫秒） */
@@ -60,6 +66,12 @@ export interface CaptureOverlaySnapshot {
   syncBanner: SyncBannerState | null;
   oversizedPrompt?: OversizedPromptState | null;
   nativeCollectToast?: NativeCollectToastState | null;
+  /** 用户创建的分类文件夹树（用于前置手动指定目录） */
+  folders?: readonly FolderNode[];
+  /** 未手动指定目录时是否开启智能自动分类 */
+  autoClassifyEnabled?: boolean;
+  /** 当前页面会话级前置锁定的目标文件夹（undefined = 自动分类，null = 显式未分类） */
+  sessionFolderId?: string | null;
 }
 
 /** 轻量外部状态存储接口，供 Content Script 驱动 React Shadow DOM 渲染 */
@@ -80,6 +92,11 @@ export interface CaptureOverlayActions {
   onSkipOversized?: () => void;
   onSkipNativeCollectPersistence?: (reason: AutoSyncExclusionReason) => void;
   onSaveNativeCollectNow?: () => void;
+  onPauseNativeCollectTimer?: () => void;
+  onResumeNativeCollectTimer?: () => void;
+  onSaveNativeCollectToFolder?: (folderId: string | null) => void;
+  onSelectSessionFolder?: (folderId: string | null | undefined) => void;
+  onRefreshFolders?: () => void;
 }
 
 export interface CaptureOverlayProps {
@@ -88,6 +105,11 @@ export interface CaptureOverlayProps {
 }
 
 export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
+  useI18nLocale();
+  useEffect(() => {
+    void initI18n();
+  }, []);
+
   const {
     isCapturing,
     floatingButtonEnabled,
@@ -95,14 +117,57 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
     syncBanner,
     oversizedPrompt = null,
     nativeCollectToast = null,
+    folders = [],
+    autoClassifyEnabled = true,
+    sessionFolderId = undefined,
   } = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [fabCollapsed, setFabCollapsed] = useState(false);
+  const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState(5);
   const [nativeToastSeconds, setNativeToastSeconds] = useState(5);
+  const folderWrapRef = useRef<HTMLDivElement | null>(null);
+
+  const flatFolders = useMemo(() => flattenFolderOptions(folders), [folders]);
+  const sessionFolderLabel = useMemo(() => {
+    if (sessionFolderId === undefined) {
+      return i18n.t('overlay.fabFolderAutoShort');
+    }
+    if (sessionFolderId === null) {
+      return i18n.t('overlay.fabFolderUncategorizedShort');
+    }
+    const found = folders.find((f) => f.id === sessionFolderId);
+    return found ? found.name : i18n.t('overlay.fabFolderAutoShort');
+  }, [folders, sessionFolderId]);
 
   const oversizedPromptId = oversizedPrompt?.id ?? null;
   const nativeToastId = nativeCollectToast?.id ?? null;
-  const nativeToastDurationMs = nativeCollectToast?.durationMs ?? 5000;
+  const nativeToastPaused = nativeCollectToast?.paused ?? false;
+  const nativeToastRemainingMs =
+    nativeCollectToast?.remainingMs ?? nativeCollectToast?.durationMs ?? 5000;
+
+  useEffect(() => {
+    if (!folderMenuOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      const path =
+        typeof event.composedPath === 'function' ? event.composedPath() : [];
+      if (folderWrapRef.current && !path.includes(folderWrapRef.current)) {
+        setFolderMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setFolderMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', handlePointerDown, true);
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown, true);
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [folderMenuOpen]);
 
   useEffect(() => {
     if (!oversizedPromptId) {
@@ -132,8 +197,13 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
       return;
     }
 
-    const deadline = Date.now() + nativeToastDurationMs;
-    setNativeToastSeconds(Math.ceil(nativeToastDurationMs / 1000));
+    if (nativeToastPaused) {
+      setNativeToastSeconds(Math.max(1, Math.ceil(nativeToastRemainingMs / 1000)));
+      return;
+    }
+
+    const deadline = Date.now() + nativeToastRemainingMs;
+    setNativeToastSeconds(Math.max(1, Math.ceil(nativeToastRemainingMs / 1000)));
 
     const tickInterval = setInterval(() => {
       const leftMs = deadline - Date.now();
@@ -143,7 +213,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
     return () => {
       clearInterval(tickInterval);
     };
-  }, [nativeToastId, nativeToastDurationMs]);
+  }, [nativeToastId, nativeToastPaused, nativeToastRemainingMs]);
 
   if (
     !floatingButtonEnabled &&
@@ -163,7 +233,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
             <div
               className="cp-native-collect-toast"
               role="status"
-              aria-label="原站收藏取消本地持久化快捷提示"
+              aria-label={i18n.t('overlay.nativeToastAria')}
               data-testid="cp-native-collect-toast"
             >
               <div className="cp-sync-card-head">
@@ -172,7 +242,11 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                 </span>
                 <div className="cp-sync-card-title-wrap">
                   <div className="cp-sync-card-title">
-                    已捕获收藏 · {nativeToastSeconds}s 后本地保存
+                    {nativeCollectToast.paused
+                      ? i18n.t('overlay.nativeToastTitlePaused')
+                      : i18n.t('overlay.nativeToastTitle', {
+                          seconds: nativeToastSeconds,
+                        })}
                   </div>
                   <div
                     className="cp-oversized-title"
@@ -184,15 +258,78 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                 <button
                   type="button"
                   className="cp-sync-close-btn"
-                  title="立即本地保存并关闭提示"
-                  aria-label="立即本地保存并关闭提示"
+                  title={i18n.t('overlay.nativeToastSaveNowAria')}
+                  aria-label={i18n.t('overlay.nativeToastSaveNowAria')}
                   onClick={() => actions.onSaveNativeCollectNow?.()}
                 >
                   <X size={14} />
                 </button>
               </div>
+              {actions.onSaveNativeCollectToFolder && (
+                <div className="cp-native-folder-row">
+                  <span className="cp-native-folder-label">
+                    {nativeCollectToast.autoClassifyEnabled !== false ? (
+                      <Sparkles size={12} />
+                    ) : (
+                      <Folder size={12} />
+                    )}
+                    <span>{i18n.t('overlay.nativeToastFolderLabel')}</span>
+                  </span>
+                  <select
+                    className="cp-native-folder-select"
+                    data-testid="cp-native-folder-select"
+                    aria-label={i18n.t('overlay.nativeToastFolderLabel')}
+                    value="__auto__"
+                    onMouseDown={() => {
+                      actions.onPauseNativeCollectTimer?.();
+                      actions.onRefreshFolders?.();
+                    }}
+                    onFocus={() => {
+                      actions.onPauseNativeCollectTimer?.();
+                      actions.onRefreshFolders?.();
+                    }}
+                    onBlur={() => {
+                      actions.onResumeNativeCollectTimer?.();
+                    }}
+                    onChange={(event) => {
+                      const val = event.target.value;
+                      if (val === '__auto__') {
+                        actions.onResumeNativeCollectTimer?.();
+                        return;
+                      }
+                      actions.onSaveNativeCollectToFolder?.(
+                        val === '__uncategorized__' ? null : val,
+                      );
+                    }}
+                  >
+                    <option value="__auto__">
+                      {nativeCollectToast.autoClassifyEnabled !== false
+                        ? nativeCollectToast.predictedFolderName
+                          ? i18n.t('overlay.nativeToastFolderAutoPredicted', {
+                              folder: nativeCollectToast.predictedFolderName,
+                            })
+                          : i18n.t('overlay.nativeToastFolderAutoUncategorized')
+                        : nativeCollectToast.predictedFolderName
+                          ? i18n.t('overlay.nativeToastFolderDefaultTarget', {
+                              folder: nativeCollectToast.predictedFolderName,
+                            })
+                          : i18n.t('overlay.nativeToastFolderDefaultUncategorized')}
+                    </option>
+                    <option value="__uncategorized__">
+                      {i18n.t('overlay.nativeToastFolderManualUncategorized')}
+                    </option>
+                    {flatFolders.map((opt) => (
+                      <option key={opt.id} value={opt.id}>
+                        {i18n.t('overlay.nativeToastFolderManualOption', {
+                          name: opt.label,
+                        })}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="cp-native-toast-hint">
-                不想下载到本地？点选原因仅保留元数据：
+                {i18n.t('overlay.nativeToastHint')}
               </div>
               <div className="cp-native-toast-reasons">
                 <button
@@ -204,7 +341,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                   }
                 >
                   <Heart size={12} />
-                  <span>支持作者</span>
+                  <span>{i18n.t('format.exclusion.supportAuthorShort')}</span>
                 </button>
                 <button
                   type="button"
@@ -215,7 +352,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                   }
                 >
                   <Clock size={12} />
-                  <span>稍后观看</span>
+                  <span>{i18n.t('format.exclusion.watchLaterShort')}</span>
                 </button>
                 <button
                   type="button"
@@ -226,13 +363,17 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                   }
                 >
                   <CloudOff size={12} />
-                  <span>仅存元数据</span>
+                  <span>{i18n.t('format.exclusion.skipLocalSaveShort')}</span>
                 </button>
               </div>
               <div className="cp-oversized-progress-track" aria-hidden="true">
                 <div
                   key={nativeCollectToast.id}
-                  className="cp-native-progress-bar"
+                  className={`cp-native-progress-bar${
+                    nativeCollectToast.paused
+                      ? ' cp-native-progress-bar--paused'
+                      : ''
+                  }`}
                 />
               </div>
             </div>
@@ -242,7 +383,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
               className="cp-oversized-prompt"
               role="alertdialog"
               aria-modal="false"
-              aria-label="视频体积过大已取消自动保存"
+              aria-label={i18n.t('overlay.oversizedAria')}
               data-testid="cp-oversized-prompt"
             >
               <div className="cp-sync-card-head">
@@ -254,7 +395,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                 </span>
                 <div className="cp-sync-card-title-wrap">
                   <div className="cp-sync-card-title">
-                    视频过大，已取消自动保存
+                    {i18n.t('overlay.oversizedTitle')}
                   </div>
                   <div
                     className="cp-oversized-title"
@@ -266,7 +407,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                 <button
                   type="button"
                   className="cp-sync-close-btn"
-                  aria-label="跳过并关闭"
+                  aria-label={i18n.t('overlay.oversizedCloseAria')}
                   onClick={() => actions.onSkipOversized?.()}
                 >
                   <X size={14} />
@@ -276,12 +417,14 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                 className="cp-oversized-size-row"
                 data-testid="cp-oversized-size"
               >
-                <span>视频容量：</span>
+                <span>{i18n.t('overlay.oversizedSizeLabel')}</span>
                 <strong className="cp-oversized-size-val">
                   {formatBytes(oversizedPrompt.videoSizeBytes)}
                 </strong>
                 <span className="cp-oversized-size-limit">
-                  （上限 {oversizedPrompt.thresholdMb} MB）
+                  {i18n.t('overlay.oversizedSizeLimit', {
+                    mb: oversizedPrompt.thresholdMb,
+                  })}
                 </span>
               </div>
               <div className="cp-sync-card-actions">
@@ -291,7 +434,9 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                   data-testid="cp-oversized-skip-btn"
                   onClick={() => actions.onSkipOversized?.()}
                 >
-                  跳过 ({remainingSeconds}s)
+                  {i18n.t('overlay.oversizedSkipBtn', {
+                    seconds: remainingSeconds,
+                  })}
                 </button>
                 <button
                   type="button"
@@ -299,7 +444,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                   data-testid="cp-oversized-save-btn"
                   onClick={() => actions.onConfirmOversizedSave?.()}
                 >
-                  继续保存
+                  {i18n.t('overlay.oversizedContinueBtn')}
                 </button>
               </div>
               <div className="cp-oversized-progress-track" aria-hidden="true">
@@ -312,163 +457,186 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
           )}
 
           {syncPrompt && (
-        <div
-          className="cp-sync-prompt"
-          role="dialog"
-          aria-modal="false"
-          aria-label="是否同步账号全部收藏数据"
-          data-testid="cp-sync-prompt"
-        >
-          <div className="cp-sync-card-head">
-            <span className="cp-sync-icon-badge" aria-hidden="true">
-              <RefreshCw size={15} />
-            </span>
-            <div className="cp-sync-card-title-wrap">
-              <div className="cp-sync-card-title">同步账号全部收藏？</div>
-              <div className="cp-sync-card-subtitle">
-                检测到已登录{syncPrompt.platformLabel}账号
-                {syncPrompt.accountName ? `（${syncPrompt.accountName}）` : ''}
+            <div
+              className="cp-sync-prompt"
+              role="dialog"
+              aria-modal="false"
+              aria-label={i18n.t('overlay.syncPromptAria')}
+              data-testid="cp-sync-prompt"
+            >
+              <div className="cp-sync-card-head">
+                <span className="cp-sync-icon-badge" aria-hidden="true">
+                  <RefreshCw size={15} />
+                </span>
+                <div className="cp-sync-card-title-wrap">
+                  <div className="cp-sync-card-title">
+                    {i18n.t('overlay.syncPromptTitle')}
+                  </div>
+                  <div className="cp-sync-card-subtitle">
+                    {syncPrompt.accountName
+                      ? i18n.t('overlay.syncPromptSubtitleWithAccount', {
+                          platform: syncPrompt.platformLabel,
+                          account: syncPrompt.accountName,
+                        })
+                      : i18n.t('overlay.syncPromptSubtitle', {
+                          platform: syncPrompt.platformLabel,
+                        })}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="cp-sync-close-btn"
+                  aria-label={i18n.t('overlay.syncPromptCloseAria')}
+                  onClick={actions.onDismissFullSync}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <p className="cp-sync-card-desc">
+                {i18n.t('overlay.syncPromptDesc')}
+              </p>
+              <div className="cp-sync-card-actions">
+                <button
+                  type="button"
+                  className="cp-sync-btn-secondary"
+                  onClick={actions.onDismissFullSync}
+                >
+                  {i18n.t('overlay.syncPromptLaterBtn')}
+                </button>
+                <button
+                  type="button"
+                  className="cp-sync-btn-primary"
+                  onClick={actions.onConfirmFullSync}
+                >
+                  {i18n.t('overlay.syncPromptNowBtn')}
+                </button>
+              </div>
+              <div className="cp-sync-card-hint">
+                {i18n.t('overlay.syncPromptHint')}
               </div>
             </div>
-            <button
-              type="button"
-              className="cp-sync-close-btn"
-              aria-label="暂不同步并关闭"
-              onClick={actions.onDismissFullSync}
-            >
-              <X size={14} />
-            </button>
-          </div>
-          <p className="cp-sync-card-desc">
-            是否将当前账号的全部历史收藏数据同步到 Collect+ 本地离线库？已收藏条目会自动去重跳过。
-          </p>
-          <div className="cp-sync-card-actions">
-            <button
-              type="button"
-              className="cp-sync-btn-secondary"
-              onClick={actions.onDismissFullSync}
-            >
-              暂不同步
-            </button>
-            <button
-              type="button"
-              className="cp-sync-btn-primary"
-              onClick={actions.onConfirmFullSync}
-            >
-              立即同步
-            </button>
-          </div>
-          <div className="cp-sync-card-hint">
-            可在 Collect+ 设置中开启「自动同步全部收藏」
-          </div>
-        </div>
-      )}
+          )}
 
-      {syncBanner && (
-        <div
-          className={`cp-sync-banner cp-sync-banner--${syncBanner.phase}`}
-          role="status"
-          data-testid="cp-sync-banner"
-        >
-          <div className="cp-sync-banner-row">
-            <span className="cp-sync-banner-icon" aria-hidden="true">
-              {syncBanner.phase === 'syncing' ? (
-                <Loader2 size={15} className="cp-spin" />
-              ) : syncBanner.phase === 'completed' ? (
-                <CheckCircle2 size={15} />
-              ) : (
-                <AlertTriangle size={15} />
-              )}
-            </span>
-            <div className="cp-sync-banner-body">
-              {syncBanner.phase === 'syncing' && (
-                <>
-                  <div className="cp-sync-banner-title">
-                    正在同步账号全部收藏...
-                  </div>
-                  <div className="cp-sync-banner-sub">
-                    已扫描 {syncBanner.fetchedCount} 条 · 新增{' '}
-                    {syncBanner.addedCount} 条
-                    {syncBanner.deduplicatedCount > 0
-                      ? ` · 已存在 ${syncBanner.deduplicatedCount} 条`
-                      : ''}
-                    {(syncBanner.skippedOversizedCount ?? 0) > 0
-                      ? ` · 跳过过大 ${syncBanner.skippedOversizedCount} 条`
-                      : ''}
-                  </div>
-                </>
-              )}
-              {syncBanner.phase === 'completed' && (
-                <>
-                  <div className="cp-sync-banner-title">
-                    {syncBanner.message ?? '账号全部收藏已加入离线下载队列'}
-                  </div>
-                  <div className="cp-sync-banner-sub">
-                    共扫描 {syncBanner.fetchedCount} 条 · 新增{' '}
-                    {syncBanner.addedCount} 条
-                    {syncBanner.deduplicatedCount > 0
-                      ? ` · 去重 ${syncBanner.deduplicatedCount} 条`
-                      : ''}
-                    {(syncBanner.skippedOversizedCount ?? 0) > 0
-                      ? ` · 跳过过大 ${syncBanner.skippedOversizedCount} 条`
-                      : ''}
-                  </div>
-                </>
-              )}
-              {syncBanner.phase === 'fallback' && (
-                <>
-                  <div className="cp-sync-banner-title">
-                    已切换为被动旁路同步模式
-                  </div>
-                  <div className="cp-sync-banner-sub">
-                    {syncBanner.message ??
-                      '主动分页拉取受限，已安全中止。请前往「我的收藏」页滚动浏览，插件将自动旁路同步。'}
-                  </div>
-                  {syncBanner.fallbackUrl && (
-                    <button
-                      type="button"
-                      className="cp-sync-fallback-btn"
-                      onClick={() =>
-                        actions.onOpenFallbackPage(syncBanner.fallbackUrl!)
-                      }
-                    >
-                      <span>前往「我的收藏」页被动同步</span>
-                      <ExternalLink size={12} />
-                    </button>
+          {syncBanner && (
+            <div
+              className={`cp-sync-banner cp-sync-banner--${syncBanner.phase}`}
+              role="status"
+              data-testid="cp-sync-banner"
+            >
+              <div className="cp-sync-banner-row">
+                <span className="cp-sync-banner-icon" aria-hidden="true">
+                  {syncBanner.phase === 'syncing' ? (
+                    <Loader2 size={15} className="cp-spin" />
+                  ) : syncBanner.phase === 'completed' ? (
+                    <CheckCircle2 size={15} />
+                  ) : (
+                    <AlertTriangle size={15} />
                   )}
-                </>
-              )}
-              {syncBanner.phase === 'error' && (
-                <>
-                  <div className="cp-sync-banner-title">全量收藏同步未完成</div>
-                  <div className="cp-sync-banner-sub">
-                    {syncBanner.message ?? '拉取过程中发生异常，请稍后重试。'}
-                  </div>
-                </>
-              )}
+                </span>
+                <div className="cp-sync-banner-body">
+                  {syncBanner.phase === 'syncing' && (
+                    <>
+                      <div className="cp-sync-banner-title">
+                        {i18n.t('overlay.syncBannerSyncingTitle')}
+                      </div>
+                      <div className="cp-sync-banner-sub">
+                        {i18n.t('overlay.syncBannerSyncingSub', {
+                          fetched: syncBanner.fetchedCount,
+                          added: syncBanner.addedCount,
+                        })}
+                        {syncBanner.deduplicatedCount > 0
+                          ? i18n.t('overlay.syncBannerExistingPart', {
+                              count: syncBanner.deduplicatedCount,
+                            })
+                          : ''}
+                        {(syncBanner.skippedOversizedCount ?? 0) > 0
+                          ? i18n.t('overlay.syncBannerSkippedOversizedPart', {
+                              count: syncBanner.skippedOversizedCount ?? 0,
+                            })
+                          : ''}
+                      </div>
+                    </>
+                  )}
+                  {syncBanner.phase === 'completed' && (
+                    <>
+                      <div className="cp-sync-banner-title">
+                        {syncBanner.message ??
+                          i18n.t('overlay.syncBannerCompletedDefault')}
+                      </div>
+                      <div className="cp-sync-banner-sub">
+                        {i18n.t('overlay.syncBannerCompletedSub', {
+                          fetched: syncBanner.fetchedCount,
+                          added: syncBanner.addedCount,
+                        })}
+                        {syncBanner.deduplicatedCount > 0
+                          ? i18n.t('overlay.syncBannerDedupPart', {
+                              count: syncBanner.deduplicatedCount,
+                            })
+                          : ''}
+                        {(syncBanner.skippedOversizedCount ?? 0) > 0
+                          ? i18n.t('overlay.syncBannerSkippedOversizedPart', {
+                              count: syncBanner.skippedOversizedCount ?? 0,
+                            })
+                          : ''}
+                      </div>
+                    </>
+                  )}
+                  {syncBanner.phase === 'fallback' && (
+                    <>
+                      <div className="cp-sync-banner-title">
+                        {i18n.t('overlay.syncBannerFallbackTitle')}
+                      </div>
+                      <div className="cp-sync-banner-sub">
+                        {syncBanner.message ??
+                          i18n.t('overlay.syncBannerFallbackDefault')}
+                      </div>
+                      {syncBanner.fallbackUrl && (
+                        <button
+                          type="button"
+                          className="cp-sync-fallback-btn"
+                          onClick={() =>
+                            actions.onOpenFallbackPage(syncBanner.fallbackUrl!)
+                          }
+                        >
+                          <span>{i18n.t('overlay.syncBannerFallbackBtn')}</span>
+                          <ExternalLink size={12} />
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {syncBanner.phase === 'error' && (
+                    <>
+                      <div className="cp-sync-banner-title">
+                        {i18n.t('overlay.syncBannerErrorTitle')}
+                      </div>
+                      <div className="cp-sync-banner-sub">
+                        {syncBanner.message ??
+                          i18n.t('overlay.syncBannerErrorDefault')}
+                      </div>
+                    </>
+                  )}
+                </div>
+                {syncBanner.phase === 'syncing' ? (
+                  <button
+                    type="button"
+                    className="cp-sync-cancel-btn"
+                    onClick={actions.onCancelFullSync}
+                  >
+                    {i18n.t('common.cancel')}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="cp-sync-close-btn"
+                    aria-label={i18n.t('overlay.syncBannerCloseAria')}
+                    onClick={actions.onDismissSyncBanner}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
             </div>
-            {syncBanner.phase === 'syncing' ? (
-              <button
-                type="button"
-                className="cp-sync-cancel-btn"
-                onClick={actions.onCancelFullSync}
-              >
-                取消
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="cp-sync-close-btn"
-                aria-label="关闭同步提示"
-                onClick={actions.onDismissSyncBanner}
-              >
-                <X size={14} />
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
+          )}
         </div>
       )}
 
@@ -478,8 +646,8 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
             <button
               type="button"
               className="cp-fab-mini-btn"
-              title="展开 Collect+ 收藏按钮 (Alt+S)"
-              aria-label="展开 Collect+ 收藏按钮"
+              title={i18n.t('overlay.fabExpandTitle')}
+              aria-label={i18n.t('overlay.fabExpandAria')}
               onClick={() => setFabCollapsed(false)}
             >
               {isCapturing ? (
@@ -493,7 +661,7 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
               <button
                 type="button"
                 className="cp-fab-btn"
-                title="收藏当前作品到 Collect+ (快捷键 Alt+S)"
+                title={i18n.t('overlay.fabCaptureTitle')}
                 disabled={isCapturing}
                 onClick={actions.onTriggerCapture}
               >
@@ -504,15 +672,136 @@ export function CaptureOverlay({ store, actions }: CaptureOverlayProps) {
                     <BookmarkPlus size={14} />
                   )}
                 </span>
-                <span>{isCapturing ? '采集中...' : '收藏当前'}</span>
+                <span>
+                  {isCapturing
+                    ? i18n.t('overlay.fabCapturing')
+                    : i18n.t('overlay.fabCapture')}
+                </span>
                 <span className="cp-fab-kbd">Alt+S</span>
               </button>
+              {actions.onSelectSessionFolder && (
+                <div className="cp-fab-folder-wrap" ref={folderWrapRef}>
+                  <button
+                    type="button"
+                    className={`cp-fab-folder-btn${
+                      sessionFolderId !== undefined
+                        ? ' cp-fab-folder-btn--locked'
+                        : ''
+                    }`}
+                    data-testid="cp-fab-folder-btn"
+                    title={i18n.t('overlay.fabFolderBtnTitle')}
+                    aria-expanded={folderMenuOpen}
+                    onClick={() => {
+                      const nextOpen = !folderMenuOpen;
+                      setFolderMenuOpen(nextOpen);
+                      if (nextOpen) {
+                        actions.onRefreshFolders?.();
+                      }
+                    }}
+                  >
+                    {sessionFolderId === undefined ? (
+                      <Sparkles size={12} />
+                    ) : (
+                      <Folder size={12} />
+                    )}
+                    <span className="cp-fab-folder-name">
+                      {sessionFolderLabel}
+                    </span>
+                    <ChevronDown size={11} />
+                  </button>
+                  {folderMenuOpen && (
+                    <div
+                      className="cp-fab-folder-popover"
+                      role="menu"
+                      data-testid="cp-fab-folder-popover"
+                    >
+                      <div className="cp-fab-folder-popover-head">
+                        {i18n.t('overlay.fabFolderPopoverTitle')}
+                      </div>
+                      <div className="cp-fab-folder-popover-list">
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={sessionFolderId === undefined}
+                          data-testid="cp-fab-folder-opt-auto"
+                          className={`cp-fab-folder-opt${
+                            sessionFolderId === undefined
+                              ? ' cp-fab-folder-opt--active'
+                              : ''
+                          }`}
+                          onClick={() => {
+                            actions.onSelectSessionFolder?.(undefined);
+                            setFolderMenuOpen(false);
+                          }}
+                        >
+                          <Sparkles size={12} />
+                          <span className="cp-fab-folder-opt-label">
+                            {autoClassifyEnabled
+                              ? i18n.t('overlay.fabFolderOptionAuto')
+                              : i18n.t('overlay.fabFolderOptionDefault')}
+                          </span>
+                          {sessionFolderId === undefined && <Check size={12} />}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={sessionFolderId === null}
+                          data-testid="cp-fab-folder-opt-uncategorized"
+                          className={`cp-fab-folder-opt${
+                            sessionFolderId === null
+                              ? ' cp-fab-folder-opt--active'
+                              : ''
+                          }`}
+                          onClick={() => {
+                            actions.onSelectSessionFolder?.(null);
+                            setFolderMenuOpen(false);
+                          }}
+                        >
+                          <Folder size={12} />
+                          <span className="cp-fab-folder-opt-label">
+                            {i18n.t('overlay.fabFolderOptionUncategorized')}
+                          </span>
+                          {sessionFolderId === null && <Check size={12} />}
+                        </button>
+                        {flatFolders.map((opt) => {
+                          const active = sessionFolderId === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={active}
+                              data-testid={`cp-fab-folder-opt-${opt.id}`}
+                              className={`cp-fab-folder-opt${
+                                active ? ' cp-fab-folder-opt--active' : ''
+                              }`}
+                              onClick={() => {
+                                actions.onSelectSessionFolder?.(opt.id);
+                                setFolderMenuOpen(false);
+                              }}
+                            >
+                              <Folder size={12} />
+                              <span className="cp-fab-folder-opt-label">
+                                {opt.label}
+                              </span>
+                              {active && <Check size={12} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               <button
                 type="button"
                 className="cp-fab-collapse-btn"
-                title="收起悬浮按钮"
-                aria-label="收起悬浮按钮"
-                onClick={() => setFabCollapsed(true)}
+                title={i18n.t('overlay.fabCollapseTitle')}
+                aria-label={i18n.t('overlay.fabCollapseAria')}
+                onClick={() => {
+                  setFolderMenuOpen(false);
+                  setFabCollapsed(true);
+                }}
               >
                 <ChevronLeft size={14} />
               </button>

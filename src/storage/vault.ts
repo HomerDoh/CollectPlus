@@ -6,12 +6,16 @@
  */
 
 import { ulid } from 'ulid';
+import { i18n } from '../i18n/index.ts';
 import {
   getItemFolderIds,
   isAutoSyncExcluded,
   isAutoSyncExclusionReason,
+  isFolderAssignedBy,
   isPlatformId,
+  normalizeFolderAutoRule,
   normalizeFolderIds,
+  sanitizeAssetRequestHeaders,
   SCHEMA_VERSION,
   stripRecordToMeta,
   type AssetKind,
@@ -20,11 +24,13 @@ import {
   type CollectionItemMeta,
   type CollectionItemRecord,
   type DownloadStrategy,
+  type FolderAutoRule,
   type FolderNode,
   type ItemCommentsFile,
   type MediaAsset,
   type MediaKind,
   type PlatformExtraValue,
+  type PlatformId,
   type SavedComment,
   type TagMeta,
   type TaxonomyFile,
@@ -48,6 +54,42 @@ import {
   isSafeVaultRelativeDir,
   splitRelativePath,
 } from './path.ts';
+import type {
+  PlayableMediaSource,
+  VaultPermissionStatus,
+  VaultStorageBackend,
+} from '../types/storage-provider.ts';
+import { createLocalFsVaultBackend } from './providers/local-fs/index.ts';
+import { getActiveVaultBackend } from './providers/registry.ts';
+
+export type {
+  PlayableMediaSource,
+  VaultPermissionStatus,
+  VaultProviderConnectionState,
+  VaultProviderId,
+  VaultStorageBackend,
+} from '../types/storage-provider.ts';
+
+/** 兼容层：同时接受通用 `VaultStorageBackend` 与旧版 `FileSystemDirectoryHandle` */
+export type VaultTarget = VaultStorageBackend | FileSystemDirectoryHandle;
+
+function isVaultStorageBackend(
+  target: VaultTarget,
+): target is VaultStorageBackend {
+  return (
+    typeof target === 'object' &&
+    target !== null &&
+    'providerId' in target &&
+    typeof (target as VaultStorageBackend).writeTextFile === 'function'
+  );
+}
+
+/** 将 `VaultTarget` 统一归一化为 `VaultStorageBackend` */
+export function asVaultBackend(target: VaultTarget): VaultStorageBackend {
+  return isVaultStorageBackend(target)
+    ? target
+    : createLocalFsVaultBackend(target);
+}
 
 export const VAULT_README_FILENAME = 'README.txt';
 export const VAULT_CONFIG_FILENAME = '.collect-vault.json';
@@ -72,8 +114,6 @@ const DISK_ROOT_SYSTEM_ENTRIES: ReadonlySet<string> = new Set([
   'system volume information',
 ]);
 
-export type VaultPermissionStatus = PermissionState | 'unbound';
-
 export type VaultDirectoryValidationReason =
   | 'disk_root'
   | 'non_empty'
@@ -89,13 +129,12 @@ export class VaultDirectoryValidationError extends Error {
     directoryName: string,
     cause?: unknown,
   ) {
-    const label = directoryName || '所选目录';
+    const label = directoryName || i18n.t('vault.selectedDirFallback');
     const messageByReason: Record<VaultDirectoryValidationReason, string> = {
-      disk_root:
-        '不允许选择磁盘根目录或系统受保护目录作为本地同步目录，请在磁盘下新建或选择一个专用的空子文件夹。',
-      non_empty: `所选文件夹“${label}”不为空且未被 Collect+ 初始化，请选择一个空文件夹或已初始化的 CollectVault 目录。`,
-      same_directory: `所选目录“${label}”与当前本地同步目录相同，无需切换。`,
-      nested_directory: `所选目录“${label}”与当前本地同步目录存在父子包含关系，请选择其他独立目录。`,
+      disk_root: i18n.t('vault.errDiskRoot'),
+      non_empty: i18n.t('vault.errNonEmpty', { label }),
+      same_directory: i18n.t('vault.errSameDir', { label }),
+      nested_directory: i18n.t('vault.errNestedDir', { label }),
     };
     super(messageByReason[reason], { cause });
     this.name = 'VaultDirectoryValidationError';
@@ -152,10 +191,7 @@ export class VaultFilesystemPermissionError extends Error {
   readonly directoryName: string;
 
   constructor(directoryName: string, cause?: unknown) {
-    super(
-      `所选目录“${directoryName}”当前无法写入（常见原因：Windows 文件夹缺少当前用户的写入权限、目录为只读，或被安全软件拦截）。建议改选「文档」目录，或修改该文件夹权限后重试。`,
-      { cause },
-    );
+    super(i18n.t('vault.errPermission', { name: directoryName }), { cause });
     this.name = 'VaultFilesystemPermissionError';
     this.directoryName = directoryName;
   }
@@ -257,15 +293,6 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function toWritableBuffer(chunk: Uint8Array): Uint8Array<ArrayBuffer> {
-  if (chunk.buffer instanceof ArrayBuffer) {
-    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-  }
-  const copy = new Uint8Array(chunk.byteLength);
-  copy.set(chunk);
-  return copy;
-}
-
 // ============================================================================
 // 1. 权限与目录绑定
 // ============================================================================
@@ -298,14 +325,13 @@ export async function requestVaultPermission(
 }
 
 /** 检测根目录 `README.txt` 是否存在且非空，缺失或为空时自动补写 */
-export async function ensureVaultReadme(
-  root: FileSystemDirectoryHandle,
-): Promise<void> {
-  const existing = await readVaultFile(root, VAULT_README_FILENAME);
+export async function ensureVaultReadme(root: VaultTarget): Promise<void> {
+  const backend = asVaultBackend(root);
+  const existing = await backend.readFile(VAULT_README_FILENAME);
   if (existing && existing.size > 0) {
     return;
   }
-  await writeVaultTextFile(root, VAULT_README_FILENAME, VAULT_README_CONTENT);
+  await backend.writeTextFile(VAULT_README_FILENAME, VAULT_README_CONTENT);
 }
 
 function parseVaultConfig(raw: unknown): VaultConfig | null {
@@ -333,15 +359,6 @@ function parseVaultConfig(raw: unknown): VaultConfig | null {
   };
 }
 
-/** 检查目录下是否存在至少一个子项 */
-async function hasAnyEntry(dir: FileSystemDirectoryHandle): Promise<boolean> {
-  for await (const _entry of dir.entries()) {
-    void _entry;
-    return true;
-  }
-  return false;
-}
-
 /**
  * 初始化并守护 CollectVault 标准目录结构：
  * - `README.txt`（缺失/为空时自动写入）
@@ -350,14 +367,15 @@ async function hasAnyEntry(dir: FileSystemDirectoryHandle): Promise<boolean> {
  * - `items/` 与 `.trash/`
  */
 export async function ensureVaultStructure(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
 ): Promise<{ config: VaultConfig; isExistingVault: boolean }> {
-  await ensureVaultReadme(root);
+  const backend = asVaultBackend(root);
+  await ensureVaultReadme(backend);
 
   let isExistingVault = false;
   let config: VaultConfig | null = null;
 
-  const configFile = await readVaultFile(root, VAULT_CONFIG_FILENAME);
+  const configFile = await backend.readFile(VAULT_CONFIG_FILENAME);
   if (configFile) {
     try {
       const parsed: unknown = JSON.parse(await configFile.text());
@@ -370,14 +388,12 @@ export async function ensureVaultStructure(
     }
   }
 
-  const itemsDir = await root.getDirectoryHandle(ITEMS_DIRNAME, {
-    create: true,
-  });
-  await root.getDirectoryHandle(TRASH_DIRNAME, { create: true });
+  await backend.ensureDirectory(ITEMS_DIRNAME);
+  await backend.ensureDirectory(TRASH_DIRNAME);
 
-  const taxonomyFile = await readVaultFile(root, TAXONOMY_FILENAME);
+  const taxonomyFile = await backend.readFile(TAXONOMY_FILENAME);
   if (!isExistingVault) {
-    if (taxonomyFile || (await hasAnyEntry(itemsDir))) {
+    if (taxonomyFile || (await backend.hasAnyEntry(ITEMS_DIRNAME))) {
       isExistingVault = true;
     }
   }
@@ -387,12 +403,11 @@ export async function ensureVaultStructure(
     config = {
       schemaVersion: SCHEMA_VERSION,
       vaultId: ulid(),
-      name: root.name || 'CollectVault',
+      name: backend.displayName || 'CollectVault',
       createdAt: now,
       updatedAt: now,
     };
-    await writeVaultTextFile(
-      root,
+    await backend.writeTextFile(
       VAULT_CONFIG_FILENAME,
       JSON.stringify(config, null, 2),
     );
@@ -405,8 +420,7 @@ export async function ensureVaultStructure(
       folders: [],
       tags: [],
     };
-    await writeVaultTextFile(
-      root,
+    await backend.writeTextFile(
       TAXONOMY_FILENAME,
       JSON.stringify(initialTaxonomy, null, 2),
     );
@@ -687,169 +701,70 @@ export async function bindNewVaultDirectory(): Promise<{
 // 2. 通用文件读写与双层读取回退
 // ============================================================================
 
-async function resolveVaultTarget(
-  root: FileSystemDirectoryHandle,
-  relativePath: string,
-  createDirs: boolean,
-): Promise<{ parentDir: FileSystemDirectoryHandle; fileName: string } | null> {
-  const segments = splitRelativePath(relativePath);
-  if (segments.length === 0) {
-    throw new Error(`Vault relative path cannot be empty: "${relativePath}"`);
-  }
-
-  const fileName = segments[segments.length - 1];
-  if (!fileName) {
-    throw new Error(`Invalid vault relative path: "${relativePath}"`);
-  }
-
-  let currentDir = root;
-  try {
-    for (let i = 0; i < segments.length - 1; i += 1) {
-      const seg = segments[i];
-      if (!seg) {
-        continue;
-      }
-      currentDir = await currentDir.getDirectoryHandle(seg, {
-        create: createDirs,
-      });
-    }
-  } catch (error) {
-    if (!createDirs && isNotFoundError(error)) {
-      return null;
-    }
-    throw error;
-  }
-
-  return { parentDir: currentDir, fileName };
-}
-
 /** 读取 Vault 中指定相对路径的文件，不存在时返回 `null` */
 export async function readVaultFile(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   relativePath: string,
 ): Promise<File | null> {
-  const target = await resolveVaultTarget(root, relativePath, false);
-  if (!target) {
-    return null;
-  }
-
-  try {
-    const fileHandle = await target.parentDir.getFileHandle(target.fileName, {
-      create: false,
-    });
-    return await fileHandle.getFile();
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return null;
-    }
-    throw error;
-  }
+  return asVaultBackend(root).readFile(relativePath);
 }
 
 /** 判断 Vault 中指定相对路径的文件是否存在 */
 async function hasVaultFile(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   relativePath: string,
 ): Promise<boolean> {
-  const target = await resolveVaultTarget(root, relativePath, false);
-  if (!target) {
-    return false;
-  }
-  try {
-    await target.parentDir.getFileHandle(target.fileName, { create: false });
-    return true;
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return false;
-    }
-    throw error;
-  }
+  return asVaultBackend(root).hasFile(relativePath);
 }
 
 /** 向 Vault 指定相对路径写入 UTF-8 文本文件（自动创建父目录） */
 export async function writeVaultTextFile(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   relativePath: string,
   content: string,
 ): Promise<void> {
-  const target = await resolveVaultTarget(root, relativePath, true);
-  if (!target) {
-    throw new Error(`Failed to resolve vault path: "${relativePath}"`);
-  }
-
-  const { parentDir, fileName } = target;
-  const fileHandle = await parentDir.getFileHandle(fileName, { create: true });
-  const writable = await fileHandle.createWritable();
-
-  try {
-    await writable.write(content);
-    await writable.close();
-  } catch (error) {
-    await writable.abort().catch(() => undefined);
-    throw error;
-  }
+  await asVaultBackend(root).writeTextFile(relativePath, content);
 }
 
 /** 将源 `File` 流式拷贝写入 Vault 指定相对路径，避免大视频文件全量载入内存 */
 async function copyFileToVault(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   relativePath: string,
   sourceFile: File,
 ): Promise<void> {
-  const target = await resolveVaultTarget(root, relativePath, true);
-  if (!target) {
-    throw new Error(`Failed to resolve vault path: "${relativePath}"`);
-  }
-
-  const { parentDir, fileName } = target;
-  const fileHandle = await parentDir.getFileHandle(fileName, { create: true });
-  const writable = await fileHandle.createWritable();
-  const reader = sourceFile.stream().getReader();
-  let closed = false;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (value && value.byteLength > 0) {
-        await writable.write(toWritableBuffer(value));
-      }
-    }
-    await writable.close();
-    closed = true;
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    if (!closed) {
-      await writable.abort().catch(() => undefined);
-    }
-    await parentDir.removeEntry(fileName).catch(() => undefined);
-    throw error;
-  } finally {
-    reader.releaseLock();
-  }
+  await asVaultBackend(root).writeFile(relativePath, sourceFile);
 }
 
 /**
  * 统一读取条目媒体资产：
- * 1. 优先从 CollectVault（若句柄可用且已获至少 `read` 权限）读取 `${item.relativeDir}/${assetRelativePath}`；
- * 2. 缺失或无 Vault 权限时自动回退至 OPFS `(item.id, assetRelativePath)`。
+ * 1. 若条目尚处于 `opfs_staged` 且使用远程存储，优先读本地 OPFS 避免无谓网络请求；
+ * 2. 其余情况优先从当前启用的 Vault（本地或云存储，若已获至少 `read` 权限）读取 `${item.relativeDir}/${assetRelativePath}`；
+ * 3. 缺失或无 Vault 权限时自动回退至 OPFS `(item.id, assetRelativePath)`。
  */
 export async function readItemAssetFile(
   item: CollectionItemRecord,
   assetRelativePath: string,
-  vaultHandle?: FileSystemDirectoryHandle | null,
+  vaultTarget?: VaultTarget | null,
 ): Promise<File | null> {
-  const effectiveHandle =
-    vaultHandle === undefined ? await getSavedVaultHandle() : vaultHandle;
+  const effectiveBackend: VaultStorageBackend | null =
+    vaultTarget === undefined
+      ? await getActiveVaultBackend()
+      : vaultTarget === null
+        ? null
+        : asVaultBackend(vaultTarget);
 
-  if (effectiveHandle) {
+  if (effectiveBackend?.isRemote && item.syncStatus === 'opfs_staged') {
+    const stagedFile = await readFileFromOpfs(item.id, assetRelativePath);
+    if (stagedFile) {
+      return stagedFile;
+    }
+  }
+
+  if (effectiveBackend) {
     try {
-      const permission = await queryVaultPermission(effectiveHandle, 'read');
+      const permission = await effectiveBackend.queryPermission('read');
       if (permission === 'granted') {
-        const vaultFile = await readVaultFile(
-          effectiveHandle,
+        const vaultFile = await effectiveBackend.readFile(
           `${item.relativeDir}/${assetRelativePath}`,
         );
         if (vaultFile) {
@@ -862,6 +777,67 @@ export async function readItemAssetFile(
   }
 
   return readFileFromOpfs(item.id, assetRelativePath);
+}
+
+/**
+ * 为大体积媒体（如视频）解析可直接播放的媒体源：
+ * - 优先读取仍在 OPFS 暂存的本地文件（零网络开销）；
+ * - 已同步到远端存储时优先走驱动的 `resolvePlayableMedia`（如 Google Drive DNR 鉴权流式 HTTP Range 播放）；
+ * - 否则回退到 `readItemAssetFile` 并创建带 `dispose` 释放钩子的 Object URL。
+ */
+export async function resolveItemPlayableMedia(
+  item: CollectionItemRecord,
+  assetRelativePath: string,
+  vaultTarget?: VaultTarget | null,
+): Promise<PlayableMediaSource | null> {
+  const wrapLocalFile = (file: File): PlayableMediaSource => {
+    const url = URL.createObjectURL(file);
+    return {
+      url,
+      sizeBytes: file.size,
+      dispose: () => {
+        URL.revokeObjectURL(url);
+      },
+    };
+  };
+
+  const effectiveBackend: VaultStorageBackend | null =
+    vaultTarget === undefined
+      ? await getActiveVaultBackend()
+      : vaultTarget === null
+        ? null
+        : asVaultBackend(vaultTarget);
+
+  if (effectiveBackend?.isRemote && item.syncStatus === 'opfs_staged') {
+    const stagedFile = await readFileFromOpfs(item.id, assetRelativePath);
+    if (stagedFile) {
+      return wrapLocalFile(stagedFile);
+    }
+  }
+
+  if (effectiveBackend) {
+    try {
+      const permission = await effectiveBackend.queryPermission('read');
+      if (permission === 'granted') {
+        const fullPath = `${item.relativeDir}/${assetRelativePath}`;
+        if (typeof effectiveBackend.resolvePlayableMedia === 'function') {
+          const streamed = await effectiveBackend.resolvePlayableMedia(fullPath);
+          if (streamed) {
+            return streamed;
+          }
+        }
+        const vaultFile = await effectiveBackend.readFile(fullPath);
+        if (vaultFile) {
+          return wrapLocalFile(vaultFile);
+        }
+      }
+    } catch {
+      // 远端/本地读取失败时回退到 OPFS
+    }
+  }
+
+  const opfsFile = await readFileFromOpfs(item.id, assetRelativePath);
+  return opfsFile ? wrapLocalFile(opfsFile) : null;
 }
 
 function parseSavedComment(raw: unknown): SavedComment | null {
@@ -903,7 +879,7 @@ function parseSavedComment(raw: unknown): SavedComment | null {
     ...(typeof raw.authorId === 'string' && raw.authorId.trim()
       ? { authorId: raw.authorId.trim() }
       : {}),
-    authorName: raw.authorName.trim() || '匿名用户',
+    authorName: raw.authorName.trim() || i18n.t('vault.anonymousAuthor'),
     ...(avatarRelativePath !== undefined ? { avatarRelativePath } : {}),
     content: raw.content,
     likeCount,
@@ -957,10 +933,10 @@ function parseItemCommentsFile(raw: unknown): ItemCommentsFile | null {
  */
 export async function readItemComments(
   item: CollectionItemRecord,
-  vaultHandle?: FileSystemDirectoryHandle | null,
+  vaultTarget?: VaultTarget | null,
 ): Promise<ItemCommentsFile | null> {
   const commentsPath = item.commentsRelativePath ?? 'comments.json';
-  const file = await readItemAssetFile(item, commentsPath, vaultHandle);
+  const file = await readItemAssetFile(item, commentsPath, vaultTarget);
   if (!file) {
     return null;
   }
@@ -995,7 +971,7 @@ async function withVaultIoLock<T>(task: () => Promise<T>): Promise<T> {
 }
 
 async function writeTaxonomyToVaultUnlocked(
-  root: FileSystemDirectoryHandle,
+  backend: VaultStorageBackend,
 ): Promise<void> {
   const [folders, tags] = await Promise.all([
     db.folders.toArray(),
@@ -1012,27 +988,24 @@ async function writeTaxonomyToVaultUnlocked(
     tags,
   };
 
-  await writeVaultTextFile(
-    root,
+  await backend.writeTextFile(
     TAXONOMY_FILENAME,
     JSON.stringify(payload, null, 2),
   );
 }
 
 /** 将 IndexedDB 中最新的文件夹树与标签表全量回写到 `CollectVault/taxonomy.json` */
-export async function writeTaxonomyToVault(
-  root: FileSystemDirectoryHandle,
-): Promise<void> {
-  return withVaultIoLock(() => writeTaxonomyToVaultUnlocked(root));
+export async function writeTaxonomyToVault(root: VaultTarget): Promise<void> {
+  const backend = asVaultBackend(root);
+  return withVaultIoLock(() => writeTaxonomyToVaultUnlocked(backend));
 }
 
 async function writeItemMetaToVaultUnlocked(
-  root: FileSystemDirectoryHandle,
+  backend: VaultStorageBackend,
   item: CollectionItemRecord,
 ): Promise<void> {
   const cleanMeta = stripRecordToMeta(item);
-  await writeVaultTextFile(
-    root,
+  await backend.writeTextFile(
     `${cleanMeta.relativeDir}/meta.json`,
     JSON.stringify(cleanMeta, null, 2),
   );
@@ -1043,28 +1016,32 @@ async function writeItemMetaToVaultUnlocked(
  * 强制通过 `stripRecordToMeta` 剥离 `thumbnailDataUrl`。
  */
 export async function writeItemMetaToVault(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   item: CollectionItemRecord,
 ): Promise<void> {
-  return withVaultIoLock(() => writeItemMetaToVaultUnlocked(root, item));
+  const backend = asVaultBackend(root);
+  return withVaultIoLock(() => writeItemMetaToVaultUnlocked(backend, item));
 }
 
 /**
- * 彻底删除本地 `CollectVault` 中指定条目的归档目录（仅允许删除 `items/` 下的子目录）。
+ * 彻底删除 CollectVault 中指定条目的归档目录（仅允许删除 `items/` 下的子目录）。
  */
 export async function removeItemDirFromVault(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   relativeDir: string,
 ): Promise<void> {
   const segments = splitRelativePath(relativeDir);
   if (segments.length < 2 || segments[0] !== ITEMS_DIRNAME) {
     throw new Error(`Refusing to delete non-item vault path: "${relativeDir}"`);
   }
-  return withVaultIoLock(() => removeRelativeDirectory(root, relativeDir));
+  const backend = asVaultBackend(root);
+  return withVaultIoLock(() => backend.removeDirectory(relativeDir));
 }
 
+const KEEP_META_ONLY_SET: ReadonlySet<string> = new Set(['meta.json']);
+
 async function purgeItemMediaFilesFromVaultUnlocked(
-  root: FileSystemDirectoryHandle,
+  backend: VaultStorageBackend,
   relativeDir: string,
 ): Promise<void> {
   const segments = splitRelativePath(relativeDir);
@@ -1073,59 +1050,25 @@ async function purgeItemMediaFilesFromVaultUnlocked(
       `Refusing to purge media outside items/ vault path: "${relativeDir}"`,
     );
   }
-
-  let itemDir = root;
-  try {
-    for (const seg of segments) {
-      if (!seg) {
-        continue;
-      }
-      itemDir = await itemDir.getDirectoryHandle(seg, { create: false });
-    }
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return;
-    }
-    throw error;
-  }
-
-  const entriesToRemove: Array<{ name: string; kind: 'file' | 'directory' }> =
-    [];
-  for await (const [name, entry] of itemDir.entries()) {
-    if (name === 'meta.json') {
-      continue;
-    }
-    entriesToRemove.push({ name, kind: entry.kind });
-  }
-
-  for (const entry of entriesToRemove) {
-    try {
-      await itemDir.removeEntry(entry.name, {
-        recursive: entry.kind === 'directory',
-      });
-    } catch (error) {
-      if (!isNotFoundError(error)) {
-        throw error;
-      }
-    }
-  }
+  await backend.purgeDirectoryExcept(relativeDir, KEEP_META_ONLY_SET);
 }
 
 /**
- * 删除本地 `CollectVault` 中指定条目目录下的所有媒体与评论文件，仅保留 `meta.json`
- * （用于「不自动同步」条目释放本地硬盘空间）。
+ * 删除 CollectVault 中指定条目目录下的所有媒体与评论文件，仅保留 `meta.json`
+ * （用于「不自动同步」条目释放存储空间）。
  */
 export async function purgeItemMediaFilesFromVault(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   relativeDir: string,
 ): Promise<void> {
+  const backend = asVaultBackend(root);
   return withVaultIoLock(() =>
-    purgeItemMediaFilesFromVaultUnlocked(root, relativeDir),
+    purgeItemMediaFilesFromVaultUnlocked(backend, relativeDir),
   );
 }
 
 async function syncExcludedItemToVaultUnlocked(
-  root: FileSystemDirectoryHandle,
+  backend: VaultStorageBackend,
   item: CollectionItemRecord,
 ): Promise<void> {
   let effectiveRelativeDir = isSafeVaultRelativeDir(item.relativeDir)
@@ -1138,13 +1081,13 @@ async function syncExcludedItemToVaultUnlocked(
       );
 
   const writeCleanExcludedMeta = async (targetDir: string): Promise<void> => {
-    await purgeItemMediaFilesFromVaultUnlocked(root, targetDir);
+    await purgeItemMediaFilesFromVaultUnlocked(backend, targetDir);
     const syncedSnapshot: CollectionItemRecord = {
       ...item,
       relativeDir: targetDir,
       syncStatus: 'vault_synced',
     };
-    await writeItemMetaToVaultUnlocked(root, syncedSnapshot);
+    await writeItemMetaToVaultUnlocked(backend, syncedSnapshot);
   };
 
   try {
@@ -1184,7 +1127,7 @@ async function syncExcludedItemToVaultUnlocked(
 }
 
 async function copyStagedCommentFilesToDir(
-  root: FileSystemDirectoryHandle,
+  backend: VaultStorageBackend,
   item: CollectionItemRecord,
   targetRelativeDir: string,
   copiedPaths: string[],
@@ -1202,14 +1145,14 @@ async function copyStagedCommentFilesToDir(
   for (const relPath of commentPaths) {
     const opfsFile = await readFileFromOpfs(item.id, relPath);
     if (opfsFile) {
-      await copyFileToVault(root, `${targetRelativeDir}/${relPath}`, opfsFile);
+      await backend.writeFile(`${targetRelativeDir}/${relPath}`, opfsFile);
       copiedPaths.push(relPath);
     }
   }
 }
 
 async function syncStagedItemToDir(
-  root: FileSystemDirectoryHandle,
+  backend: VaultStorageBackend,
   item: CollectionItemRecord,
   targetRelativeDir: string,
 ): Promise<string[]> {
@@ -1220,10 +1163,10 @@ async function syncStagedItemToDir(
     const vaultAssetPath = `${targetRelativeDir}/${asset.relativePath}`;
 
     if (opfsFile) {
-      await copyFileToVault(root, vaultAssetPath, opfsFile);
+      await backend.writeFile(vaultAssetPath, opfsFile);
       copiedPaths.push(asset.relativePath);
     } else if (asset.downloaded) {
-      const alreadyInVault = await hasVaultFile(root, vaultAssetPath);
+      const alreadyInVault = await backend.hasFile(vaultAssetPath);
       if (!alreadyInVault) {
         throw new Error(
           `Missing staged asset "${asset.relativePath}" in both OPFS and Vault.`,
@@ -1232,20 +1175,20 @@ async function syncStagedItemToDir(
     }
   }
 
-  await copyStagedCommentFilesToDir(root, item, targetRelativeDir, copiedPaths);
+  await copyStagedCommentFilesToDir(backend, item, targetRelativeDir, copiedPaths);
 
   const syncedSnapshot: CollectionItemRecord = {
     ...item,
     relativeDir: targetRelativeDir,
     syncStatus: 'vault_synced',
   };
-  await writeItemMetaToVaultUnlocked(root, syncedSnapshot);
+  await writeItemMetaToVaultUnlocked(backend, syncedSnapshot);
 
   return copiedPaths;
 }
 
 async function flushToVaultUnlocked(
-  root: FileSystemDirectoryHandle,
+  backend: VaultStorageBackend,
   onProgress?: (p: FlushProgress) => void,
 ): Promise<FlushSummary> {
   const summary: FlushSummary = {
@@ -1256,7 +1199,7 @@ async function flushToVaultUnlocked(
   };
 
   onProgress?.({ phase: 'preparing', current: 0, total: 0 });
-  await ensureVaultStructure(root);
+  await ensureVaultStructure(backend);
 
   const [stagedItems, dirtyItems] = await Promise.all([
     db.items.where('syncStatus').equals('opfs_staged').toArray(),
@@ -1279,7 +1222,7 @@ async function flushToVaultUnlocked(
 
     try {
       if (isAutoSyncExcluded(item)) {
-        await syncExcludedItemToVaultUnlocked(root, item);
+        await syncExcludedItemToVaultUnlocked(backend, item);
         summary.syncedMetaCount += 1;
         continue;
       }
@@ -1296,7 +1239,7 @@ async function flushToVaultUnlocked(
 
       let copiedPaths: string[];
       try {
-        copiedPaths = await syncStagedItemToDir(root, item, effectiveRelativeDir);
+        copiedPaths = await syncStagedItemToDir(backend, item, effectiveRelativeDir);
       } catch (error) {
         if (!isNameNotAllowedError(error)) {
           throw error;
@@ -1312,7 +1255,7 @@ async function flushToVaultUnlocked(
           throw error;
         }
         effectiveRelativeDir = fallbackDir;
-        copiedPaths = await syncStagedItemToDir(root, item, effectiveRelativeDir);
+        copiedPaths = await syncStagedItemToDir(backend, item, effectiveRelativeDir);
       }
 
       await db.transaction('rw', db.items, async () => {
@@ -1357,7 +1300,7 @@ async function flushToVaultUnlocked(
 
     try {
       if (isAutoSyncExcluded(item)) {
-        await syncExcludedItemToVaultUnlocked(root, item);
+        await syncExcludedItemToVaultUnlocked(backend, item);
         summary.syncedMetaCount += 1;
         continue;
       }
@@ -1366,8 +1309,7 @@ async function flushToVaultUnlocked(
       for (const asset of item.assets) {
         const opfsFile = await readFileFromOpfs(item.id, asset.relativePath);
         if (opfsFile) {
-          await copyFileToVault(
-            root,
+          await backend.writeFile(
             `${item.relativeDir}/${asset.relativePath}`,
             opfsFile,
           );
@@ -1376,7 +1318,7 @@ async function flushToVaultUnlocked(
       }
 
       await copyStagedCommentFilesToDir(
-        root,
+        backend,
         item,
         item.relativeDir,
         copiedPaths,
@@ -1386,7 +1328,7 @@ async function flushToVaultUnlocked(
         ...item,
         syncStatus: 'vault_synced',
       };
-      await writeItemMetaToVaultUnlocked(root, syncedSnapshot);
+      await writeItemMetaToVaultUnlocked(backend, syncedSnapshot);
 
       await db.transaction('rw', db.items, async () => {
         const latest = await db.items.get(item.id);
@@ -1421,7 +1363,7 @@ async function flushToVaultUnlocked(
     current: 1,
     total: 1,
   });
-  await writeTaxonomyToVaultUnlocked(root);
+  await writeTaxonomyToVaultUnlocked(backend);
   await setSetting('last_sync_at', Date.now());
 
   const totalProcessed = stagedItems.length + dirtyItems.length;
@@ -1435,30 +1377,32 @@ async function flushToVaultUnlocked(
 }
 
 /**
- * 执行 OPFS -> CollectVault 同步落盘：
+ * 执行 OPFS -> CollectVault 同步落盘（支持本地目录与任意云存储插件）：
  * 1. 守护目录结构与 `README.txt`；
- * 2. 将 `opfs_staged` 条目的已下载媒体流式拷贝到 Vault，写入 `meta.json`，更新 DB 状态并释放 OPFS；
+ * 2. 将 `opfs_staged` 条目的已下载媒体流式拷贝/上传到 Vault，写入 `meta.json`，更新 DB 状态并释放 OPFS；
  * 3. 将 `meta_dirty` 条目的残余 OPFS 文件（如有）补齐落盘并回写最新 `meta.json`；
  * 4. 回写 `taxonomy.json` 并更新 `last_sync_at`。
  */
 export async function flushToVault(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   onProgress?: (p: FlushProgress) => void,
 ): Promise<FlushSummary> {
-  return withVaultIoLock(() => flushToVaultUnlocked(root, onProgress));
+  const backend = asVaultBackend(root);
+  return withVaultIoLock(() => flushToVaultUnlocked(backend, onProgress));
 }
 
 /**
- * 后台静默自动落盘：在已绑定目录且已持有 `readwrite` 权限（不触发需要用户手势的弹窗）时，
- * 立即将待同步条目从 OPFS 落盘至 `CollectVault`；未绑定、无权限或无待同步条目时返回 `null`。
+ * 后台静默自动落盘：自动解析当前启用的持久化插件（本地目录或 Google Drive 等云端），
+ * 在已绑定且持有 `readwrite` 权限（不触发交互弹窗）时，立即将待同步条目从 OPFS 落盘；
+ * 未绑定、无权限或无待同步条目时返回 `null`。
  */
 export async function tryAutoFlushToVault(): Promise<FlushSummary | null> {
   return withVaultIoLock(async () => {
-    const handle = await getSavedVaultHandle();
-    if (!handle) {
+    const backend = await getActiveVaultBackend();
+    if (!backend) {
       return null;
     }
-    const permission = await queryVaultPermission(handle, 'readwrite');
+    const permission = await backend.queryPermission('readwrite');
     if (permission !== 'granted') {
       return null;
     }
@@ -1469,7 +1413,7 @@ export async function tryAutoFlushToVault(): Promise<FlushSummary | null> {
     if (stagedCount + dirtyCount === 0) {
       return null;
     }
-    return flushToVaultUnlocked(handle);
+    return flushToVaultUnlocked(backend);
   });
 }
 
@@ -1685,6 +1629,7 @@ function parseMediaAsset(raw: unknown): MediaAsset | null {
   const audioFallbackUrls = Array.isArray(raw.audioFallbackUrls)
     ? raw.audioFallbackUrls.filter((u): u is string => typeof u === 'string')
     : undefined;
+  const requestHeaders = sanitizeAssetRequestHeaders(raw.requestHeaders);
 
   return {
     id: raw.id,
@@ -1711,6 +1656,7 @@ function parseMediaAsset(raw: unknown): MediaAsset | null {
     ...(typeof raw.durationSec === 'number' && Number.isFinite(raw.durationSec)
       ? { durationSec: raw.durationSec }
       : {}),
+    ...(requestHeaders ? { requestHeaders } : {}),
   };
 }
 
@@ -1872,6 +1818,9 @@ function parseCollectionItemMeta(
     updatedAt,
     folderId: folderIds[0] ?? null,
     folderIds,
+    ...(isFolderAssignedBy(raw.folderAssignedBy)
+      ? { folderAssignedBy: raw.folderAssignedBy }
+      : {}),
     tags: parseStringArray(raw.tags),
     note: typeof raw.note === 'string' ? raw.note : '',
     // 以实际扫描目录为准，确保目录迁移或重整后仍可精准定位同级媒体文件
@@ -1887,6 +1836,9 @@ function parseCollectionItemMeta(
       Number.isFinite(raw.totalSizeBytes)
         ? raw.totalSizeBytes
         : 0,
+    ...(typeof raw.openedAt === 'number' && Number.isFinite(raw.openedAt)
+      ? { openedAt: raw.openedAt }
+      : {}),
     ...(typeof raw.deletedAt === 'number' && Number.isFinite(raw.deletedAt)
       ? { deletedAt: raw.deletedAt }
       : { deletedAt: null }),
@@ -1895,6 +1847,29 @@ function parseCollectionItemMeta(
       : { autoSyncExclusion: null }),
     ...(platformExtra !== undefined ? { platformExtra } : {}),
   };
+}
+
+function parseFolderAutoRule(raw: unknown): FolderAutoRule | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const keywords = parseStringArray(raw.keywords);
+  const tags = parseStringArray(raw.tags);
+  const authors = parseStringArray(raw.authors);
+  const platforms: PlatformId[] = [];
+  if (Array.isArray(raw.platforms)) {
+    for (const p of raw.platforms) {
+      if (isPlatformId(p)) {
+        platforms.push(p);
+      }
+    }
+  }
+  return normalizeFolderAutoRule({
+    keywords,
+    tags,
+    authors,
+    platforms,
+  });
 }
 
 function parseTaxonomyFile(raw: unknown): {
@@ -1924,6 +1899,7 @@ function parseTaxonomyFile(raw: unknown): {
         typeof entry.updatedAt === 'number' &&
         Number.isFinite(entry.updatedAt)
       ) {
+        const autoRule = parseFolderAutoRule(entry.autoRule);
         folders.push({
           id: entry.id.trim(),
           parentId: entry.parentId,
@@ -1931,6 +1907,7 @@ function parseTaxonomyFile(raw: unknown): {
           sortOrder: entry.sortOrder,
           createdAt: entry.createdAt,
           updatedAt: entry.updatedAt,
+          ...(autoRule ? { autoRule } : {}),
         });
       }
     }
@@ -1995,15 +1972,16 @@ async function scanMetaFilesRecursively(
  * 4. 所有恢复条目标记为 `vault_synced`，并自动补齐被条目引用但 `taxonomy.json` 遗漏的标签。
  */
 export async function rebuildIndexFromVault(
-  root: FileSystemDirectoryHandle,
+  root: VaultTarget,
   onProgress?: (p: RebuildProgress) => void,
   options?: RebuildOptions,
 ): Promise<RebuildSummary> {
+  const backend = asVaultBackend(root);
   return withVaultIoLock(async () => {
-    await ensureVaultReadme(root);
+    await ensureVaultReadme(backend);
 
   // 读取并同步 .collect-vault.json（如果合法）
-  const configFile = await readVaultFile(root, VAULT_CONFIG_FILENAME);
+  const configFile = await backend.readFile(VAULT_CONFIG_FILENAME);
   if (configFile) {
     try {
       const parsedConfig = parseVaultConfig(
@@ -2020,7 +1998,7 @@ export async function rebuildIndexFromVault(
   // 读取并解析 taxonomy.json
   let taxonomyFolders: FolderNode[] = [];
   let taxonomyTags: TagMeta[] = [];
-  const taxonomyFile = await readVaultFile(root, TAXONOMY_FILENAME);
+  const taxonomyFile = await backend.readFile(TAXONOMY_FILENAME);
   if (taxonomyFile) {
     try {
       const parsedTaxonomy = parseTaxonomyFile(
@@ -2054,27 +2032,16 @@ export async function rebuildIndexFromVault(
     tagMap.set(tag.name, tag);
   }
 
-  // 递归收集 items/ 下全部 meta.json
-  const metaFiles: ScannedMetaFile[] = [];
-  try {
-    const itemsDir = await root.getDirectoryHandle(ITEMS_DIRNAME, {
-      create: false,
-    });
-    await scanMetaFilesRecursively(itemsDir, ITEMS_DIRNAME, metaFiles);
-  } catch (error) {
-    if (!isNotFoundError(error)) {
-      throw error;
-    }
-  }
+  // 通过当前存储驱动扫描 items/ 下全部 meta.json（本地递归 / 云端批量查询）
+  const metaEntries = await backend.scanItemMetaFiles();
 
   let skippedFiles = 0;
   const recordsById = new Map<string, CollectionItemRecord>();
   const idByDedupeKey = new Map<string, string>();
 
-  for (const entry of metaFiles) {
+  for (const entry of metaEntries) {
     try {
-      const file = await entry.fileHandle.getFile();
-      const raw: unknown = JSON.parse(await file.text());
+      const raw: unknown = JSON.parse(await entry.readMetaText());
       const parsedMeta = parseCollectionItemMeta(raw, entry.relativeDir);
       if (!parsedMeta) {
         skippedFiles += 1;
@@ -2110,8 +2077,7 @@ export async function rebuildIndexFromVault(
       // 尝试从条目目录读取封面并生成轻量缩略图
       let thumbnailDataUrl: string | undefined;
       if (parsedMeta.coverRelativePath) {
-        const coverFile = await readVaultFile(
-          entry.dirHandle,
+        const coverFile = await entry.readRelativeFile(
           parsedMeta.coverRelativePath,
         );
         if (coverFile) {
@@ -2463,12 +2429,12 @@ export async function migrateVaultDirectory(
   ]);
   if (!sourceGranted) {
     throw new Error(
-      `缺少原目录“${sourceRoot.name}”的读写权限，无法迁移旧文件。`,
+      i18n.t('vault.errMigrateSourcePerm', { name: sourceRoot.name }),
     );
   }
   if (!targetGranted) {
     throw new Error(
-      `缺少目标目录“${targetRoot.name}”的读写权限，无法写入迁移文件。`,
+      i18n.t('vault.errMigrateTargetPerm', { name: targetRoot.name }),
     );
   }
 
@@ -2476,18 +2442,19 @@ export async function migrateVaultDirectory(
 
   return withVaultIoLock(async () => {
     // 若本地索引存在已落盘条目的未写回编辑（meta_dirty），迁移前先刷新轻量 JSON 至原目录
+    const sourceBackend = createLocalFsVaultBackend(sourceRoot);
     const dirtyItems = await db.items
       .where('syncStatus')
       .equals('meta_dirty')
       .toArray();
     if (dirtyItems.length > 0) {
       for (const item of dirtyItems) {
-        await writeItemMetaToVaultUnlocked(sourceRoot, {
+        await writeItemMetaToVaultUnlocked(sourceBackend, {
           ...item,
           syncStatus: 'vault_synced',
         }).catch(() => undefined);
       }
-      await writeTaxonomyToVaultUnlocked(sourceRoot).catch(() => undefined);
+      await writeTaxonomyToVaultUnlocked(sourceBackend).catch(() => undefined);
     }
 
   let copiedFiles = 0;
@@ -2706,8 +2673,8 @@ export async function migrateVaultDirectory(
 
     return {
       mode,
-      sourceName: sourceRoot.name || '原目录',
-      targetName: targetRoot.name || '新目录',
+      sourceName: sourceRoot.name || i18n.t('library.sourceDirFallback'),
+      targetName: targetRoot.name || i18n.t('library.targetDirFallback'),
       copiedFiles,
       skippedFiles,
       sourceCleanupFailedCount: cleanup.failedCount,

@@ -5,6 +5,7 @@
 import {
   isPlatformId,
   type AssetKind,
+  type AssetRequestHeaders,
   type AuthorInfo,
   type DownloadStrategy,
   type MediaKind,
@@ -62,6 +63,8 @@ export interface CapturedAssetInput {
   sizeBytes?: number;
   /** 文件名或扩展名提示（由路径规范化模块统一落盘命名） */
   filenameHint?: string;
+  /** 下载该资产所需的非敏感防盗链头（Referer / Origin），由任务级动态 DNR 注入 */
+  requestHeaders?: AssetRequestHeaders;
 }
 
 /** 适配器归一化后的单条原始评论输入（尚未离线下载评论者头像） */
@@ -110,10 +113,25 @@ export interface CapturedPayload {
   coverFallbackUrls?: string[];
   /** 主体媒体资产列表 */
   assets: CapturedAssetInput[];
+  /** 条目级默认防盗链请求头（封面与未单独指定头的资产自动继承，严禁含凭证） */
+  defaultRequestHeaders?: AssetRequestHeaders;
   /** 平台特有扩展字段 */
   platformExtra?: Record<string, PlatformExtraValue>;
   /** 本次采集的触发方式 */
   triggerSource: CaptureTriggerSource;
+}
+
+/** 站点采集器所属的三层架构级别 */
+export type SiteExtractorTier = 'deep' | 'recipe' | 'universal';
+
+/** 站点在 Popup 与管理台中的展示元信息（单点真相源，消除 UI 层硬编码 switch） */
+export interface SiteUiMeta {
+  /** 站点入口主页 URL（用于 Popup 快捷链接等） */
+  readonly entryUrl?: string;
+  /** 管理台卡片平台角标 Tailwind 类名（缺省回退通用中性样式） */
+  readonly badgeClass?: string;
+  /** i18n 平台名称键（缺省使用 `platform.<id>`，无词条时回退 `displayName`） */
+  readonly i18nNameKey?: string;
 }
 
 /** declarativeNetRequest 动态请求头改写规则声明 */
@@ -132,18 +150,24 @@ export interface DnrHeaderRuleSpec {
 
 /**
  * 平台适配器统一接口契约。
- * 每个支持的内容平台实现该接口并在全局注册表中注册，保证采集链路与核心存储引擎解耦。
+ * 涵盖 Tier 3 深度站点适配器、Tier 2 声明式 Recipe 编译适配器与 Tier 1 通用全网适配器。
  */
 export interface PlatformAdapter {
-  /** 平台唯一标识 */
+  /** 平台唯一标识（内置短 ID、'web' 或 Recipe slug） */
   readonly id: PlatformId;
-  /** 平台中文/可读展示名称 */
+  /** 所属提取层级 */
+  readonly tier: SiteExtractorTier;
+  /** 平台可读展示名称 */
   readonly displayName: string;
   /** 匹配的域名模式列表 */
   readonly hostPatterns: readonly string[];
+  /** 可选 UI 展示元数据 */
+  readonly uiMeta?: SiteUiMeta;
+  /** 支持后台静默取消原站收藏时的入口 URL（非空即表示支持远端取消收藏） */
+  readonly remoteUncollectEntryUrl?: string;
   /** 判断给定页面 URL 是否属于该平台 */
   matchesUrl(url: string): boolean;
-  /** 返回该平台防盗链所需的 DNR 请求头规则声明 */
+  /** 返回该平台防盗链所需的静态 DNR 请求头规则声明 */
   getDnrRules(): readonly DnrHeaderRuleSpec[];
   /** 将页面拦截或提取的原始平台数据归一化为统一 CapturedPayload */
   normalizeRawData(

@@ -1,0 +1,72 @@
+/* ================= 抖音 Douyin ================= */
+/* 抖音网页版视觉语言：曜石黑 + 极简纯白 + 抖音红（#FE2C55），与 B 站粉蓝风格明确区分 */
+[data-platform='douyin'] {
+  --pd-brand-bar: linear-gradient(90deg, #161823 0%, #161823 72%, #fe2c55 100%);
+  --pd-badge-bg: #161823;
+  --pd-badge-text: #ffffff;
+  --pd-stage: #000000;
+  --pd-stage-bar: #12131a;
+  --pd-stage-border: rgba(255, 255, 255, 0.1);
+  --pd-stage-text: #ffffff;
+  --pd-stage-muted: #9b9ea9;
+  --pd-media-control-bg: rgba(22, 24, 35, 0.82);
+  --pd-media-control-hover: rgba(254, 44, 85, 0.92);
+  --pd-media-control-text: #ffffff;
+  --pd-article-bg: #ffffff;
+  --pd-article-text: #161823;
+  --pd-article-muted: #6b6f7e;
+  --pd-surface: #ffffff;
+  --pd-surface-muted: #f2f2f4;
+  --pd-input: #f2f2f4;
+  --pd-text: #161823;
+  --pd-text-secondary: #3f4254;
+  --pd-text-muted: #6e7282;
+  --pd-border: #e5e6eb;
+  --pd-divider: #ededf0;
+  --pd-accent: #fe2c55;
+  --pd-accent-hover: #e02046;
+  --pd-accent-soft: rgba(254, 44, 85, 0.09);
+  --pd-on-accent: #ffffff;
+  --pd-accent-secondary: #161823;
+  --pd-accent-secondary-soft: rgba(22, 24, 35, 0.08);
+  --pd-like-accent: #fe2c55;
+  --pd-scrollbar-thumb: #c8cbd6;
+  --pd-dialog-shadow: 0 24px 60px -16px rgba(0, 0, 0, 0.42);
+  --pd-radius-dialog: 8px;
+  --pd-radius-control: 6px;
+  --pd-radius-pill: 4px;
+}
+
+html[data-theme='dark'] [data-platform='douyin'] {
+  --pd-brand-bar: linear-gradient(90deg, #000000 0%, #161823 68%, #fe2c55 100%);
+  --pd-badge-bg: #252632;
+  --pd-badge-text: #ffffff;
+  --pd-stage: #000000;
+  --pd-stage-bar: #0c0d14;
+  --pd-stage-border: #252736;
+  --pd-stage-text: #ffffff;
+  --pd-stage-muted: #8a8d9b;
+  --pd-media-control-bg: rgba(12, 13, 20, 0.86);
+  --pd-media-control-hover: rgba(254, 44, 85, 0.92);
+  --pd-media-control-text: #ffffff;
+  --pd-article-bg: #161823;
+  --pd-article-text: #ffffff;
+  --pd-article-muted: #9b9ea9;
+  --pd-surface: #161823;
+  --pd-surface-muted: #222432;
+  --pd-input: #1b1d29;
+  --pd-text: #ffffff;
+  --pd-text-secondary: #d0d1d9;
+  --pd-text-muted: #8a8d9b;
+  --pd-border: #2e3040;
+  --pd-divider: #252736;
+  --pd-accent: #fe2c55;
+  --pd-accent-hover: #ff4569;
+  --pd-accent-soft: rgba(254, 44, 85, 0.16);
+  --pd-on-accent: #ffffff;
+  --pd-accent-secondary: #f1f1f2;
+  --pd-accent-secondary-soft: rgba(255, 255, 255, 0.1);
+  --pd-like-accent: #ff4569;
+  --pd-scrollbar-thumb: #3a3d4f;
+  --pd-dialog-shadow: 0 24px 64px -16px rgba(0, 0, 0, 0.85);
+}

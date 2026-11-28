@@ -1,0 +1,71 @@
+/* ================= 知乎 Zhihu ================= */
+[data-platform='zhihu'] {
+  --pd-brand-bar: #0066ff;
+  --pd-badge-bg: #0066ff;
+  --pd-badge-text: #ffffff;
+  --pd-stage: #f4f6f9;
+  --pd-stage-bar: #ffffff;
+  --pd-stage-border: #e5e9f0;
+  --pd-stage-text: #191b1f;
+  --pd-stage-muted: #646a73;
+  --pd-media-control-bg: rgba(25, 27, 31, 0.72);
+  --pd-media-control-hover: rgba(0, 102, 255, 0.92);
+  --pd-media-control-text: #ffffff;
+  --pd-article-bg: #ffffff;
+  --pd-article-text: #191b1f;
+  --pd-article-muted: #646a73;
+  --pd-surface: #ffffff;
+  --pd-surface-muted: #f6f7f9;
+  --pd-input: #f4f6f9;
+  --pd-text: #191b1f;
+  --pd-text-secondary: #373c44;
+  --pd-text-muted: #646a73;
+  --pd-border: #e6e8ec;
+  --pd-divider: #f0f2f7;
+  --pd-accent: #0066ff;
+  --pd-accent-hover: #0052cc;
+  --pd-accent-soft: rgba(0, 102, 255, 0.1);
+  --pd-on-accent: #ffffff;
+  --pd-accent-secondary: #1772f6;
+  --pd-accent-secondary-soft: rgba(23, 114, 246, 0.1);
+  --pd-like-accent: #0066ff;
+  --pd-scrollbar-thumb: #cfd5df;
+  --pd-dialog-shadow: 0 24px 56px -16px rgba(18, 38, 63, 0.24);
+  --pd-radius-dialog: 8px;
+  --pd-radius-control: 6px;
+  --pd-radius-pill: 4px;
+}
+
+html[data-theme='dark'] [data-platform='zhihu'] {
+  --pd-brand-bar: #3b82f6;
+  --pd-badge-bg: #2563eb;
+  --pd-badge-text: #ffffff;
+  --pd-stage: #0d0d0d;
+  --pd-stage-bar: #161616;
+  --pd-stage-border: #282828;
+  --pd-stage-text: #e6e6e6;
+  --pd-stage-muted: #999999;
+  --pd-media-control-bg: rgba(22, 22, 22, 0.84);
+  --pd-media-control-hover: rgba(59, 130, 246, 0.92);
+  --pd-media-control-text: #e6e6e6;
+  --pd-article-bg: #151515;
+  --pd-article-text: #e6e6e6;
+  --pd-article-muted: #9b9b9b;
+  --pd-surface: #121212;
+  --pd-surface-muted: #1c1c1c;
+  --pd-input: #0e0e0e;
+  --pd-text: #e6e6e6;
+  --pd-text-secondary: #c2c2c2;
+  --pd-text-muted: #8f8f8f;
+  --pd-border: #2b2b2b;
+  --pd-divider: #222222;
+  --pd-accent: #3b82f6;
+  --pd-accent-hover: #60a5fa;
+  --pd-accent-soft: rgba(59, 130, 246, 0.18);
+  --pd-on-accent: #ffffff;
+  --pd-accent-secondary: #60a5fa;
+  --pd-accent-secondary-soft: rgba(96, 165, 250, 0.16);
+  --pd-like-accent: #60a5fa;
+  --pd-scrollbar-thumb: #3a3a3a;
+  --pd-dialog-shadow: 0 24px 64px -16px rgba(0, 0, 0, 0.78);
+}

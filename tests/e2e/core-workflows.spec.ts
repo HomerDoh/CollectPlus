@@ -210,7 +210,8 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
       await expect(deleteModal).toBeHidden();
       await expect(libraryPage.locator('article')).toHaveCount(1);
 
-      // 切换至回收站视图并恢复
+      // 切换至回收站视图并恢复（先展开折叠的「更多」分组）
+      await sidebar.getByTestId('sidebar-more-toggle').click();
       await sidebar.getByRole('button', { name: /回收站/ }).click();
       await expect(libraryPage.locator('article')).toHaveCount(1);
       await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible();
@@ -796,6 +797,77 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         'src',
         /^blob:chrome-extension:\/\//,
       );
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await tracker.dispose();
+    }
+  });
+
+  test('侧边栏结构（无待同步、最近收藏位于全部收藏下方、未同步与回收站折叠）与最近收藏未打开逻辑', async ({
+    context,
+    extensionUrl,
+    pageErrors,
+  }) => {
+    const tracker = await installDouyinMockRoutes(context);
+    try {
+      const douyinPage = await context.newPage();
+      await douyinPage.goto(
+        `https://www.douyin.com/video/${MOCK_VIDEO_AWEME_ID}`,
+        { waitUntil: 'domcontentloaded' },
+      );
+      await expect(douyinPage.locator('button.cp-fab-btn')).toBeVisible();
+      await douyinPage.click('#mock-load-detail');
+      await expect
+        .poll(async () =>
+          douyinPage.evaluate(() => {
+            const win = window as unknown as { __mockDetailLoaded?: boolean };
+            return Boolean(win.__mockDetailLoaded);
+          }),
+        )
+        .toBe(true);
+      await douyinPage.locator('button.cp-fab-btn').click();
+
+      const libraryPage = await context.newPage();
+      await libraryPage.goto(extensionUrl('library.html'));
+      await expect(libraryPage.getByText(MOCK_VIDEO_TITLE)).toBeVisible({
+        timeout: 20_000,
+      });
+
+      const nav = libraryPage.locator('aside nav');
+      // 1. 已去掉「待同步」分类
+      await expect(nav.getByRole('button', { name: /待同步/ })).toHaveCount(0);
+
+      // 2. 「未同步」和「回收站」默认折叠隐藏，展开后可见
+      await expect(nav.getByRole('button', { name: /未同步/ })).toHaveCount(0);
+      await expect(nav.getByRole('button', { name: /回收站/ })).toHaveCount(0);
+      await nav.getByTestId('sidebar-more-toggle').click();
+      await expect(nav.getByRole('button', { name: /未同步/ })).toBeVisible();
+      await expect(nav.getByRole('button', { name: /回收站/ })).toBeVisible();
+
+      // 3. 「最近收藏」紧跟在「全部收藏」下方，且新收藏未打开过时计数为 1
+      const navLabels = await nav.getByRole('button').allInnerTexts();
+      expect(navLabels[0]).toContain('全部收藏');
+      expect(navLabels[1]).toContain('最近收藏');
+      await expect(
+        nav.getByRole('button', { name: /最近收藏/ }),
+      ).toContainText('1');
+
+      await nav.getByRole('button', { name: /最近收藏/ }).click();
+      await expect(libraryPage.locator('article')).toHaveCount(1);
+
+      // 4. 在后台打开该视频详情后，自动移出「最近收藏」，但仍保留在「全部收藏」中
+      await libraryPage.locator('article').first().click();
+      await expect(libraryPage.getByRole('dialog')).toBeVisible();
+      await libraryPage.getByRole('button', { name: '关闭详情' }).click();
+
+      await expect(
+        nav.getByRole('button', { name: /最近收藏/ }),
+      ).toContainText('0');
+      await expect(libraryPage.locator('article')).toHaveCount(0);
+      await expect(
+        nav.getByRole('button', { name: /全部收藏/ }),
+      ).toContainText('1');
 
       expect(pageErrors).toEqual([]);
     } finally {

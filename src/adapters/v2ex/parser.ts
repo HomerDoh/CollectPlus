@@ -159,8 +159,14 @@ export function parseV2exComments(
 /** V2EX 平台适配器实例 */
 export const v2exAdapter: PlatformAdapter = {
   id: 'v2ex',
+  tier: 'deep',
   displayName: 'V2EX',
   hostPatterns: V2EX_HOST_PATTERNS,
+  uiMeta: {
+    entryUrl: 'https://www.v2ex.com/',
+    badgeClass: 'bg-teal-700/85 text-white backdrop-blur-xs',
+  },
+  remoteUncollectEntryUrl: 'https://www.v2ex.com/',
 
   matchesUrl(url: string): boolean {
     try {

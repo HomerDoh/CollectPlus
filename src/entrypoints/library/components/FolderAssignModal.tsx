@@ -7,7 +7,7 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { i18n } from '#i18n';
+import { i18n } from '@/i18n/index.ts';
 import {
   getItemFolderIds,
   type CollectionItemRecord,
@@ -140,7 +140,7 @@ export function FolderAssignModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-[1px]"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--cp-scrim)] p-4"
       onClick={() => !submitting && onClose()}
       role="dialog"
       aria-modal="true"
@@ -148,23 +148,23 @@ export function FolderAssignModal({
       data-testid="folder-assign-modal"
     >
       <div
-        className="flex max-h-[82vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+        className="flex max-h-[82vh] w-full max-w-md flex-col overflow-hidden rounded-md border border-[var(--cp-border-strong)] bg-[var(--cp-surface)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 头部 */}
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+        <div className="flex items-center justify-between border-b border-[var(--cp-divider)] px-5 py-3.5">
           <div className="flex items-center gap-2">
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
+            <span className="inline-flex h-8 w-8 items-center justify-center rounded bg-[var(--cp-active)] text-[var(--cp-accent)]">
               <FolderPlus className="h-4 w-4" />
             </span>
             <div>
               <h3
                 id="folder-assign-modal-title"
-                className="text-sm font-semibold text-slate-900"
+                className="text-sm font-semibold text-[var(--cp-text)]"
               >
                 {i18n.t('folderModal.title')}
               </h3>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-[11px] text-[var(--cp-text-muted)]">
                 {i18n.t('folderModal.subtitle', { count: selectedItems.length })}
               </p>
             </div>
@@ -174,14 +174,14 @@ export function FolderAssignModal({
             onClick={onClose}
             disabled={submitting}
             aria-label={i18n.t('folderModal.closeAria')}
-            className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            className="rounded p-1 text-[var(--cp-text-muted)] hover:bg-[var(--cp-muted)] hover:text-[var(--cp-text)]"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
         {/* 快速新建文件夹 */}
-        <div className="border-b border-slate-100 bg-slate-50/70 px-5 py-3">
+        <div className="border-b border-[var(--cp-divider)] bg-[var(--cp-canvas)] px-5 py-3">
           <div className="flex items-center gap-2">
             <input
               type="text"
@@ -195,13 +195,13 @@ export function FolderAssignModal({
               }}
               placeholder={i18n.t('folderModal.quickCreatePlaceholder')}
               disabled={creating || submitting}
-              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 focus:outline-none"
+              className="min-w-0 flex-1 rounded border border-[var(--cp-border)] bg-[var(--cp-surface)] px-3 py-1.5 text-xs text-[var(--cp-text)] placeholder:text-[var(--cp-text-muted)] focus:border-[var(--cp-accent)] focus:ring-2 focus:ring-[var(--cp-accent-soft)] focus:outline-none"
             />
             <button
               type="button"
               onClick={() => void handleQuickCreate()}
               disabled={!newFolderName.trim() || creating || submitting}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 disabled:opacity-45"
+              className="inline-flex items-center gap-1 rounded border border-[var(--cp-border)] bg-[var(--cp-surface)] px-2.5 py-1.5 text-xs font-medium text-[var(--cp-text-secondary)] transition hover:border-[var(--cp-accent)] hover:bg-[var(--cp-active)] hover:text-[var(--cp-text-active)] disabled:opacity-45"
             >
               {creating ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -216,7 +216,7 @@ export function FolderAssignModal({
         {/* 文件夹多选列表 */}
         <div className="flex-1 overflow-y-auto px-3 py-2.5">
           {folderRows.length === 0 ? (
-            <div className="py-8 text-center text-xs text-slate-400">
+            <div className="py-8 text-center text-xs text-[var(--cp-text-muted)]">
               {i18n.t('folderModal.emptyHint')}
             </div>
           ) : (
@@ -228,10 +228,10 @@ export function FolderAssignModal({
                 return (
                   <label
                     key={folder.id}
-                    className={`flex cursor-pointer items-center justify-between gap-2 rounded-xl px-3 py-2 text-xs transition ${
+                    className={`flex cursor-pointer items-center justify-between gap-2 rounded px-3 py-2 text-xs transition ${
                       checked
-                        ? 'bg-indigo-50 text-indigo-800'
-                        : 'text-slate-700 hover:bg-slate-50'
+                        ? 'bg-[var(--cp-active)] text-[var(--cp-text-active)] font-semibold'
+                        : 'text-[var(--cp-text-secondary)] hover:bg-[var(--cp-muted)] hover:text-[var(--cp-text)]'
                     }`}
                     style={{ paddingLeft: `${12 + depth * 18}px` }}
                   >
@@ -241,18 +241,18 @@ export function FolderAssignModal({
                         checked={checked}
                         disabled={submitting}
                         onChange={() => toggleFolder(folder.id)}
-                        className="h-4 w-4 shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                        className="h-4 w-4 shrink-0 rounded border-[var(--cp-border-strong)] accent-[var(--cp-accent)]"
                       />
                       <Folder
                         className={`h-3.5 w-3.5 shrink-0 ${
-                          checked ? 'text-indigo-600' : 'text-amber-500'
+                          checked ? 'text-[var(--cp-accent)]' : 'text-[var(--cp-accent-2)]'
                         }`}
                       />
                       <span className="truncate font-medium">{folder.name}</span>
                     </span>
 
                     {existingCount > 0 && (
-                      <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium tabular-nums text-slate-500">
+                      <span className="shrink-0 rounded bg-[var(--cp-muted)] px-2 py-0.5 text-[10px] font-medium tabular-nums text-[var(--cp-text-muted)]">
                         {existingCount === selectedItems.length
                           ? i18n.t('folderModal.allAlreadyIn')
                           : i18n.t('folderModal.partialAlreadyIn', {
@@ -269,10 +269,10 @@ export function FolderAssignModal({
         </div>
 
         {/* 底部操作栏 */}
-        <div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-slate-50/70 px-5 py-3">
-          <span className="text-[11px] text-slate-500">
+        <div className="flex items-center justify-between gap-2 border-t border-[var(--cp-divider)] bg-[var(--cp-canvas)] px-5 py-3">
+          <span className="text-[11px] text-[var(--cp-text-muted)]">
             {i18n.t('folderModal.selectedPrefix')}{' '}
-            <strong className="font-semibold text-indigo-700">
+            <strong className="font-semibold text-[var(--cp-text-active)]">
               {pickedFolderIds.size}
             </strong>{' '}
             {i18n.t('folderModal.selectedSuffix')}
@@ -282,7 +282,7 @@ export function FolderAssignModal({
               type="button"
               onClick={onClose}
               disabled={submitting}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+              className="rounded border border-[var(--cp-border)] bg-[var(--cp-surface)] px-3 py-1.5 text-xs font-medium text-[var(--cp-text-secondary)] transition hover:border-[var(--cp-border-strong)] hover:text-[var(--cp-text)]"
             >
               {i18n.t('common.cancel')}
             </button>
@@ -291,7 +291,7 @@ export function FolderAssignModal({
               onClick={() => void handleSubmit()}
               disabled={pickedFolderIds.size === 0 || submitting}
               data-testid="folder-assign-submit"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+              className="inline-flex items-center gap-1.5 rounded bg-[var(--cp-accent)] px-3.5 py-1.5 text-xs font-semibold text-[var(--cp-on-accent)] transition hover:bg-[var(--cp-accent-hover)] disabled:cursor-not-allowed disabled:opacity-45"
             >
               {submitting ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />

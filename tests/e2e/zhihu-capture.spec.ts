@@ -122,6 +122,7 @@ test.describe('Collect+ 知乎独立插件全链路 E2E 验证', () => {
       });
 
       await articlePage.click('#mock-zhihu-uncollect');
+      await libraryPage.getByTestId('sidebar-more-toggle').click();
       await expect(
         libraryPage.locator('aside').getByRole('button', { name: /^回收站/ }),
       ).toContainText('1', { timeout: 10_000 });

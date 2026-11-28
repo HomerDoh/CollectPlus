@@ -26,6 +26,7 @@
     "wxt": "^0.21.5"
   },
   "dependencies": {
+    "@wxt-dev/i18n": "^0.2.9",
     "dexie": "^4.4.7",
     "dexie-react-hooks": "^4.4.0",
     "lucide-react": "^1.77.0",

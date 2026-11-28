@@ -987,8 +987,14 @@ export function matchesZhihuUrl(url: string): boolean {
 /** 知乎平台标准适配器实现 */
 export const zhihuAdapter: PlatformAdapter = {
   id: 'zhihu',
+  tier: 'deep',
   displayName: '知乎',
   hostPatterns: ZHIHU_HOST_PATTERNS,
+  uiMeta: {
+    entryUrl: 'https://www.zhihu.com/',
+    badgeClass: 'bg-sky-600/85 text-white backdrop-blur-xs',
+  },
+  remoteUncollectEntryUrl: 'https://www.zhihu.com/',
   matchesUrl: matchesZhihuUrl,
   getDnrRules(): readonly DnrHeaderRuleSpec[] {
     return ZHIHU_DNR_RULES;

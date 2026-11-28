@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { AlertCircle, CheckCircle2, Download, X } from 'lucide-react';
+import { i18n, useI18nLocale } from '@/i18n/index.ts';
 import {
   addItemsToFolders,
   createFolder,
@@ -11,20 +12,40 @@ import {
   getUserPreferences,
   getVaultSyncPendingCounts,
   hardDeleteItemsFromDb,
+  markItemOpened,
   markItemsAutoSyncExcluded,
   removeItemsFromFolder,
   renameFolder,
   restoreItem,
   restoreItems,
   softDeleteItems,
+  updateFolderAutoRule,
   updateItemClassification,
   updateUserPreferences,
 } from '@/storage/db.ts';
 import { removeItemFromOpfs } from '@/storage/opfs.ts';
+import {
+  connectCloudflareR2,
+  disconnectCloudflareR2,
+  formatR2TargetLabel,
+  type ConnectCloudflareR2Input,
+} from '@/storage/providers/cloudflare-r2/index.ts';
+import {
+  connectGoogleDrive,
+  disconnectGoogleDrive,
+  type ConnectGoogleDriveInput,
+} from '@/storage/providers/google-drive/index.ts';
+import { createLocalFsVaultBackend } from '@/storage/providers/local-fs/index.ts';
+import {
+  getActiveVaultProviderId,
+  getVaultProvider,
+  setActiveVaultProviderId,
+} from '@/storage/providers/registry.ts';
 import { sendToBackground } from '@/types/messages.ts';
 import { CollectionSearchEngine } from '@/storage/search.ts';
 import {
   checkVaultDirectoryExists,
+  ensureVaultStructure,
   finalizeVaultBinding,
   flushToVault,
   getSavedVaultHandle,
@@ -50,12 +71,16 @@ import {
   type RebuildSummary,
   type VaultMigrationMode,
   type VaultPermissionStatus,
+  type VaultProviderId,
+  type VaultStorageBackend,
 } from '@/storage/vault.ts';
 import {
   getItemFolderIds,
   isAutoSyncExcluded,
+  isNsfwItem,
   type AutoSyncExclusionReason,
   type CollectionItemRecord,
+  type FolderAutoRule,
   type FolderNode,
   type TagMeta,
   type UserPreferences,
@@ -65,6 +90,7 @@ import {
   type DeleteConfirmMode,
 } from './components/DeleteConfirmModal.tsx';
 import { FolderAssignModal } from './components/FolderAssignModal.tsx';
+import { FolderRuleModal } from './components/FolderRuleModal.tsx';
 import {
   ItemCardGrid,
   type SortOption,
@@ -110,7 +136,7 @@ function toVaultActionError(
     return {
       message,
       helpUrl: VAULT_PERMISSION_HELP_URL,
-      helpLabel: '查看权限问题解决办法',
+      helpLabel: i18n.t('settings.viewPermissionHelp'),
       canRebind: true,
     };
   }
@@ -174,6 +200,12 @@ function isAbortError(error: unknown): boolean {
 }
 
 export default function App() {
+  const uiLanguage = useI18nLocale();
+
+  useEffect(() => {
+    document.title = i18n.t('library.pageTitle');
+  }, [uiLanguage]);
+
   // 1. 实时订阅 IndexedDB 全量数据
   const liveItems = useLiveQuery(() => db.items.toArray(), []);
   const liveFolders = useLiveQuery(
@@ -201,7 +233,12 @@ export default function App() {
   const preferences: UserPreferences =
     livePreferences ?? DEFAULT_USER_PREFERENCES;
 
-  // 2. Vault 目录句柄与同步/重建状态
+  // 2. 插件化 Vault 后端状态（本地目录句柄 + 统一 VaultStorageBackend）与同步/重建状态
+  const [activeProviderId, setActiveProviderId] =
+    useState<VaultProviderId>('local_fs');
+  const [vaultBackend, setVaultBackend] = useState<VaultStorageBackend | null>(
+    null,
+  );
   const [vaultHandle, setVaultHandle] =
     useState<FileSystemDirectoryHandle | null>(null);
   const [permissionState, setPermissionState] =
@@ -245,6 +282,9 @@ export default function App() {
   );
   const [activeView, setActiveView] = useState<QuickNavView>('all');
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [editingRuleFolder, setEditingRuleFolder] = useState<FolderNode | null>(
+    null,
+  );
   const [mediaKindFilter, setMediaKindFilter] =
     useState<MediaKindFilter>('all');
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>('all');
@@ -360,10 +400,10 @@ export default function App() {
     }
   }, []);
 
-  // 6. 执行 OPFS -> CollectVault 同步落盘
+  // 6. 执行 OPFS -> CollectVault 同步落盘（通用支持本地目录与云存储后端）
   const runFlushToVault = useCallback(
     async (
-      handle: FileSystemDirectoryHandle,
+      target: VaultStorageBackend | FileSystemDirectoryHandle,
       options?: { silentEmpty?: boolean; preserveOtherFeedback?: boolean },
     ) => {
       if (vaultBusyRef.current) {
@@ -377,9 +417,11 @@ export default function App() {
         setLastMigrationSummary(null);
       }
       setFlushProgress({ phase: 'preparing', current: 0, total: 0 });
+      const targetName =
+        'displayName' in target ? target.displayName : target.name;
 
       try {
-        const summary = await flushToVault(handle, (progress) => {
+        const summary = await flushToVault(target, (progress) => {
           setFlushProgress(progress);
         });
         if (
@@ -392,7 +434,11 @@ export default function App() {
         }
       } catch (error) {
         setVaultError(
-          toVaultActionError('同步到 CollectVault 失败', error, handle.name),
+          toVaultActionError(
+            i18n.t('library.syncVaultFailedPrefix'),
+            error,
+            targetName,
+          ),
         );
       } finally {
         setIsFlushing(false);
@@ -403,10 +449,10 @@ export default function App() {
     [],
   );
 
-  // 6b. 从本地 CollectVault 重建索引（供手动触发与首次绑定已初始化目录复用）
+  // 6b. 从 CollectVault（本地或云端）重建索引
   const runRebuildIndex = useCallback(
     async (
-      handle: FileSystemDirectoryHandle,
+      target: VaultStorageBackend | FileSystemDirectoryHandle,
       options?: RebuildOptions & { preserveMigrationSummary?: boolean },
     ): Promise<boolean> => {
       if (vaultBusyRef.current) {
@@ -424,7 +470,7 @@ export default function App() {
 
       try {
         const summary = await rebuildIndexFromVault(
-          handle,
+          target,
           (progress) => {
             setRebuildProgress(progress);
           },
@@ -435,7 +481,11 @@ export default function App() {
         setLastRebuildSummary(summary);
         return true;
       } catch (error) {
-        setVaultError(`重建索引失败：${getErrorMessage(error)}`);
+        setVaultError(
+          i18n.t('library.rebuildIndexFailed', {
+            error: getErrorMessage(error),
+          }),
+        );
         return false;
       } finally {
         setIsRebuilding(false);
@@ -476,12 +526,17 @@ export default function App() {
           },
         );
         setVaultHandle(targetHandle);
+        setVaultBackend(createLocalFsVaultBackend(targetHandle));
         setPermissionState('granted');
         setLastMigrationSummary(summary);
         migrationSucceeded = true;
       } catch (error) {
         setVaultError(
-          toVaultActionError('迁移本地同步目录失败', error, targetHandle.name),
+          toVaultActionError(
+            i18n.t('library.migrateVaultFailedPrefix'),
+            error,
+            targetHandle.name,
+          ),
         );
       } finally {
         setIsMigrating(false);
@@ -522,48 +577,62 @@ export default function App() {
     [runFlushToVault, runRebuildIndex],
   );
 
-  // 7. 页面初始化读取 Vault 句柄、权限并按偏好自动静默同步
+  // 7. 加载当前启用的持久化插件状态并按偏好自动静默同步
+  const hydrateVaultProviderState = useCallback(
+    async (providerId: VaultProviderId, allowAutoSync: boolean) => {
+      const provider = getVaultProvider(providerId);
+      const [connectionState, backend, savedLocalHandle] = await Promise.all([
+        provider.getConnectionState(),
+        provider.getBackend(),
+        getSavedVaultHandle(),
+      ]);
+
+      setActiveProviderId(providerId);
+      setVaultHandle(savedLocalHandle);
+      setVaultBackend(backend);
+      setPermissionState(
+        connectionState.configured ? connectionState.permission : 'unbound',
+      );
+
+      if (
+        allowAutoSync &&
+        backend &&
+        connectionState.permission === 'granted' &&
+        !autoSyncTriggeredRef.current
+      ) {
+        const [prefs, pendingCounts] = await Promise.all([
+          getUserPreferences(),
+          getVaultSyncPendingCounts(),
+        ]);
+        if (
+          prefs.autoSyncOnLibraryOpen &&
+          pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0
+        ) {
+          autoSyncTriggeredRef.current = true;
+          await runFlushToVault(backend, { silentEmpty: true });
+        }
+      }
+    },
+    [runFlushToVault],
+  );
+
   useEffect(() => {
     let disposed = false;
 
     const initVault = async () => {
       try {
-        const savedHandle = await getSavedVaultHandle();
+        const providerId = await getActiveVaultProviderId();
         if (disposed) {
           return;
         }
-        if (!savedHandle) {
-          setVaultHandle(null);
-          setPermissionState('unbound');
-          return;
-        }
-
-        setVaultHandle(savedHandle);
-        const perm = await queryVaultPermission(savedHandle, 'readwrite');
-        if (disposed) {
-          return;
-        }
-        setPermissionState(perm);
-
-        if (perm === 'granted' && !autoSyncTriggeredRef.current) {
-          const [prefs, pendingCounts] = await Promise.all([
-            getUserPreferences(),
-            getVaultSyncPendingCounts(),
-          ]);
-          if (disposed) {
-            return;
-          }
-          if (
-            prefs.autoSyncOnLibraryOpen &&
-            pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0
-          ) {
-            autoSyncTriggeredRef.current = true;
-            await runFlushToVault(savedHandle, { silentEmpty: true });
-          }
-        }
+        await hydrateVaultProviderState(providerId, true);
       } catch (error) {
         if (!disposed) {
-          setVaultError(`读取本地目录状态失败：${getErrorMessage(error)}`);
+          setVaultError(
+            i18n.t('library.readVaultStatusFailed', {
+              error: getErrorMessage(error),
+            }),
+          );
         }
       }
     };
@@ -573,7 +642,188 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [runFlushToVault]);
+  }, [hydrateVaultProviderState]);
+
+  // 7b. 切换持久化存储插件（如本地目录 <-> Google Drive，后续可扩展 WebDAV / S3 等）
+  const handleSelectVaultProvider = useCallback(
+    async (nextProviderId: VaultProviderId) => {
+      if (vaultBusyRef.current) {
+        return;
+      }
+      setVaultError(null);
+      setLastFlushSummary(null);
+      setLastRebuildSummary(null);
+      setLastMigrationSummary(null);
+      setShowRebuildSuggestion(false);
+      await setActiveVaultProviderId(nextProviderId);
+      await hydrateVaultProviderState(nextProviderId, false);
+    },
+    [hydrateVaultProviderState],
+  );
+
+  // 7c. 连接 / 断开 Google Drive 独立云存储插件
+  const handleConnectGoogleDrive = useCallback(
+    async (input: ConnectGoogleDriveInput) => {
+      if (vaultBusyRef.current) {
+        return;
+      }
+      setVaultError(null);
+      setLastFlushSummary(null);
+      setLastRebuildSummary(null);
+      setLastMigrationSummary(null);
+      setShowRebuildSuggestion(false);
+
+      try {
+        const { backend, config } = await connectGoogleDrive(input);
+        await setActiveVaultProviderId('google_drive');
+        const { isExistingVault } = await ensureVaultStructure(backend);
+
+        setActiveProviderId('google_drive');
+        setVaultBackend(backend);
+        setPermissionState('granted');
+        setActionNotice({
+          type: 'success',
+          text: i18n.t('settings.gdriveConnectedNotice', {
+            folder: config.rootFolderName,
+          }),
+        });
+
+        const [totalInDb, pendingCounts] = await Promise.all([
+          db.items.count(),
+          getVaultSyncPendingCounts(),
+        ]);
+
+        if (isExistingVault && totalInDb === 0) {
+          const rebuilt = await runRebuildIndex(backend, {
+            preserveOpfsStaged: true,
+          });
+          if (rebuilt) {
+            const afterPending = await getVaultSyncPendingCounts();
+            if (afterPending.stagedCount + afterPending.metaDirtyCount > 0) {
+              await runFlushToVault(backend, {
+                silentEmpty: true,
+                preserveOtherFeedback: true,
+              });
+            }
+          }
+        } else if (
+          pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0
+        ) {
+          await runFlushToVault(backend);
+        }
+      } catch (error) {
+        setVaultError(
+          `${i18n.t('settings.gdriveConnectFailedPrefix')}：${getErrorMessage(error)}`,
+        );
+      }
+    },
+    [runFlushToVault, runRebuildIndex],
+  );
+
+  const handleDisconnectGoogleDrive = useCallback(async () => {
+    if (vaultBusyRef.current) {
+      return;
+    }
+    setVaultError(null);
+    setLastFlushSummary(null);
+    setLastRebuildSummary(null);
+    setShowRebuildSuggestion(false);
+
+    try {
+      await disconnectGoogleDrive();
+      await hydrateVaultProviderState('google_drive', false);
+      setActionNotice({
+        type: 'success',
+        text: i18n.t('settings.gdriveDisconnectedNotice'),
+      });
+    } catch (error) {
+      setVaultError(
+        `${i18n.t('settings.gdriveDisconnectFailedPrefix')}：${getErrorMessage(error)}`,
+      );
+    }
+  }, [hydrateVaultProviderState]);
+
+  // 7d. 连接 / 断开 Cloudflare R2 独立对象存储插件
+  const handleConnectCloudflareR2 = useCallback(
+    async (input: ConnectCloudflareR2Input) => {
+      if (vaultBusyRef.current) {
+        return;
+      }
+      setVaultError(null);
+      setLastFlushSummary(null);
+      setLastRebuildSummary(null);
+      setLastMigrationSummary(null);
+      setShowRebuildSuggestion(false);
+
+      try {
+        const { backend, config } = await connectCloudflareR2(input);
+        await setActiveVaultProviderId('cloudflare_r2');
+        const { isExistingVault } = await ensureVaultStructure(backend);
+
+        setActiveProviderId('cloudflare_r2');
+        setVaultBackend(backend);
+        setPermissionState('granted');
+        setActionNotice({
+          type: 'success',
+          text: i18n.t('settings.r2ConnectedNotice', {
+            target: formatR2TargetLabel(config),
+          }),
+        });
+
+        const [totalInDb, pendingCounts] = await Promise.all([
+          db.items.count(),
+          getVaultSyncPendingCounts(),
+        ]);
+
+        if (isExistingVault && totalInDb === 0) {
+          const rebuilt = await runRebuildIndex(backend, {
+            preserveOpfsStaged: true,
+          });
+          if (rebuilt) {
+            const afterPending = await getVaultSyncPendingCounts();
+            if (afterPending.stagedCount + afterPending.metaDirtyCount > 0) {
+              await runFlushToVault(backend, {
+                silentEmpty: true,
+                preserveOtherFeedback: true,
+              });
+            }
+          }
+        } else if (
+          pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0
+        ) {
+          await runFlushToVault(backend);
+        }
+      } catch (error) {
+        setVaultError(
+          `${i18n.t('settings.r2ConnectFailedPrefix')}：${getErrorMessage(error)}`,
+        );
+      }
+    },
+    [runFlushToVault, runRebuildIndex],
+  );
+
+  const handleDisconnectCloudflareR2 = useCallback(async () => {
+    if (vaultBusyRef.current) {
+      return;
+    }
+    setVaultError(null);
+    setLastFlushSummary(null);
+    setLastRebuildSummary(null);
+    setShowRebuildSuggestion(false);
+
+    try {
+      await disconnectCloudflareR2();
+      await hydrateVaultProviderState('cloudflare_r2', false);
+      setActionNotice({
+        type: 'success',
+        text: i18n.t('settings.r2DisconnectedNotice'),
+      });
+    } catch (error) {
+      setVaultError(
+        `${i18n.t('settings.r2DisconnectFailedPrefix')}：${getErrorMessage(error)}`,
+      );
+    }
+  }, [hydrateVaultProviderState]);
 
   // 8. 绑定/切换本地 CollectVault 目录（含磁盘根与非空校验、已初始化自动建索引及目录迁移）
   const handleBindVault = useCallback(async () => {
@@ -596,7 +846,9 @@ export default function App() {
             await queryVaultPermission(vaultHandle, 'readwrite'),
           );
           setVaultError(
-            `切换目录前需要先授予原目录“${vaultHandle.name}”的读写权限以迁移旧文件，请授权后重试。`,
+            i18n.t('library.switchVaultNeedSourcePerm', {
+              name: vaultHandle.name,
+            }),
           );
           return;
         }
@@ -611,7 +863,10 @@ export default function App() {
       // 分支 A：首次绑定（或原目录已在外部被删除）
       if (!sourceHandle) {
         await finalizeVaultBinding(targetHandle);
+        await setActiveVaultProviderId('local_fs');
+        setActiveProviderId('local_fs');
         setVaultHandle(targetHandle);
+        setVaultBackend(createLocalFsVaultBackend(targetHandle));
         setPermissionState('granted');
         setShowRebuildSuggestion(false);
 
@@ -651,7 +906,9 @@ export default function App() {
       if (isAbortError(error)) {
         return;
       }
-      setVaultError(toVaultActionError('绑定本地目录失败', error));
+      setVaultError(
+        toVaultActionError(i18n.t('library.bindVaultFailedPrefix'), error),
+      );
     }
   }, [vaultHandle, executeVaultMigration, runFlushToVault, runRebuildIndex]);
 
@@ -671,76 +928,85 @@ export default function App() {
     setPendingMigrationConflict(null);
   }, []);
 
-  // 9. 请求已有目录权限并在授权后同步待落盘条目
+  // 9. 请求当前持久化目标权限并在授权后同步待落盘条目
   const handleRequestPermissionAndSync = useCallback(async (): Promise<boolean> => {
     setVaultError(null);
 
-    if (!vaultHandle) {
-      await handleBindVault();
-      const updatedHandle = await getSavedVaultHandle();
-      if (!updatedHandle) {
-        return false;
+    if (!vaultBackend) {
+      if (activeProviderId === 'local_fs') {
+        await handleBindVault();
+        const updatedHandle = await getSavedVaultHandle();
+        if (!updatedHandle) {
+          return false;
+        }
+        const perm = await queryVaultPermission(updatedHandle, 'readwrite');
+        return perm === 'granted';
       }
-      const perm = await queryVaultPermission(updatedHandle, 'readwrite');
-      return perm === 'granted';
+      setActivePage('settings');
+      setVaultSectionFocusTick((n) => n + 1);
+      return false;
     }
 
     try {
-      const granted = await requestVaultPermission(vaultHandle, 'readwrite');
+      const granted = await vaultBackend.requestPermission('readwrite');
       const nextPerm: VaultPermissionStatus = granted
         ? 'granted'
-        : await queryVaultPermission(vaultHandle, 'readwrite');
+        : await vaultBackend.queryPermission('readwrite');
       setPermissionState(nextPerm);
 
       if (!granted) {
-        setVaultError('未授予本地 CollectVault 目录的读写权限。');
+        setVaultError(i18n.t('library.vaultPermDenied'));
         return false;
       }
 
       const pendingCounts = await getVaultSyncPendingCounts();
       if (pendingCounts.stagedCount + pendingCounts.metaDirtyCount > 0) {
-        await runFlushToVault(vaultHandle);
+        await runFlushToVault(vaultBackend);
       }
       return true;
     } catch (error) {
       if (!isAbortError(error)) {
-        setVaultError(`请求本地目录权限失败：${getErrorMessage(error)}`);
+        setVaultError(
+          i18n.t('library.requestVaultPermFailed', {
+            error: getErrorMessage(error),
+          }),
+        );
       }
       return false;
     }
-  }, [vaultHandle, handleBindVault, runFlushToVault]);
+  }, [vaultBackend, activeProviderId, handleBindVault, runFlushToVault]);
 
-  // 10. 手动触发同步到 CollectVault
+  // 10. 手动触发同步到当前 CollectVault（本地或云端）
   const handleManualFlush = useCallback(async () => {
-    if (!vaultHandle) {
+    if (!vaultBackend) {
       return;
     }
-    const granted = await requestVaultPermission(vaultHandle, 'readwrite');
+    const granted = await vaultBackend.requestPermission('readwrite');
     if (!granted) {
-      setPermissionState(await queryVaultPermission(vaultHandle, 'readwrite'));
-      setVaultError('缺少本地目录写权限，无法执行同步。');
+      setPermissionState(await vaultBackend.queryPermission('readwrite'));
+      setVaultError(i18n.t('library.missingVaultWritePermForSync'));
       return;
     }
     setPermissionState('granted');
-    await runFlushToVault(vaultHandle);
-  }, [vaultHandle, runFlushToVault]);
+    await runFlushToVault(vaultBackend);
+  }, [vaultBackend, runFlushToVault]);
 
-  // 11. 容灾重建索引
+  // 11. 容灾重建索引（支持本地目录与云存储后端）
   const handleRebuildIndex = useCallback(async () => {
-    if (!vaultHandle || vaultBusyRef.current) {
+    if (!vaultBackend || vaultBusyRef.current) {
       return;
     }
-    const granted = await requestVaultPermission(vaultHandle, 'readwrite');
+    const granted = await vaultBackend.requestPermission('readwrite');
     if (!granted) {
-      setPermissionState(await queryVaultPermission(vaultHandle, 'readwrite'));
-      setVaultError('缺少本地目录权限，无法重建索引。');
+      setPermissionState(await vaultBackend.queryPermission('readwrite'));
+      setVaultError(i18n.t('library.missingVaultPermForRebuild'));
       return;
     }
     setPermissionState('granted');
-    await runRebuildIndex(vaultHandle);
-  }, [vaultHandle, runRebuildIndex]);
+    await runRebuildIndex(vaultBackend);
+  }, [vaultBackend, runRebuildIndex]);
 
-  // 12. 清空浏览器缓存索引（绝不删除硬盘文件与目录句柄）
+  // 12. 清空浏览器缓存索引（绝不删除硬盘/云端文件与绑定配置）
   const handleClearBrowserCache = useCallback(async () => {
     if (vaultBusyRef.current) {
       return;
@@ -768,43 +1034,58 @@ export default function App() {
       closeItemDrawer();
       setSelectedFolderId(null);
       setActiveView('all');
-      if (vaultHandle && permissionState === 'granted') {
+      if (vaultBackend && permissionState === 'granted') {
         setShowRebuildSuggestion(true);
       }
     } catch (error) {
-      setVaultError(`清空浏览器缓存索引失败：${getErrorMessage(error)}`);
+      setVaultError(
+        i18n.t('library.clearCacheFailed', { error: getErrorMessage(error) }),
+      );
     }
-  }, [closeItemDrawer, vaultHandle, permissionState]);
+  }, [closeItemDrawer, vaultBackend, permissionState]);
 
   // 13. 文件夹操作（有 Vault 写权限时自动回写 taxonomy.json）
   const syncTaxonomyIfPermitted = useCallback(async () => {
-    if (!vaultHandle || permissionState !== 'granted') {
+    if (!vaultBackend || permissionState !== 'granted') {
       return;
     }
     try {
-      await writeTaxonomyToVault(vaultHandle);
+      await writeTaxonomyToVault(vaultBackend);
     } catch (error) {
       setVaultError(
-        toVaultActionError('回写 taxonomy.json 失败', error, vaultHandle.name),
+        toVaultActionError(
+          i18n.t('library.writeTaxonomyFailedPrefix'),
+          error,
+          vaultBackend.displayName,
+        ),
       );
     }
-  }, [vaultHandle, permissionState]);
+  }, [vaultBackend, permissionState]);
+
+  const notifyTaxonomyUpdated = useCallback(() => {
+    void sendToBackground({
+      target: 'background',
+      type: 'NOTIFY_TAXONOMY_UPDATED',
+    }).catch(() => undefined);
+  }, []);
 
   const handleCreateFolder = useCallback(
     async (name: string, parentId: string | null): Promise<FolderNode> => {
       const created = await createFolder(name, parentId);
       await syncTaxonomyIfPermitted();
+      notifyTaxonomyUpdated();
       return created;
     },
-    [syncTaxonomyIfPermitted],
+    [syncTaxonomyIfPermitted, notifyTaxonomyUpdated],
   );
 
   const handleRenameFolder = useCallback(
     async (id: string, name: string) => {
       await renameFolder(id, name);
       await syncTaxonomyIfPermitted();
+      notifyTaxonomyUpdated();
     },
-    [syncTaxonomyIfPermitted],
+    [syncTaxonomyIfPermitted, notifyTaxonomyUpdated],
   );
 
   const handleDeleteFolder = useCallback(
@@ -816,8 +1097,26 @@ export default function App() {
         setActiveView('all');
       }
       await syncTaxonomyIfPermitted();
+      notifyTaxonomyUpdated();
     },
-    [folders, selectedFolderId, syncTaxonomyIfPermitted],
+    [folders, selectedFolderId, syncTaxonomyIfPermitted, notifyTaxonomyUpdated],
+  );
+
+  const handleSaveFolderAutoRule = useCallback(
+    async (folderId: string, autoRule: FolderAutoRule | undefined) => {
+      const updated = await updateFolderAutoRule(folderId, autoRule);
+      await syncTaxonomyIfPermitted();
+      notifyTaxonomyUpdated();
+      if (updated) {
+        setActionNotice({
+          type: 'success',
+          text: autoRule
+            ? i18n.t('folderRuleModal.savedNotice', { name: updated.name })
+            : i18n.t('folderRuleModal.clearedNotice', { name: updated.name }),
+        });
+      }
+    },
+    [syncTaxonomyIfPermitted, notifyTaxonomyUpdated],
   );
 
   // 14. 条目元数据实时编辑保存 + 有写权限立即回写 meta.json & taxonomy.json
@@ -825,11 +1124,11 @@ export default function App() {
     async (itemId: string, patch: ItemEditPatch): Promise<SaveItemResult> => {
       const updated = await updateItemClassification(itemId, patch);
       if (!updated) {
-        throw new Error('未找到对应的收藏条目。');
+        throw new Error(i18n.t('library.itemNotFound'));
       }
 
-      if (vaultHandle && permissionState === 'granted') {
-        await writeTaxonomyToVault(vaultHandle);
+      if (vaultBackend && permissionState === 'granted') {
+        await writeTaxonomyToVault(vaultBackend);
 
         if (
           updated.syncStatus === 'meta_dirty' ||
@@ -839,39 +1138,38 @@ export default function App() {
             ...updated,
             syncStatus: 'vault_synced',
           };
-          await writeItemMetaToVault(vaultHandle, syncedRecord);
+          await writeItemMetaToVault(vaultBackend, syncedRecord);
           await db.items.put(syncedRecord);
           return {
             syncedToVault: true,
-            message: '已保存并实时回写至本地 meta.json 与 taxonomy.json',
+            message: i18n.t('library.saveSyncedMsg'),
           };
         }
 
         // 若条目仍处于 opfs_staged，媒体文件尚在 OPFS 中，保留 opfs_staged 等待落盘以免丢失媒体
         return {
           syncedToVault: false,
-          message:
-            '分类已保存并更新 taxonomy.json，请在设置页点击「立即同步」将暂存媒体落盘',
+          message: i18n.t('library.saveStagedMsg'),
         };
       }
 
       return {
         syncedToVault: false,
-        message: '已保存到浏览器索引，授权 CollectVault 后可同步至硬盘',
+        message: i18n.t('library.saveLocalOnlyMsg'),
       };
     },
-    [vaultHandle, permissionState],
+    [vaultBackend, permissionState],
   );
 
   // 15. 软删除 / 彻底删除 / 恢复 / 批量分类（已授权且已落盘条目同步回写 meta.json）
   const syncItemMetasIfPermitted = useCallback(
     async (itemIds: readonly string[], includeTaxonomy = false) => {
-      if (!vaultHandle || permissionState !== 'granted') {
+      if (!vaultBackend || permissionState !== 'granted') {
         return;
       }
       try {
         if (includeTaxonomy) {
-          await writeTaxonomyToVault(vaultHandle);
+          await writeTaxonomyToVault(vaultBackend);
         }
         for (const itemId of itemIds) {
           const latest = await db.items.get(itemId);
@@ -880,17 +1178,21 @@ export default function App() {
               ...latest,
               syncStatus: 'vault_synced',
             };
-            await writeItemMetaToVault(vaultHandle, synced);
+            await writeItemMetaToVault(vaultBackend, synced);
             await db.items.put(synced);
           }
         }
       } catch (error) {
         setVaultError(
-          toVaultActionError('回写条目元数据失败', error, vaultHandle.name),
+          toVaultActionError(
+            i18n.t('library.writeItemMetaFailedPrefix'),
+            error,
+            vaultBackend.displayName,
+          ),
         );
       }
     },
-    [vaultHandle, permissionState],
+    [vaultBackend, permissionState],
   );
 
   const handleRequestDeleteItems = useCallback(
@@ -952,7 +1254,7 @@ export default function App() {
               });
             }
           } else {
-            remoteTransportError = remoteRes?.error ?? '通信失败';
+            remoteTransportError = remoteRes?.error ?? i18n.t('common.commFailed');
           }
         }
 
@@ -979,8 +1281,13 @@ export default function App() {
               fullyRemovedItems.push(item);
             } else {
               const detail = syncPlatformUncollect
-                ? `管理台已删除本地媒体，但取消原站收藏失败：${outcome?.reason ?? remoteTransportError ?? '未知原因'}`
-                : '管理台彻底删除本地媒体，保留原平台账号收藏';
+                ? i18n.t('library.excludedRemoteFailDetail', {
+                    reason:
+                      outcome?.reason ??
+                      remoteTransportError ??
+                      i18n.t('common.unknownReason'),
+                  })
+                : i18n.t('library.excludedKeepRemoteDetail');
               excludedSpecs.push({
                 itemId: item.id,
                 reason: 'deleted_keep_remote',
@@ -994,10 +1301,10 @@ export default function App() {
           }
 
           if (fullyRemovedItems.length > 0) {
-            if (vaultHandle && permissionState === 'granted') {
+            if (vaultBackend && permissionState === 'granted') {
               for (const item of fullyRemovedItems) {
                 try {
-                  await removeItemDirFromVault(vaultHandle, item.relativeDir);
+                  await removeItemDirFromVault(vaultBackend, item.relativeDir);
                 } catch {
                   vaultDeleteErrors += 1;
                 }
@@ -1011,18 +1318,18 @@ export default function App() {
             const updatedExcluded = await markItemsAutoSyncExcluded(excludedSpecs);
             excludedCount = updatedExcluded.length;
 
-            if (vaultHandle && permissionState === 'granted') {
+            if (vaultBackend && permissionState === 'granted') {
               for (const rec of updatedExcluded) {
                 try {
                   await purgeItemMediaFilesFromVault(
-                    vaultHandle,
+                    vaultBackend,
                     rec.relativeDir,
                   );
                   const synced: CollectionItemRecord = {
                     ...rec,
                     syncStatus: 'vault_synced',
                   };
-                  await writeItemMetaToVault(vaultHandle, synced);
+                  await writeItemMetaToVault(vaultBackend, synced);
                   await db.items.put(synced);
                 } catch {
                   vaultDeleteErrors += 1;
@@ -1044,17 +1351,26 @@ export default function App() {
         if (syncPlatformUncollect) {
           if (remoteTransportError !== null) {
             noticeType = 'warning';
-            remoteSummaryText = `；原平台同步取消收藏未完成（${remoteTransportError}）`;
+            remoteSummaryText = i18n.t('library.remoteUncollectTransportWarn', {
+              error: remoteTransportError,
+            });
           } else {
             const outcomes = Array.from(remoteOutcomeByKey.values());
             const okCount = outcomes.filter((r) => r.ok).length;
             const failedList = outcomes.filter((r) => !r.ok);
             if (failedList.length === 0 && okCount > 0) {
-              remoteSummaryText = `；已同步取消原平台账号收藏 ${okCount} 项`;
+              remoteSummaryText = i18n.t('library.remoteUncollectSuccessPart', {
+                count: okCount,
+              });
             } else if (failedList.length > 0) {
               noticeType = 'warning';
-              const firstReason = failedList[0]?.reason ?? '未知原因';
-              remoteSummaryText = `；原平台取消收藏成功 ${okCount} 项，失败 ${failedList.length} 项（${firstReason}）`;
+              const firstReason =
+                failedList[0]?.reason ?? i18n.t('common.unknownReason');
+              remoteSummaryText = i18n.t('library.remoteUncollectPartialPart', {
+                ok: okCount,
+                failed: failedList.length,
+                reason: firstReason,
+              });
             }
           }
         }
@@ -1062,19 +1378,28 @@ export default function App() {
         let localActionLabel: string;
         if (mode === 'permanent') {
           if (excludedCount > 0 && fullyRemovedCount > 0) {
-            localActionLabel = `已彻底清除 ${fullyRemovedCount} 项，另有 ${excludedCount} 项已删除本地媒体并转入「不自动同步」`;
+            localActionLabel = i18n.t('library.deletedMixed', {
+              removed: fullyRemovedCount,
+              excluded: excludedCount,
+            });
           } else if (excludedCount > 0) {
-            localActionLabel = `已删除 ${excludedCount} 项本地媒体并转入「不自动同步」（保留轻量元数据防止重复同步）`;
+            localActionLabel = i18n.t('library.deletedToExcluded', {
+              count: excludedCount,
+            });
           } else {
-            localActionLabel = `已彻底删除 ${fullyRemovedCount} 项收藏`;
+            localActionLabel = i18n.t('library.deletedPermanent', {
+              count: fullyRemovedCount,
+            });
           }
         } else {
-          localActionLabel = `已将 ${targets.length} 项移入回收站`;
+          localActionLabel = i18n.t('library.deletedSoft', {
+            count: targets.length,
+          });
         }
 
         const vaultWarnText =
           vaultDeleteErrors > 0
-            ? `（其中 ${vaultDeleteErrors} 项本地目录清理失败）`
+            ? i18n.t('library.vaultDeleteWarn', { count: vaultDeleteErrors })
             : '';
 
         setActionNotice({
@@ -1088,7 +1413,9 @@ export default function App() {
       } catch (error) {
         setActionNotice({
           type: 'error',
-          text: `删除失败：${getErrorMessage(error)}`,
+          text: i18n.t('library.deleteFailed', {
+            error: getErrorMessage(error),
+          }),
         });
       } finally {
         setIsDeleting(false);
@@ -1098,7 +1425,7 @@ export default function App() {
       pendingDelete,
       isDeleting,
       syncItemMetasIfPermitted,
-      vaultHandle,
+      vaultBackend,
       permissionState,
       selectedItemId,
       closeItemDrawer,
@@ -1110,28 +1437,28 @@ export default function App() {
       if (targets.length === 0) {
         return;
       }
-      let writableVault: FileSystemDirectoryHandle | null =
-        vaultHandle && permissionState === 'granted' ? vaultHandle : null;
+      let writableVault: VaultStorageBackend | null =
+        vaultBackend && permissionState === 'granted' ? vaultBackend : null;
 
       if (
         !writableVault &&
-        vaultHandle &&
+        vaultBackend &&
         targets.some((item) => item.syncStatus === 'vault_synced')
       ) {
-        const granted = await requestVaultPermission(vaultHandle, 'readwrite');
+        const granted = await vaultBackend.requestPermission('readwrite');
         setPermissionState(
           granted
             ? 'granted'
-            : await queryVaultPermission(vaultHandle, 'readwrite'),
+            : await vaultBackend.queryPermission('readwrite'),
         );
         if (!granted) {
           setActionNotice({
             type: 'warning',
-            text: '需要授权本地 CollectVault 写权限以清理磁盘上的忽略元数据文件，请授权后重试。',
+            text: i18n.t('library.allowSyncNeedVaultPerm'),
           });
           return;
         }
-        writableVault = vaultHandle;
+        writableVault = vaultBackend;
       }
 
       const targetIds = targets.map((t) => t.id);
@@ -1160,11 +1487,14 @@ export default function App() {
         type: vaultRemoveErrors > 0 ? 'warning' : 'success',
         text:
           vaultRemoveErrors > 0
-            ? `已移除 ${targets.length} 项不自动同步限制（其中 ${vaultRemoveErrors} 项本地目录清理失败）`
-            : `已移除 ${targets.length} 项「不自动同步」限制，下次同步或重新采集时将正常入库`,
+            ? i18n.t('library.allowSyncDoneWithErrors', {
+                count: targets.length,
+                errors: vaultRemoveErrors,
+              })
+            : i18n.t('library.allowSyncDone', { count: targets.length }),
       });
     },
-    [vaultHandle, permissionState, selectedItemId, closeItemDrawer],
+    [vaultBackend, permissionState, selectedItemId, closeItemDrawer],
   );
 
   const handleRemoteUncollectAndClear = useCallback(
@@ -1190,7 +1520,9 @@ export default function App() {
       if (!remoteRes || !remoteRes.ok) {
         setActionNotice({
           type: 'warning',
-          text: `取消原站收藏失败：${remoteRes?.error ?? '通信失败'}，已保留「不自动同步」记录。`,
+          text: i18n.t('library.remoteUncollectClearFailed', {
+            error: remoteRes?.error ?? i18n.t('common.commFailed'),
+          }),
         });
         return;
       }
@@ -1218,7 +1550,9 @@ export default function App() {
           failedSpecs.push({
             itemId: item.id,
             reason: item.autoSyncExclusion?.reason ?? 'deleted_keep_remote',
-            detail: `取消原站收藏失败：${outcome?.reason ?? '未知原因'}`,
+            detail: i18n.t('library.remoteUncollectItemFailed', {
+              reason: outcome?.reason ?? i18n.t('common.unknownReason'),
+            }),
           });
         }
       }
@@ -1228,8 +1562,8 @@ export default function App() {
         const succeededIdSet = new Set(succeededIds);
         for (const item of succeeded) {
           await removeItemFromOpfs(item.id).catch(() => undefined);
-          if (vaultHandle && permissionState === 'granted') {
-            await removeItemDirFromVault(vaultHandle, item.relativeDir).catch(
+          if (vaultBackend && permissionState === 'granted') {
+            await removeItemDirFromVault(vaultBackend, item.relativeDir).catch(
               () => undefined,
             );
           }
@@ -1242,13 +1576,13 @@ export default function App() {
 
       if (failedSpecs.length > 0) {
         const updatedFailed = await markItemsAutoSyncExcluded(failedSpecs);
-        if (vaultHandle && permissionState === 'granted') {
+        if (vaultBackend && permissionState === 'granted') {
           for (const rec of updatedFailed) {
             const synced: CollectionItemRecord = {
               ...rec,
               syncStatus: 'vault_synced',
             };
-            await writeItemMetaToVault(vaultHandle, synced).catch(
+            await writeItemMetaToVault(vaultBackend, synced).catch(
               () => undefined,
             );
             await db.items.put(synced);
@@ -1263,11 +1597,16 @@ export default function App() {
         type: failedSpecs.length > 0 ? 'warning' : 'success',
         text:
           failedSpecs.length === 0
-            ? `已同步取消原站收藏并彻底清除 ${succeeded.length} 项记录`
-            : `已取消原站收藏并清除 ${succeeded.length} 项，另有 ${failedSpecs.length} 项取消失败已继续保留在「不自动同步」`,
+            ? i18n.t('library.remoteUncollectClearAllOk', {
+                count: succeeded.length,
+              })
+            : i18n.t('library.remoteUncollectClearPartial', {
+                ok: succeeded.length,
+                failed: failedSpecs.length,
+              }),
       });
     },
-    [vaultHandle, permissionState, selectedItemId, closeItemDrawer],
+    [vaultBackend, permissionState, selectedItemId, closeItemDrawer],
   );
 
   const handleCancelItemSync = useCallback(
@@ -1298,23 +1637,23 @@ export default function App() {
           {
             itemId: item.id,
             reason: 'sync_cancelled_by_user',
-            detail: '下载同步过程中已手动取消同步到插件',
+            detail: i18n.t('library.cancelSyncDetail'),
           },
         ]);
       }
 
-      if (vaultHandle && permissionState === 'granted') {
+      if (vaultBackend && permissionState === 'granted') {
         const updated = await db.items.get(item.id);
         if (updated && isAutoSyncExcluded(updated)) {
           await purgeItemMediaFilesFromVault(
-            vaultHandle,
+            vaultBackend,
             updated.relativeDir,
           ).catch(() => undefined);
           const synced: CollectionItemRecord = {
             ...updated,
             syncStatus: 'vault_synced',
           };
-          await writeItemMetaToVault(vaultHandle, synced).catch(
+          await writeItemMetaToVault(vaultBackend, synced).catch(
             () => undefined,
           );
           await db.items.put(synced);
@@ -1326,10 +1665,10 @@ export default function App() {
       }
       setActionNotice({
         type: 'success',
-        text: `已取消「${item.title}」同步到插件，并移入「不自动同步」列表`,
+        text: i18n.t('library.cancelSyncNotice', { title: item.title }),
       });
     },
-    [vaultHandle, permissionState, selectedItemId, closeItemDrawer],
+    [vaultBackend, permissionState, selectedItemId, closeItemDrawer],
   );
 
   const handleRestoreItem = useCallback(
@@ -1351,7 +1690,7 @@ export default function App() {
       setSelectedItemIds(new Set());
       setActionNotice({
         type: 'success',
-        text: `已从回收站恢复 ${targets.length} 项收藏`,
+        text: i18n.t('library.batchRestoredNotice', { count: targets.length }),
       });
     },
     [syncItemMetasIfPermitted],
@@ -1387,6 +1726,15 @@ export default function App() {
     return map;
   }, [folders]);
 
+  // NSFW 过滤仅影响展示（列表与侧边栏计数），同步计数仍基于全量 items
+  const visibleItems = useMemo(
+    () =>
+      preferences.nsfwFilterEnabled
+        ? items.filter((item) => !isNsfwItem(item))
+        : items,
+    [items, preferences.nsfwFilterEnabled],
+  );
+
   const filteredItems = useMemo(() => {
     // 显式依赖 searchIndexVersion，确保条目内容变化后搜索结果即时刷新
     void searchIndexVersion;
@@ -1408,7 +1756,7 @@ export default function App() {
         ? collectDescendantFolderIds(selectedFolderId, folders)
         : null;
 
-    const list = items.filter((item) => {
+    const list = visibleItems.filter((item) => {
       const isDeleted = item.deletedAt != null;
       const isExcluded = isAutoSyncExcluded(item);
 
@@ -1430,18 +1778,13 @@ export default function App() {
               return false;
             }
             break;
-          case 'uncategorized':
-            if (isDeleted || isExcluded || getItemFolderIds(item).length > 0) {
+          case 'recent':
+            if (isDeleted || isExcluded || item.openedAt != null) {
               return false;
             }
             break;
-          case 'pending_sync':
-            if (
-              isDeleted ||
-              isExcluded ||
-              (item.syncStatus !== 'opfs_staged' &&
-                item.syncStatus !== 'meta_dirty')
-            ) {
+          case 'uncategorized':
+            if (isDeleted || isExcluded || getItemFolderIds(item).length > 0) {
               return false;
             }
             break;
@@ -1508,7 +1851,7 @@ export default function App() {
 
     return list;
   }, [
-    items,
+    visibleItems,
     folders,
     activeView,
     selectedFolderId,
@@ -1526,21 +1869,41 @@ export default function App() {
     return items.find((item) => item.id === selectedItemId) ?? null;
   }, [items, selectedItemId]);
 
+  useEffect(() => {
+    if (
+      !selectedItem ||
+      selectedItem.openedAt != null ||
+      selectedItem.deletedAt != null ||
+      isAutoSyncExcluded(selectedItem)
+    ) {
+      return;
+    }
+    void markItemOpened(selectedItem.id).then((updated) => {
+      if (updated) {
+        return syncItemMetasIfPermitted([updated.id]);
+      }
+      return undefined;
+    });
+  }, [selectedItem, syncItemMetasIfPermitted]);
+
   const contextTitle = useMemo(() => {
     if (selectedFolderId !== null) {
-      return foldersById.get(selectedFolderId)?.name ?? '文件夹';
+      return (
+        foldersById.get(selectedFolderId)?.name ??
+        i18n.t('library.folderFallback')
+      );
     }
     switch (activeView) {
       case 'all':
-        return '全部收藏';
+        return i18n.t('sidebar.navAll');
+      case 'recent':
+        return i18n.t('sidebar.navRecent');
       case 'uncategorized':
-        return '未分类';
-      case 'pending_sync':
-        return '待同步';
+        return i18n.t('sidebar.navUncategorized');
       case 'excluded':
-        return '不自动同步';
+        return i18n.t('sidebar.navExcluded');
       case 'trash':
-        return '回收站';
+        return i18n.t('sidebar.navTrash');
     }
   }, [selectedFolderId, foldersById, activeView]);
 
@@ -1549,8 +1912,8 @@ export default function App() {
     mediaKindFilter !== 'all' ||
     platformFilter !== 'all' ||
     selectedFolderId !== null ||
-    activeView === 'uncategorized' ||
-    activeView === 'pending_sync';
+    activeView === 'recent' ||
+    activeView === 'uncategorized';
 
   const handleResetFilters = useCallback(() => {
     setSearchQuery('');
@@ -1570,7 +1933,7 @@ export default function App() {
   );
 
   const sidebarSyncStatus: SidebarSyncStatus =
-    vaultHandle !== null &&
+    vaultBackend !== null &&
     permissionState === 'granted' &&
     vaultError === null &&
     !(lastFlushSummary !== null && lastFlushSummary.failedCount > 0)
@@ -1729,7 +2092,10 @@ export default function App() {
       exitSelectionMode();
       setActionNotice({
         type: 'success',
-        text: `已将 ${itemIds.length} 项加入文件夹：${folderNames.join('、')}`,
+        text: i18n.t('library.batchAddedToFoldersNotice', {
+          count: itemIds.length,
+          folders: folderNames.join(i18n.t('common.listSeparator')),
+        }),
       });
     },
     [
@@ -1749,11 +2115,16 @@ export default function App() {
     if (updated.length > 0) {
       await syncItemMetasIfPermitted(updated.map((u) => u.id));
     }
-    const folderName = foldersById.get(selectedFolderId)?.name ?? '当前文件夹';
+    const folderName =
+      foldersById.get(selectedFolderId)?.name ??
+      i18n.t('library.currentFolderFallback');
     setSelectedItemIds(new Set());
     setActionNotice({
       type: 'success',
-      text: `已将 ${updated.length} 项从「${folderName}」移出`,
+      text: i18n.t('library.batchRemovedFromFolderNotice', {
+        count: updated.length,
+        folder: folderName,
+      }),
     });
   }, [
     selectedFolderId,
@@ -1763,10 +2134,10 @@ export default function App() {
   ]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50 text-slate-900">
+    <div className="flex h-screen overflow-hidden bg-[var(--cp-canvas)] text-[var(--cp-text)]">
       {/* 左侧导航与多级文件夹分类树 */}
       <SidebarTree
-        items={items}
+        items={visibleItems}
         folders={folders}
         activeView={activeView}
         selectedFolderId={selectedFolderId}
@@ -1798,17 +2169,19 @@ export default function App() {
         onCreateFolder={handleCreateFolder}
         onRenameFolder={handleRenameFolder}
         onDeleteFolder={handleDeleteFolder}
+        onEditFolderAutoRule={(folder) => setEditingRuleFolder(folder)}
       />
 
       {/* 右侧主工作区 */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* 后台下载进行中轻提示条 */}
         {activeDownloadCount !== undefined && activeDownloadCount > 0 && (
-          <div className="flex items-center gap-2 border-b border-indigo-100 bg-indigo-50/70 px-6 py-1.5 text-xs text-indigo-800">
-            <Download className="h-3.5 w-3.5 animate-bounce text-indigo-600" />
+          <div className="flex items-center gap-2 border-b border-[var(--cp-border)] bg-[var(--cp-active)] px-6 py-1.5 text-xs text-[var(--cp-text-active)]">
+            <Download className="h-3.5 w-3.5 animate-bounce text-[var(--cp-accent)]" />
             <span>
-              当前有 <strong>{activeDownloadCount}</strong>{' '}
-              个作品正在后台下载中，完成后会自动进入暂存队列并可一键落盘。
+              {i18n.t('library.downloadingBannerPrefix')}
+              <strong>{activeDownloadCount}</strong>
+              {i18n.t('library.downloadingBannerSuffix')}
             </span>
           </div>
         )}
@@ -1819,15 +2192,15 @@ export default function App() {
             data-testid="library-action-notice"
             className={`flex items-center justify-between gap-2 border-b px-6 py-2 text-xs ${
               actionNotice.type === 'success'
-                ? 'border-emerald-200 bg-emerald-50/90 text-emerald-800'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200'
                 : actionNotice.type === 'warning'
-                  ? 'border-amber-200 bg-amber-50/90 text-amber-900'
-                  : 'border-rose-200 bg-rose-50/90 text-rose-800'
+                  ? 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/60 dark:text-amber-200'
+                  : 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950/60 dark:text-rose-200'
             }`}
           >
             <div className="flex min-w-0 items-center gap-2">
               {actionNotice.type === 'success' ? (
-                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
               ) : (
                 <AlertCircle className="h-3.5 w-3.5 shrink-0" />
               )}
@@ -1836,7 +2209,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setActionNotice(null)}
-              aria-label="关闭提示"
+              aria-label={i18n.t('library.dismissNoticeAria')}
               className="rounded p-0.5 opacity-70 transition hover:opacity-100"
             >
               <X className="h-3.5 w-3.5" />
@@ -1848,6 +2221,8 @@ export default function App() {
           <SettingsPanel
             preferences={preferences}
             folders={folders}
+            activeProviderId={activeProviderId}
+            vaultTargetName={vaultBackend ? vaultBackend.displayName : null}
             vaultHandle={vaultHandle}
             permissionState={permissionState}
             lastSyncAt={lastSyncAt}
@@ -1869,9 +2244,11 @@ export default function App() {
               pendingMigrationConflict
                 ? {
                     sourceName:
-                      pendingMigrationConflict.sourceHandle.name || '原目录',
+                      pendingMigrationConflict.sourceHandle.name ||
+                      i18n.t('library.sourceDirFallback'),
                     targetName:
-                      pendingMigrationConflict.targetHandle.name || '新目录',
+                      pendingMigrationConflict.targetHandle.name ||
+                      i18n.t('library.targetDirFallback'),
                   }
                 : null
             }
@@ -1879,7 +2256,12 @@ export default function App() {
             vaultError={vaultError}
             focusVaultSectionTick={vaultSectionFocusTick}
             onUpdatePreferences={handleUpdatePreferences}
+            onSelectVaultProvider={handleSelectVaultProvider}
             onBindVault={handleBindVault}
+            onConnectGoogleDrive={handleConnectGoogleDrive}
+            onDisconnectGoogleDrive={handleDisconnectGoogleDrive}
+            onConnectCloudflareR2={handleConnectCloudflareR2}
+            onDisconnectCloudflareR2={handleDisconnectCloudflareR2}
             onResolveMigrationConflict={handleResolveMigrationConflict}
             onCancelMigrationConflict={handleCancelMigrationConflict}
             onRequestPermissionAndSync={async () => {
@@ -1940,7 +2322,7 @@ export default function App() {
           item={selectedItem}
           folders={folders}
           tags={tags}
-          vaultHandle={vaultHandle}
+          vaultBackend={vaultBackend}
           permissionState={permissionState}
           disableEscapeClose={pendingDelete !== null}
           onClose={closeItemDrawer}
@@ -1975,6 +2357,15 @@ export default function App() {
           onClose={() => setShowFolderAssignModal(false)}
           onCreateFolder={handleCreateFolder}
           onConfirm={handleBatchAddToFolders}
+        />
+      )}
+
+      {/* 文件夹自动分类显式微规则弹窗 */}
+      {editingRuleFolder && (
+        <FolderRuleModal
+          folder={editingRuleFolder}
+          onClose={() => setEditingRuleFolder(null)}
+          onSave={handleSaveFolderAutoRule}
         />
       )}
     </div>

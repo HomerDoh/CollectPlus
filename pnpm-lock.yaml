@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@wxt-dev/i18n':
+        specifier: ^0.2.9
+        version: 0.2.9(wxt@0.21.5(rolldown@1.2.19)(typescript@7.0.2)(vite@8.3.8(@types/node@26.6.6)(jiti@2.7.0)))
       dexie:
         specifier: ^4.4.7
         version: 4.4.7
@@ -506,6 +509,14 @@ packages:
 
   '@wxt-dev/browser@0.3.7':
     resolution: {integrity: sha512-TCBcayayb2mycJxt9X3kTq3QZerqltx/I4FW1WVTafBcqQC6vUaDz5Sboummy0rVsSMbYzyKnS5118VTw0dt4A==}
+
+  '@wxt-dev/i18n@0.2.9':
+    resolution: {integrity: sha512-ik5ilk10s6IyQdIqkJY2D+TT5XLGrDsv5tNp92V+WxSwRMjo0czAKJXDSGW2JK8+Wc42R1ZAWi0/bsbkYw4paw==}
+    peerDependencies:
+      wxt: '>=0.19.7'
+    peerDependenciesMeta:
+      wxt:
+        optional: true
 
   '@wxt-dev/module-react@1.2.2':
     resolution: {integrity: sha512-+lRLi1r9dAXpLySWSIWHLJ1h/nFzR20iQnx3RNrKyA6oJg4+ClOluVXozHjfPg9Okfy/umtffiOopGayASrg6w==}
@@ -1459,6 +1470,15 @@ snapshots:
   '@wxt-dev/browser@0.3.7':
     dependencies:
       '@types/har-format': 1.2.16
+
+  '@wxt-dev/i18n@0.2.9(wxt@0.21.5(rolldown@1.2.19)(typescript@7.0.2)(vite@8.3.8(@types/node@26.6.6)(jiti@2.7.0)))':
+    dependencies:
+      '@wxt-dev/browser': 0.3.7
+      chokidar: 5.0.0
+      confbox: 0.2.4
+      tinyglobby: 0.2.17
+    optionalDependencies:
+      wxt: 0.21.5(rolldown@1.2.19)(typescript@7.0.2)(vite@8.3.8(@types/node@26.6.6)(jiti@2.7.0))
 
   '@wxt-dev/module-react@1.2.2(vite@8.3.8(@types/node@26.6.6)(jiti@2.7.0))(wxt@0.21.5(rolldown@1.2.19)(typescript@7.0.2)(vite@8.3.8(@types/node@26.6.6)(jiti@2.7.0)))':
     dependencies:

@@ -15,12 +15,14 @@ import type {
 import type {
   AutoSyncExclusionReason,
   CollectionItemRecord,
+  FolderNode,
   MediaAsset,
   OversizedVideoNotifyMode,
   PlatformExtraValue,
   PlatformId,
   UserPreferences,
 } from './schema.ts';
+import type { VaultProviderId } from './storage-provider.ts';
 
 /** 跳过本地持久化、仅保存元数据时的原因载荷 */
 export interface CaptureAutoSyncExclusionInput {
@@ -137,8 +139,26 @@ export interface TriggerActiveTabCaptureMessage {
   target: 'background';
   type: 'TRIGGER_ACTIVE_TAB_CAPTURE';
   tabId?: number;
+  /** 前置手动指定的目标文件夹 ID（null 表示显式未分类；undefined 表示未指定、由自动分类决策） */
+  folderId?: string | null;
   /** 非空时取消当前页面作品的本地持久化，仅保存元数据与原因 */
   autoSyncExclusion?: CaptureAutoSyncExclusionInput;
+}
+
+export interface GetCaptureFoldersMessage {
+  target: 'background';
+  type: 'GET_CAPTURE_FOLDERS';
+}
+
+export interface PreviewAutoClassifyMessage {
+  target: 'background';
+  type: 'PREVIEW_AUTO_CLASSIFY';
+  payload: CapturedPayload;
+}
+
+export interface NotifyTaxonomyUpdatedMessage {
+  target: 'background';
+  type: 'NOTIFY_TAXONOMY_UPDATED';
 }
 
 export interface RetryDownloadTaskMessage {
@@ -168,6 +188,21 @@ export interface GetUserPreferencesMessage {
 export interface NotifyPreferencesUpdatedMessage {
   target: 'background';
   type: 'NOTIFY_PREFERENCES_UPDATED';
+}
+
+export interface GetLocaleMessagesMessage {
+  target: 'background';
+  type: 'GET_LOCALE_MESSAGES';
+  locale: 'zh_CN' | 'en';
+}
+
+export interface StorageProviderAuthMessage {
+  target: 'background';
+  type: 'STORAGE_PROVIDER_AUTH';
+  providerId: VaultProviderId;
+  action: 'get_token' | 'invalidate_token' | 'clear_token';
+  interactive?: boolean;
+  token?: string;
 }
 
 export interface OffscreenProgressMessage {
@@ -240,11 +275,16 @@ export type BackgroundMessage =
   | ReportAccountSyncResultMessage
   | GetStatusSummaryMessage
   | TriggerActiveTabCaptureMessage
+  | GetCaptureFoldersMessage
+  | PreviewAutoClassifyMessage
+  | NotifyTaxonomyUpdatedMessage
   | RetryDownloadTaskMessage
   | CancelDownloadTaskMessage
   | OpenLibraryPageMessage
   | GetUserPreferencesMessage
   | NotifyPreferencesUpdatedMessage
+  | GetLocaleMessagesMessage
+  | StorageProviderAuthMessage
   | OffscreenProgressMessage
   | OffscreenCompleteMessage
   | OffscreenErrorMessage
@@ -319,6 +359,10 @@ export interface BackgroundResponseMap {
     | {
         ok: true;
         supportedPlatform: PlatformId | null;
+        /** 当前页采集模式：Tier 3 深度站点 / Tier 2 规则站点 / Tier 1 通用网页 / 不支持（内部页） */
+        captureMode: 'deep' | 'recipe' | 'universal' | 'unsupported';
+        /** 当前页规范化主机名（通用网页模式下用于 Popup 展示） */
+        siteHost?: string;
         totalItems: number;
         stagedCount: number;
         metaDirtyCount: number;
@@ -327,6 +371,23 @@ export interface BackgroundResponseMap {
       }
     | ErrorResult;
   TRIGGER_ACTIVE_TAB_CAPTURE: { ok: true } | ErrorResult;
+  GET_CAPTURE_FOLDERS:
+    | {
+        ok: true;
+        folders: FolderNode[];
+        autoClassifyEnabled: boolean;
+        defaultFolderId: string | null;
+      }
+    | ErrorResult;
+  PREVIEW_AUTO_CLASSIFY:
+    | {
+        ok: true;
+        folderId: string | null;
+        folderName: string | null;
+        autoClassifyEnabled: boolean;
+      }
+    | ErrorResult;
+  NOTIFY_TAXONOMY_UPDATED: { ok: true };
   RETRY_DOWNLOAD_TASK: { ok: true } | ErrorResult;
   CANCEL_DOWNLOAD_TASK: { ok: true } | ErrorResult;
   OPEN_LIBRARY_PAGE: { ok: true };
@@ -334,6 +395,12 @@ export interface BackgroundResponseMap {
     | { ok: true; preferences: UserPreferences }
     | ErrorResult;
   NOTIFY_PREFERENCES_UPDATED: { ok: true };
+  GET_LOCALE_MESSAGES:
+    | { ok: true; messages: Record<string, string> }
+    | ErrorResult;
+  STORAGE_PROVIDER_AUTH:
+    | { ok: true; token: string | null }
+    | ErrorResult;
   OFFSCREEN_PROGRESS: { ok: true };
   OFFSCREEN_COMPLETE: { ok: true };
   OFFSCREEN_ERROR: { ok: true };
@@ -415,6 +482,8 @@ export interface ContentTriggerCaptureMessage {
   target: 'content';
   type: 'CONTENT_TRIGGER_CAPTURE';
   triggerSource: CaptureTriggerSource;
+  /** 前置手动指定的目标文件夹 ID（null 表示显式未分类；undefined 表示未指定、交由自动分类） */
+  folderId?: string | null;
   /** 非空时仅保存当前作品元数据并标记为不自动同步（跳过本地持久化） */
   autoSyncExclusion?: CaptureAutoSyncExclusionInput;
 }
@@ -426,6 +495,16 @@ export interface ContentPreferencesUpdatedMessage {
   nativeCollectToastEnabled: boolean;
   autoSyncAllCollections: boolean;
   syncUncollectToPlugin: boolean;
+  autoClassifyEnabled?: boolean;
+  defaultFolderId?: string | null;
+}
+
+export interface ContentFoldersUpdatedMessage {
+  target: 'content';
+  type: 'CONTENT_FOLDERS_UPDATED';
+  folders: FolderNode[];
+  autoClassifyEnabled: boolean;
+  defaultFolderId: string | null;
 }
 
 export interface ContentRemoteUncollectMessage {
@@ -438,6 +517,7 @@ export interface ContentRemoteUncollectMessage {
 export type ContentMessage =
   | ContentTriggerCaptureMessage
   | ContentPreferencesUpdatedMessage
+  | ContentFoldersUpdatedMessage
   | ContentRemoteUncollectMessage;
 
 /** Content Script 消息类型名联合 */
@@ -447,6 +527,7 @@ export type ContentRequestType = ContentMessage['type'];
 export interface ContentResponseMap {
   CONTENT_TRIGGER_CAPTURE: { ok: true } | ErrorResult;
   CONTENT_PREFERENCES_UPDATED: { ok: true };
+  CONTENT_FOLDERS_UPDATED: { ok: true };
   CONTENT_REMOTE_UNCOLLECT:
     | {
         ok: true;
@@ -479,11 +560,16 @@ const BACKGROUND_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   'REPORT_ACCOUNT_SYNC_RESULT',
   'GET_STATUS_SUMMARY',
   'TRIGGER_ACTIVE_TAB_CAPTURE',
+  'GET_CAPTURE_FOLDERS',
+  'PREVIEW_AUTO_CLASSIFY',
+  'NOTIFY_TAXONOMY_UPDATED',
   'RETRY_DOWNLOAD_TASK',
   'CANCEL_DOWNLOAD_TASK',
   'OPEN_LIBRARY_PAGE',
   'GET_USER_PREFERENCES',
   'NOTIFY_PREFERENCES_UPDATED',
+  'GET_LOCALE_MESSAGES',
+  'STORAGE_PROVIDER_AUTH',
   'OFFSCREEN_PROGRESS',
   'OFFSCREEN_COMPLETE',
   'OFFSCREEN_ERROR',
@@ -504,6 +590,7 @@ const OFFSCREEN_MESSAGE_TYPES: ReadonlySet<string> = new Set<
 const CONTENT_MESSAGE_TYPES: ReadonlySet<string> = new Set<ContentRequestType>([
   'CONTENT_TRIGGER_CAPTURE',
   'CONTENT_PREFERENCES_UPDATED',
+  'CONTENT_FOLDERS_UPDATED',
   'CONTENT_REMOTE_UNCOLLECT',
 ]);
 

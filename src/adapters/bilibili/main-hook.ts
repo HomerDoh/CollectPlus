@@ -29,7 +29,12 @@ import {
   type RequestRemoteUncollectMessage,
 } from '../../types/adapter.ts';
 
-type UnknownRecord = Record<string, unknown>;
+import {
+  isRecord,
+  postBridgeMessage,
+  sleepAbortable,
+  type UnknownRecord,
+} from '../shared/main-bridge.ts';
 
 const INSTALL_LOCK_KEY = Symbol.for(
   'collect-plus:bilibili-main-hook-installed',
@@ -135,9 +140,7 @@ let activeSyncId: string | null = null;
 let activeSyncAbortController: AbortController | null = null;
 let internalFetchInFlight = 0;
 
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+
 
 function readString(record: UnknownRecord, key: string): string | undefined {
   const val = record[key];
@@ -174,25 +177,7 @@ function readNumber(record: UnknownRecord, key: string): number | undefined {
   return undefined;
 }
 
-function getBridgeTargetOrigin(): string {
-  try {
-    const origin = window.location.origin;
-    if (origin && origin !== 'null') {
-      return origin;
-    }
-  } catch {
-    // 忽略异常并回退通配 origin
-  }
-  return '*';
-}
 
-function postBridgeMessage(message: PageBridgeMessage): void {
-  try {
-    window.postMessage(message, getBridgeTargetOrigin());
-  } catch {
-    // 静默忽略，避免影响宿主页
-  }
-}
 
 function resolveUrl(rawUrl: string): URL | null {
   try {
@@ -246,22 +231,7 @@ function parseFormBodyParams(body: unknown): Map<string, string> {
   return params;
 }
 
-function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
-    return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  }
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
+
 
 function extractUrlVideoTarget(): {
   bvid?: string;

@@ -1,0 +1,74 @@
+/*
+ * Collect+ 各网站内容详情页原生明暗配色样式总入口（持久化保存于插件内）。
+ *
+ * 作用范围：挂载 `[data-platform="<id>"]` 的详情页容器（ItemDetailDrawer / ItemCommentsPanel）。
+ * 各平台独立样式文件位于 `./platforms/<platform>.css`，编译时静态打包进插件，
+ * 自动随根元素 `html[data-theme="light" | "dark"]` 切换对应网站的官方亮色与暗色视觉风格。
+ */
+
+@import "./platforms/douyin.css";
+@import "./platforms/bilibili.css";
+@import "./platforms/xiaohongshu.css";
+@import "./platforms/zhihu.css";
+@import "./platforms/v2ex.css";
+@import "./platforms/youtube.css";
+@import "./platforms/twitter.css";
+@import "./platforms/instagram.css";
+@import "./platforms/xvideos.css";
+@import "./platforms/pornhub.css";
+
+/* 兜底默认令牌（使用 :where 保持 0 优先级，确保始终被各平台 [data-platform="<id>"] 覆盖） */
+:where([data-platform]) {
+  --pd-brand-bar: #0d9488;
+  --pd-badge-bg: #0f2625;
+  --pd-badge-text: #ffffff;
+  --pd-stage: #111827;
+  --pd-stage-bar: #161f30;
+  --pd-stage-border: rgba(255, 255, 255, 0.12);
+  --pd-stage-text: #f8fafc;
+  --pd-stage-muted: #94a3b8;
+  --pd-media-control-bg: rgba(15, 23, 42, 0.78);
+  --pd-media-control-hover: rgba(13, 148, 136, 0.92);
+  --pd-media-control-text: #ffffff;
+  --pd-article-bg: #ffffff;
+  --pd-article-text: #1e293b;
+  --pd-article-muted: #64748b;
+  --pd-surface: #ffffff;
+  --pd-surface-muted: #f4f9f8;
+  --pd-input: #f8fafc;
+  --pd-text: #0f2625;
+  --pd-text-secondary: #375250;
+  --pd-text-muted: #587270;
+  --pd-border: #d2e4e1;
+  --pd-divider: #e3efed;
+  --pd-accent: #0d9488;
+  --pd-accent-hover: #0f766e;
+  --pd-accent-soft: rgba(13, 148, 136, 0.12);
+  --pd-on-accent: #ffffff;
+  --pd-accent-secondary: #0f766e;
+  --pd-accent-secondary-soft: rgba(15, 118, 110, 0.12);
+  --pd-like-accent: #0d9488;
+  --pd-scrollbar-thumb: #9cd0c8;
+  --pd-dialog-shadow: 0 24px 60px -16px rgba(10, 17, 18, 0.35);
+  --pd-radius-dialog: 8px;
+  --pd-radius-control: 6px;
+  --pd-radius-pill: 6px;
+}
+
+/* 详情浮窗顶部品牌色带（兼容纯色与线性渐变） */
+[data-platform] .pd-brand-bar {
+  background: var(--pd-brand-bar);
+}
+
+/* 详情浮窗内部滚动条与来源网站配色一致 */
+[data-platform] * {
+  scrollbar-color: var(--pd-scrollbar-thumb) transparent;
+}
+
+[data-platform] *::-webkit-scrollbar-thumb {
+  background-color: var(--pd-scrollbar-thumb);
+}
+
+[data-platform] *::-webkit-scrollbar-thumb:hover {
+  background-color: var(--pd-text-muted);
+}

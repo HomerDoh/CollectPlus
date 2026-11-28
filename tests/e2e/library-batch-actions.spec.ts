@@ -441,6 +441,7 @@ test.describe('Collect+ 媒体控制台批量选择、多分类文件夹与同�
     await expect.poll(() => context.pages().length).toBe(pagesCountBefore);
 
     // 3. 进入回收站：批量恢复 1 项，再彻底删除剩余 2 项
+    await libraryPage.getByTestId('sidebar-more-toggle').click();
     await libraryPage
       .locator('aside')
       .getByRole('button', { name: /回收站/ })

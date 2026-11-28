@@ -154,6 +154,7 @@ test.describe('Collect+ V2EX 独立收藏插件全链路 E2E 验证', () => {
         timeout: 15_000,
       });
 
+      await libraryPage.getByTestId('sidebar-more-toggle').click();
       await libraryPage.getByRole('button', { name: /回收站/ }).click();
       await expect(libraryPage.getByText(MOCK_V2EX_TOPIC_TITLE)).toBeVisible();
 
