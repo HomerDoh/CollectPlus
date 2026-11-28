@@ -697,3 +697,7 @@ export type SettingValueMap = {
 
 /** `chrome.storage.local` 首次安装固定工具栏提示待展示标记键 */
 export const PIN_HINT_PENDING_KEY = 'collect_plus_pin_hint_pending' as const;
+
+/** `chrome.storage.local` 未设置同步文件夹自动弹窗“不再提醒”持久化键 */
+export const VAULT_SETUP_POPUP_MUTED_KEY =
+  'collect_plus_vault_setup_popup_muted' as const;

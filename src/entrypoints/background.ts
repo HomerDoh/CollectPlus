@@ -83,6 +83,7 @@ import {
   isAutoSyncExclusionReason,
   PIN_HINT_PENDING_KEY,
   SCHEMA_VERSION,
+  VAULT_SETUP_POPUP_MUTED_KEY,
 } from '../types/schema.ts';
 
 /** 快捷键命令 ID（与 wxt.config.ts manifest.commands 保持一致） */
@@ -111,6 +112,168 @@ const inFlightAccountSyncs = new Set<string>();
 const passiveFallbackAccounts = new Set<string>();
 /** 正在 Offscreen 中暂存评论与头像的条目 ID 集合 */
 const inFlightCommentItemIds = new Set<string>();
+
+/** 浏览器启动或首次安装时，等待普通浏览器窗口就绪后自动弹出同步文件夹提示弹窗 */
+let pendingVaultSetupPopup = false;
+let pendingVaultSetupAttempts = 0;
+let vaultSetupPopupPromise: Promise<void> | null = null;
+/** 记录每个标签页最近已触发过未设同步文件夹弹窗的网址，防止同页重复触发 */
+const lastPromptedWebsiteByTab = new Map<number, string>();
+
+const MAX_PENDING_VAULT_POPUP_ATTEMPTS = 3;
+const STARTUP_POPUP_RETRY_DELAYS_MS = [300, 700, 1200] as const;
+const WEBSITE_POPUP_RETRY_DELAYS_MS = [300] as const;
+
+type VaultSetupPopupTrigger = 'install' | 'startup' | 'website';
+
+async function isVaultSetupPopupMuted(): Promise<boolean> {
+  try {
+    const stored = await chrome.storage.local.get(VAULT_SETUP_POPUP_MUTED_KEY);
+    return stored[VAULT_SETUP_POPUP_MUTED_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasOpenActionPopup(): Promise<boolean> {
+  if (typeof chrome.runtime.getContexts !== 'function') {
+    return false;
+  }
+  const contexts = await chrome.runtime
+    .getContexts({ contextTypes: ['POPUP'] })
+    .catch(() => []);
+  return contexts.length > 0;
+}
+
+async function resolveNormalPopupWindowId(
+  preferredWindowId?: number,
+): Promise<number | undefined> {
+  const windows = await chrome.windows
+    .getAll({ windowTypes: ['normal'] })
+    .catch(() => [] as chrome.windows.Window[]);
+
+  if (preferredWindowId !== undefined) {
+    const preferred = windows.find((win) => win.id === preferredWindowId);
+    if (preferred?.id !== undefined) {
+      return preferred.id;
+    }
+  }
+
+  const focusedWindow = windows.find(
+    (win) => win.focused && win.id !== undefined,
+  );
+  return (
+    focusedWindow?.id ?? windows.find((win) => win.id !== undefined)?.id
+  );
+}
+
+async function openActionPopupOnce(windowId: number): Promise<boolean> {
+  if (typeof chrome.action?.openPopup !== 'function') {
+    return false;
+  }
+  try {
+    await chrome.action.openPopup({ windowId });
+    return true;
+  } catch {
+    try {
+      await chrome.action.openPopup();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * 浏览器启动、插件首次安装或打开普通网站后，若尚未配置同步文件夹且用户未勾选“不再提醒”，
+ * 则自动在插件栏打开 Popup 提示用户设置同步文件夹。
+ */
+async function maybeOpenVaultSetupPopup(
+  trigger: VaultSetupPopupTrigger,
+  preferredWindowId?: number,
+): Promise<void> {
+  if (vaultSetupPopupPromise) {
+    return vaultSetupPopupPromise;
+  }
+
+  const task = (async () => {
+    if (typeof chrome.action?.openPopup !== 'function') {
+      pendingVaultSetupPopup = false;
+      return;
+    }
+
+    const shouldAbort = async (): Promise<boolean> => {
+      if (await isVaultSetupPopupMuted()) {
+        pendingVaultSetupPopup = false;
+        pendingVaultSetupAttempts = 0;
+        return true;
+      }
+      if (await hasConfiguredActiveVault().catch(() => false)) {
+        pendingVaultSetupPopup = false;
+        pendingVaultSetupAttempts = 0;
+        return true;
+      }
+      if (await hasOpenActionPopup()) {
+        pendingVaultSetupPopup = false;
+        pendingVaultSetupAttempts = 0;
+        return true;
+      }
+      return false;
+    };
+
+    if (await shouldAbort()) {
+      return;
+    }
+
+    const attemptOpen = async (): Promise<boolean> => {
+      const targetWindowId = await resolveNormalPopupWindowId(preferredWindowId);
+      if (targetWindowId === undefined) {
+        return false;
+      }
+      return openActionPopupOnce(targetWindowId);
+    };
+
+    if (await attemptOpen()) {
+      pendingVaultSetupPopup = false;
+      pendingVaultSetupAttempts = 0;
+      return;
+    }
+
+    const retryDelays =
+      trigger === 'website'
+        ? WEBSITE_POPUP_RETRY_DELAYS_MS
+        : STARTUP_POPUP_RETRY_DELAYS_MS;
+
+    for (const delayMs of retryDelays) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, delayMs);
+      });
+      if (await shouldAbort()) {
+        return;
+      }
+      if (await attemptOpen()) {
+        pendingVaultSetupPopup = false;
+        pendingVaultSetupAttempts = 0;
+        return;
+      }
+    }
+
+    if (trigger !== 'website') {
+      pendingVaultSetupAttempts += 1;
+      pendingVaultSetupPopup =
+        pendingVaultSetupAttempts < MAX_PENDING_VAULT_POPUP_ATTEMPTS;
+    }
+  })();
+
+  vaultSetupPopupPromise = task;
+  try {
+    await task;
+  } finally {
+    if (vaultSetupPopupPromise === task) {
+      vaultSetupPopupPromise = null;
+    }
+  }
+}
 
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
@@ -2219,12 +2382,16 @@ export default defineBackground(() => {
   void initI18n();
   startActionIconLiveSync();
 
-  // 1. 扩展安装/更新与浏览器启动生命周期钩子
+  // 1. 扩展安装/更新、浏览器启动及打开网站生命周期钩子
   chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
+      pendingVaultSetupAttempts = 0;
       void chrome.storage.local
         .set({ [PIN_HINT_PENDING_KEY]: true })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => {
+          void maybeOpenVaultSetupPopup('install');
+        });
     }
     void scheduleActionIconSync();
     void ensureDnrReady(true).catch((error) => {
@@ -2233,11 +2400,69 @@ export default defineBackground(() => {
   });
 
   chrome.runtime.onStartup.addListener(() => {
+    pendingVaultSetupAttempts = 0;
+    void maybeOpenVaultSetupPopup('startup');
     void ensureDnrReady(true)
       .then(() => recoverStaleTasksOnStartup())
       .catch((error) => {
         console.error('[CollectPlus] Failed during onStartup recovery:', error);
       });
+  });
+
+  chrome.windows.onCreated.addListener((win) => {
+    if (win.type !== 'normal') {
+      return;
+    }
+    if (pendingVaultSetupPopup) {
+      void maybeOpenVaultSetupPopup('startup', win.id);
+      return;
+    }
+    // 兼容浏览器后台常驻后重新打开首个普通窗口（该路径不触发 onStartup）
+    void chrome.windows
+      .getAll({ windowTypes: ['normal'] })
+      .then((normalWindows) => {
+        if (normalWindows.length <= 1) {
+          pendingVaultSetupAttempts = 0;
+          void maybeOpenVaultSetupPopup('startup', win.id);
+        }
+      })
+      .catch(() => undefined);
+  });
+
+  chrome.windows.onFocusChanged.addListener((windowId) => {
+    if (pendingVaultSetupPopup && windowId !== chrome.windows.WINDOW_ID_NONE) {
+      void maybeOpenVaultSetupPopup('startup', windowId);
+    }
+  });
+
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (
+      changeInfo.status !== 'complete' ||
+      !tab.active ||
+      !tab.url ||
+      !isUniversalCapturableUrl(tab.url)
+    ) {
+      return;
+    }
+    if (lastPromptedWebsiteByTab.get(tabId) === tab.url) {
+      return;
+    }
+    lastPromptedWebsiteByTab.set(tabId, tab.url);
+    void maybeOpenVaultSetupPopup('website', tab.windowId);
+  });
+
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    lastPromptedWebsiteByTab.delete(tabId);
+  });
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (
+      areaName === 'local' &&
+      changes[VAULT_SETUP_POPUP_MUTED_KEY]?.newValue === true
+    ) {
+      pendingVaultSetupPopup = false;
+      pendingVaultSetupAttempts = 0;
+    }
   });
 
   // 2. 全局快捷键命令监听（Alt+S -> capture-current-item）

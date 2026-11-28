@@ -27,6 +27,7 @@ import { useTheme } from '@/theme/index.ts';
 import { sendToBackground } from '@/types/messages.ts';
 import {
   PIN_HINT_PENDING_KEY,
+  VAULT_SETUP_POPUP_MUTED_KEY,
   type AutoSyncExclusionReason,
   type FolderNode,
   type PlatformId,
@@ -98,6 +99,7 @@ export default function App() {
   const [loadingSummary, setLoadingSummary] = useState<boolean>(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [showPinHint, setShowPinHint] = useState<boolean>(false);
+  const [vaultPopupMuted, setVaultPopupMuted] = useState<boolean>(false);
   const [captureFeedback, setCaptureFeedback] = useState<CaptureFeedback>({
     state: 'idle',
   });
@@ -238,6 +240,29 @@ export default function App() {
     setShowPinHint(false);
     void chrome.storage.local
       .set({ [PIN_HINT_PENDING_KEY]: false })
+      .catch(() => undefined);
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    void chrome.storage.local
+      .get(VAULT_SETUP_POPUP_MUTED_KEY)
+      .then((stored) => {
+        if (!disposed) {
+          setVaultPopupMuted(stored[VAULT_SETUP_POPUP_MUTED_KEY] === true);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  const handleToggleVaultPopupMuted = (muted: boolean) => {
+    setVaultPopupMuted(muted);
+    void chrome.storage.local
+      .set({ [VAULT_SETUP_POPUP_MUTED_KEY]: muted })
       .catch(() => undefined);
   };
 
@@ -396,26 +421,40 @@ export default function App() {
       {summary !== null && !summary.hasVaultDirectory && (
         <section
           data-testid="popup-vault-hint"
-          className="flex items-center justify-between gap-2.5 rounded border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/60 dark:text-amber-200"
+          className="flex flex-col gap-2 rounded border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/60 dark:text-amber-200"
         >
-          <div className="flex min-w-0 items-start gap-2">
-            <FolderOpen className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-            <div className="min-w-0">
-              <p className="font-semibold leading-snug">
-                {i18n.t('popup.vaultHintTitle')}
-              </p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-amber-800/90 dark:text-amber-300/90">
-                {i18n.t('popup.vaultHintDesc')}
-              </p>
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex min-w-0 items-start gap-2">
+              <FolderOpen className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div className="min-w-0">
+                <p className="font-semibold leading-snug">
+                  {i18n.t('popup.vaultHintTitle')}
+                </p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-amber-800/90 dark:text-amber-300/90">
+                  {i18n.t('popup.vaultHintDesc')}
+                </p>
+              </div>
             </div>
+            <button
+              type="button"
+              onClick={() => void handleOpenLibrary('vault')}
+              className="shrink-0 rounded bg-amber-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-amber-700"
+            >
+              {i18n.t('popup.vaultHintChooseDir')}
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleOpenLibrary('vault')}
-            className="shrink-0 rounded bg-amber-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-amber-700"
-          >
-            {i18n.t('popup.vaultHintChooseDir')}
-          </button>
+          <div className="flex items-center border-t border-amber-200/70 pt-1.5 dark:border-amber-900/70">
+            <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-amber-900/90 select-none dark:text-amber-200/90">
+              <input
+                type="checkbox"
+                data-testid="popup-vault-hint-dont-remind"
+                checked={vaultPopupMuted}
+                onChange={(e) => handleToggleVaultPopupMuted(e.target.checked)}
+                className="h-3.5 w-3.5 cursor-pointer rounded border-amber-400 accent-amber-600"
+              />
+              <span>{i18n.t('popup.vaultHintDontRemind')}</span>
+            </label>
+          </div>
         </section>
       )}
 
