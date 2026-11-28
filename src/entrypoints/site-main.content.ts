@@ -1,5 +1,5 @@
 /**
- * Collect+ 统一 Main World 内容脚本入口（`world: 'MAIN'`, `runAt: 'document_start'`）。
+ * CollectPlus 统一 Main World 内容脚本入口（`world: 'MAIN'`, `runAt: 'document_start'`）。
  *
  * 替代原 8 个分散的 `*-main.content.ts` 文件：
  * 按当前宿主域名路由至对应的 Tier 3 深度站点 Main Hook 或 Tier 2 声明式 Recipe Main Hook。

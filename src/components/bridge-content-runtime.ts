@@ -348,7 +348,7 @@ export async function createBridgeContentRuntime(
         limit,
       });
     } catch (error) {
-      console.warn(`[Collect+] Failed to save ${platform} comments:`, error);
+      console.warn(`[CollectPlus] Failed to save ${platform} comments:`, error);
     }
   };
 
@@ -407,7 +407,7 @@ export async function createBridgeContentRuntime(
       const parsed = cfg.parseComments(response.rawComments, cfg.limit);
       await saveCommentsToBackground(itemId, sourceId, parsed, cfg.limit);
     } catch (error) {
-      console.warn(`[Collect+] Failed to capture ${platform} comments:`, error);
+      console.warn(`[CollectPlus] Failed to capture ${platform} comments:`, error);
     }
   };
 
@@ -440,7 +440,7 @@ export async function createBridgeContentRuntime(
         captureResponse && !captureResponse.ok
           ? captureResponse.error
           : 'Background service did not acknowledge capture.';
-      console.warn(`[Collect+] Failed to submit ${platform} item:`, error);
+      console.warn(`[CollectPlus] Failed to submit ${platform} item:`, error);
       return { ok: false, error };
     }
 
@@ -609,7 +609,7 @@ export async function createBridgeContentRuntime(
       }
     } catch (error) {
       console.warn(
-        `[Collect+] Failed to check ${platform} account sync action:`,
+        `[CollectPlus] Failed to check ${platform} account sync action:`,
         error,
       );
     }
@@ -632,7 +632,7 @@ export async function createBridgeContentRuntime(
         startFullCollectionSync();
       }
     } catch (error) {
-      console.warn(`[Collect+] Failed to begin ${platform} full sync:`, error);
+      console.warn(`[CollectPlus] Failed to begin ${platform} full sync:`, error);
     }
   };
 
@@ -706,7 +706,7 @@ export async function createBridgeContentRuntime(
           continue;
         }
         console.warn(
-          `[Collect+] ${platform} batch ingest failed after retry:`,
+          `[CollectPlus] ${platform} batch ingest failed after retry:`,
           error,
         );
       }
@@ -1021,7 +1021,7 @@ export async function createBridgeContentRuntime(
       if (!payload) {
         const finalErr =
           errMsg ?? `No capturable ${adapter.displayName} item found.`;
-        console.warn(`[Collect+] ${platform} capture unavailable:`, finalErr);
+        console.warn(`[CollectPlus] ${platform} capture unavailable:`, finalErr);
         return { ok: false, error: finalErr };
       }
 
@@ -1039,7 +1039,7 @@ export async function createBridgeContentRuntime(
       });
       return submitResult.ok ? { ok: true } : submitResult;
     } catch (error) {
-      console.warn(`[Collect+] ${platform} manual capture failed:`, error);
+      console.warn(`[CollectPlus] ${platform} manual capture failed:`, error);
       return {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -1113,7 +1113,7 @@ export async function createBridgeContentRuntime(
         sourceIds: [...sourceIds],
       });
     } catch (error) {
-      console.warn(`[Collect+] ${platform} native uncollect failed:`, error);
+      console.warn(`[CollectPlus] ${platform} native uncollect failed:`, error);
     }
   };
 

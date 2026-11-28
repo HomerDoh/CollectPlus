@@ -604,7 +604,7 @@ export function SidebarTree({
           </span>
           <div className="min-w-0">
             <h1 className="truncate text-sm font-bold tracking-tight text-[var(--cp-text)]">
-              Collect+
+              CollectPlus
             </h1>
             <p className="truncate text-[11px] text-[var(--cp-text-muted)]">
               {i18n.t('sidebar.subtitle')}

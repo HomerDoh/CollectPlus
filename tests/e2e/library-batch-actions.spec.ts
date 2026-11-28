@@ -78,7 +78,7 @@ async function seedLibraryDb(
   );
 }
 
-test.describe('Collect+ 媒体控制台批量选择、多分类文件夹与同步取消收藏验证', () => {
+test.describe('CollectPlus 媒体控制台批量选择、多分类文件夹与同步取消收藏验证', () => {
   test('多分类文件夹归属、去重计数、移出当前文件夹、删除文件夹保留其他归属及详情多选编辑', async ({
     context,
     extensionUrl,

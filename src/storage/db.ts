@@ -1,5 +1,5 @@
 /**
- * Collect+ IndexedDB 高速索引层（基于 Dexie.js）。
+ * CollectPlus IndexedDB 高速索引层（基于 Dexie.js）。
  *
  * 承担条目元数据缓存、文件夹树、标签表、下载队列任务以及配置句柄持久化。
  */
@@ -27,7 +27,7 @@ import {
   type UserPreferences,
 } from '../types/schema.ts';
 
-/** Collect+ IndexedDB 数据库定义 */
+/** CollectPlus IndexedDB 数据库定义 */
 export class CollectPlusDB extends Dexie {
   items!: Table<CollectionItemRecord, string>;
   folders!: Table<FolderNode, string>;

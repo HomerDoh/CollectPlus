@@ -1,5 +1,5 @@
 /**
- * Collect+ 全局主题状态管理（瑞士极简 · 亮色 / 暗色 / 跟随系统）。
+ * CollectPlus 全局主题状态管理（瑞士极简 · 亮色 / 暗色 / 跟随系统）。
  *
  * - 默认 `'system'`，自动响应系统 `prefers-color-scheme` 变化；
  * - 通过 `chrome.storage.local` 跨扩展页面（Library / Popup）实时同步；

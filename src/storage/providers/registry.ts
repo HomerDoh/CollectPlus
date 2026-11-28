@@ -1,5 +1,5 @@
 /**
- * Collect+ 持久化存储插件注册中心。
+ * CollectPlus 持久化存储插件注册中心。
  *
  * 新增云存储持久化插件（如 WebDAV / S3 / OneDrive 等）时，
  * 只需在 `src/storage/providers/<provider>/` 下实现 `VaultProviderPlugin`

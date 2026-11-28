@@ -1,5 +1,5 @@
 /**
- * Collect+ 统一 Isolated World 内容脚本入口。
+ * CollectPlus 统一 Isolated World 内容脚本入口。
  *
  * 替代原 9 个分散的 `<platform>.content.tsx` 文件（消除 5,500+ 行重复代码并将 React 打包副本从 9 份降为 1 份）：
  * 1. 按当前页面 URL 从注册中心匹配对应的 Tier 3 Deep Adapter 或 Tier 2 SiteRecipe；

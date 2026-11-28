@@ -1,6 +1,6 @@
 {
   "extDescription": "本地优先的跨平台防失效收藏管理扩展",
-  "commandCaptureDescription": "立即收藏当前页面视频或图集到 Collect+",
+  "commandCaptureDescription": "立即收藏当前页面视频或图集到 CollectPlus",
   "common": {
     "cancel": "取消",
     "confirm": "确认",
@@ -70,8 +70,8 @@
     "compactWan": "{value}万"
   },
   "actionIcon": {
-    "downloadingMulti": "Collect+ · 剩余 {count} 项下载 ({progress}%)",
-    "downloadingSingle": "Collect+ · 下载中 {progress}%"
+    "downloadingMulti": "CollectPlus · 剩余 {count} 项下载 ({progress}%)",
+    "downloadingSingle": "CollectPlus · 下载中 {progress}%"
   },
   "popup": {
     "tagline": "本地优先防失效收藏",
@@ -91,8 +91,8 @@
     "universalReady": "通用网页采集已就绪：{host}",
     "captureTriggered": "已触发采集，媒体正在后台静默下载",
     "openLibraryFailed": "打开管理台失败：{error}",
-    "pinHintTitle": "将 Collect+ 固定到浏览器插件栏",
-    "pinHintDesc": "点击右上角拼图图标，点亮 Collect+ 右侧图钉，随时查看下载进度与快捷收藏。",
+    "pinHintTitle": "将 CollectPlus 固定到浏览器插件栏",
+    "pinHintDesc": "点击右上角拼图图标，点亮 CollectPlus 右侧图钉，随时查看下载进度与快捷收藏。",
     "pinHintDismissAria": "关闭固定提示",
     "pinHintGotIt": "知道了",
     "vaultHintTitle": "尚未选定本地同步目录",
@@ -111,7 +111,7 @@
     "statTotal": "总收藏",
     "statPendingSync": "待同步",
     "statDownloading": "下载中",
-    "openLibraryBtn": "打开 Collect+ 全屏管理台",
+    "openLibraryBtn": "打开 CollectPlus 全屏管理台",
     "skipPersistenceSuccess": "已取消本地持久化（{reason}），仅保留元数据并跳过后续自动同步",
     "skipPersistenceSubmitting": "正在取消本地持久化...",
     "skipPersistenceBtn": "取消当前内容本地持久化",
@@ -143,10 +143,10 @@
     "syncPromptSubtitle": "检测到已登录{platform}账号",
     "syncPromptSubtitleWithAccount": "检测到已登录{platform}账号（{account}）",
     "syncPromptCloseAria": "暂不同步并关闭",
-    "syncPromptDesc": "是否将当前账号的全部历史收藏数据同步到 Collect+ 本地离线库？已收藏条目会自动去重跳过。",
+    "syncPromptDesc": "是否将当前账号的全部历史收藏数据同步到 CollectPlus 本地离线库？已收藏条目会自动去重跳过。",
     "syncPromptLaterBtn": "暂不同步",
     "syncPromptNowBtn": "立即同步",
-    "syncPromptHint": "可在 Collect+ 设置中开启「自动同步全部收藏」",
+    "syncPromptHint": "可在 CollectPlus 设置中开启「自动同步全部收藏」",
     "syncBannerSyncingTitle": "正在同步账号全部收藏...",
     "syncBannerSyncingSub": "已扫描 {fetched} 条 · 新增 {added} 条",
     "syncBannerExistingPart": " · 已存在 {count} 条",
@@ -160,9 +160,9 @@
     "syncBannerErrorTitle": "全量收藏同步未完成",
     "syncBannerErrorDefault": "拉取过程中发生异常，请稍后重试。",
     "syncBannerCloseAria": "关闭同步提示",
-    "fabExpandTitle": "展开 Collect+ 收藏按钮 (Alt+S)",
-    "fabExpandAria": "展开 Collect+ 收藏按钮",
-    "fabCaptureTitle": "收藏当前作品到 Collect+ (快捷键 Alt+S)",
+    "fabExpandTitle": "展开 CollectPlus 收藏按钮 (Alt+S)",
+    "fabExpandAria": "展开 CollectPlus 收藏按钮",
+    "fabCaptureTitle": "收藏当前作品到 CollectPlus (快捷键 Alt+S)",
     "fabCapturing": "采集中...",
     "fabCapture": "收藏当前",
     "fabCollapseTitle": "收起悬浮按钮",
@@ -451,7 +451,7 @@
     "gdriveRedirectUriLabel": "授权重定向 URI（填入 Google Cloud Console）",
     "gdriveCopyBtn": "复制",
     "gdriveCopied": "已复制",
-    "gdriveScopeNotice": "仅申请非敏感 drive.file 权限：Collect+ 只能访问本扩展创建的目录与文件，无法读取您 Google Drive 中的其他私人文件；短期授权令牌仅存于浏览器内存会话，绝不写入硬盘或元数据。",
+    "gdriveScopeNotice": "仅申请非敏感 drive.file 权限：CollectPlus 只能访问本扩展创建的目录与文件，无法读取您 Google Drive 中的其他私人文件；短期授权令牌仅存于浏览器内存会话，绝不写入硬盘或元数据。",
     "gdriveConnectedNotice": "已连接 Google Drive（{folder}）",
     "gdriveDisconnectedNotice": "已断开 Google Drive 连接（云端文件未受影响）",
     "gdriveConnectFailedPrefix": "连接 Google Drive 失败",
@@ -581,7 +581,7 @@
     "languageZhCN": "简体中文",
     "languageEn": "English",
     "languageUpdatedNotice": "界面语言已切换为 {label}",
-    "migrationConflictTitle": "目标目录已被 Collect+ 初始化",
+    "migrationConflictTitle": "目标目录已被 CollectPlus 初始化",
     "migrationConflictIntro1": "检测到新目录 ",
     "migrationConflictIntro2": " 中已有 CollectVault 数据。将原目录 ",
     "migrationConflictIntro3": " 的文件迁移至该目录时，请选择处理方式：",
@@ -605,7 +605,7 @@
     "confirmClearCacheBtn": "确认清空浏览器缓存"
   },
   "library": {
-    "pageTitle": "Collect+ 媒体库",
+    "pageTitle": "CollectPlus 媒体库",
     "syncVaultFailedPrefix": "同步到 CollectVault 失败",
     "rebuildIndexFailed": "重建索引失败：{error}",
     "migrateVaultFailedPrefix": "迁移本地同步目录失败",
@@ -657,7 +657,7 @@
   "vault": {
     "selectedDirFallback": "所选目录",
     "errDiskRoot": "不允许选择磁盘根目录或系统受保护目录作为本地同步目录，请在磁盘下新建或选择一个专用的空子文件夹。",
-    "errNonEmpty": "所选文件夹“{label}”不为空且未被 Collect+ 初始化，请选择一个空文件夹或已初始化的 CollectVault 目录。",
+    "errNonEmpty": "所选文件夹“{label}”不为空且未被 CollectPlus 初始化，请选择一个空文件夹或已初始化的 CollectVault 目录。",
     "errSameDir": "所选目录“{label}”与当前本地同步目录相同，无需切换。",
     "errNestedDir": "所选目录“{label}”与当前本地同步目录存在父子包含关系，请选择其他独立目录。",
     "errPermission": "所选目录“{name}”当前无法写入（常见原因：Windows 文件夹缺少当前用户的写入权限、目录为只读，或被安全软件拦截）。建议改选「文档」目录，或修改该文件夹权限后重试。",

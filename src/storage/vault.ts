@@ -208,14 +208,14 @@ export function isFilesystemWriteDeniedError(error: unknown): boolean {
 }
 
 export const VAULT_README_CONTENT = `========================================================================
-Collect+ 本地离线收藏库（Local Offline Vault）
+CollectPlus 本地离线收藏库（Local Offline Vault）
 ========================================================================
 
-本目录由浏览器扩展 Collect+ 自动创建并管理，作为您的离线内容真相源（Source of Truth）。
+本目录由浏览器扩展 CollectPlus 自动创建并管理，作为您的离线内容真相源（Source of Truth）。
 所有收藏的视频、图集、封面以及分类元数据均以人类可读的文件夹结构安全保存在本地硬盘中。
 
 【目录结构说明 / Directory Structure】
-- README.txt            本说明文档（Collect+ 会自动检测并守护此文件）
+- README.txt            本说明文档（CollectPlus 会自动检测并守护此文件）
 - .collect-vault.json   收藏库标识与版本配置文件
 - taxonomy.json         文件夹树与标签体系配置
 - items/                按「平台 / 年月 / 日期_源ID_标题」归档的全部收藏条目与媒体文件
@@ -229,13 +229,13 @@ Collect+ 本地离线收藏库（Local Offline Vault）
 【如何安全迁移收藏库位置 / How to Move This Vault】
 如需将本收藏库迁移到其他磁盘或目录，请按以下步骤操作：
 1. 将整个 CollectVault 文件夹完整复制或移动到新位置；
-2. 打开 Collect+ 管理库页面，在设置中重新绑定新的 CollectVault 目录；
+2. 打开 CollectPlus 管理库页面，在设置中重新绑定新的 CollectVault 目录；
 3. 点击执行「重建索引」，即可瞬间恢复全部收藏条目、文件夹、标签与缩略图。
 
 ------------------------------------------------------------------------
-This directory is managed by the Collect+ browser extension.
+This directory is managed by the CollectPlus browser extension.
 DO NOT manually rename, move, edit, or delete files inside this folder.
-To relocate your vault, move the entire folder, re-bind it in Collect+,
+To relocate your vault, move the entire folder, re-bind it in CollectPlus,
 and run "Rebuild Index".
 ========================================================================
 `;
@@ -510,7 +510,7 @@ export async function checkVaultDirectoryExists(
  * 只读检测目标目录状态（绝不写入任何文件或子目录）：
  * - `disk_root`: 磁盘根目录或包含卷根系统文件夹
  * - `empty`: 空文件夹
- * - `initialized_vault`: 已被 Collect+ 初始化的本地同步目录
+ * - `initialized_vault`: 已被 CollectPlus 初始化的本地同步目录
  * - `non_empty`: 非空且未初始化的普通文件夹
  */
 export async function inspectVaultDirectory(
@@ -581,7 +581,10 @@ export async function inspectVaultDirectory(
               VAULT_README_FILENAME,
             );
             if (readmeFile) {
-              hasCollectReadme = (await readmeFile.text()).includes('Collect+');
+              const readmeText = await readmeFile.text();
+              hasCollectReadme =
+                readmeText.includes('CollectPlus') ||
+                readmeText.includes('Local Offline Vault');
             }
           }
           if (hasItemsDir || hasCollectReadme) {

@@ -20,7 +20,7 @@ interface VaultInspectionResult {
   stageStillExists: boolean;
 }
 
-test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
+test.describe('CollectPlus 核心基本功能全量 E2E 验证', () => {
   test('Alt+S 快捷键采集 -> 重复采集去重 -> Popup 实时统计与打开管理台', async ({
     context,
     extensionUrl,
@@ -73,13 +73,13 @@ test.describe('Collect+ 核心基本功能全量 E2E 验证', () => {
         .toBe('1:1:0');
 
       await expect(
-        popupPage.getByRole('heading', { name: 'Collect+' }),
+        popupPage.getByRole('heading', { name: 'CollectPlus' }),
       ).toBeVisible();
 
-      // 点击「打开 Collect+ 全屏管理台」验证正常拉起 library.html 且仅存在 1 条记录
+      // 点击「打开 CollectPlus 全屏管理台」验证正常拉起 library.html 且仅存在 1 条记录
       const newPagePromise = context.waitForEvent('page');
       await popupPage
-        .getByRole('button', { name: /打开 Collect\+ 全屏管理台/ })
+        .getByRole('button', { name: /打开 CollectPlus 全屏管理台/ })
         .click();
       const openedLibraryPage = await newPagePromise;
       await openedLibraryPage.waitForLoadState('domcontentloaded');

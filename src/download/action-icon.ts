@@ -3,7 +3,7 @@
  *
  * 视觉规则：
  * - 统一预留外圈进度环与 1px 透明呼吸边距，保证空闲态（Idle）与活跃进度态（Active）中间 icon 尺寸和书签 1:1 保持不变、无缩放跳动；
- * - 无活跃任务（`remainingCount === 0`）：显示居中标准圆角方形默认图标与标题 `Collect+`；
+ * - 无活跃任务（`remainingCount === 0`）：显示居中标准圆角方形默认图标与标题 `CollectPlus`；
  * - 有活跃进度（`remainingCount >= 1`）：图标切换为同尺寸正圆形，并在 icon 外圈（距 icon 1px 边距）顺时针绘制圆形进度环；
  *   - 单个任务下载中（`remainingCount === 1`）：内部圆形 icon 1:1 保留原书签图案；
  *   - 多任务排队/并发（`remainingCount >= 2`）：内部圆形 icon 居中显示剩余任务数（不显示 `1`）。
@@ -14,7 +14,7 @@ import { i18n } from '../i18n/index.ts';
 import { db } from '../storage/db.ts';
 import type { DownloadTask } from '../types/schema.ts';
 
-const DEFAULT_ACTION_TITLE = 'Collect+';
+const DEFAULT_ACTION_TITLE = 'CollectPlus';
 
 type ActiveIconSize = 16 | 32 | 48;
 
@@ -416,7 +416,7 @@ export async function scheduleActionIconSync(): Promise<void> {
       await withActionIconRenderLock(() => syncOnce());
     } while (pendingSync);
   } catch (error) {
-    console.warn('[Collect+] Failed to sync action icon state:', error);
+    console.warn('[CollectPlus] Failed to sync action icon state:', error);
   } finally {
     isSyncing = false;
   }
@@ -441,7 +441,7 @@ export function startActionIconLiveSync(): void {
       void scheduleActionIconSync();
     },
     error: (error) => {
-      console.warn('[Collect+] Action icon liveQuery error:', error);
+      console.warn('[CollectPlus] Action icon liveQuery error:', error);
     },
   });
 }

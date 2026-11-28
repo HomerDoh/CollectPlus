@@ -6,7 +6,7 @@ interface DnrRuleSummary {
   initiatorDomains?: string[];
 }
 
-test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
+test.describe('CollectPlus 扩展启动与核心页面冒烟测试', () => {
   test('Service Worker 正常启动且 DNR 防盗链规则仅限定扩展自身 initiator', async ({
     serviceWorker,
     extensionId,
@@ -52,7 +52,7 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
     const popupPage = await context.newPage();
     await popupPage.goto(extensionUrl('popup.html'));
     await expect(
-      popupPage.getByRole('heading', { name: 'Collect+' }),
+      popupPage.getByRole('heading', { name: 'CollectPlus' }),
     ).toBeVisible();
     await expect(
       popupPage.getByRole('button', { name: /侧边栏/ }),
@@ -128,7 +128,7 @@ test.describe('Collect+ 扩展启动与核心页面冒烟测试', () => {
     const reopenedPopup = await context.newPage();
     await reopenedPopup.goto(extensionUrl('popup.html'));
     await expect(
-      reopenedPopup.getByRole('heading', { name: 'Collect+' }),
+      reopenedPopup.getByRole('heading', { name: 'CollectPlus' }),
     ).toBeVisible();
     await expect(
       reopenedPopup.getByText('当前页面暂不支持采集'),

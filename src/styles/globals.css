@@ -5,7 +5,7 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /*
- * Collect+ Swiss Precision（瑞士极简）设计令牌
+ * CollectPlus Swiss Precision（瑞士极简）设计令牌
  * 持久化规范见 `design-system/collect-plus/MASTER.md`
  */
 @layer base {

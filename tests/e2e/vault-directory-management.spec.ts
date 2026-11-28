@@ -111,7 +111,7 @@ async function seedInitializedVaultInOpfs(
       await writeText(
         vaultRoot,
         'README.txt',
-        'Collect+ Local Offline Vault - 请勿手动重命名或删除目录内文件。\n',
+        'CollectPlus Local Offline Vault - 请勿手动重命名或删除目录内文件。\n',
       );
       await writeText(
         vaultRoot,
@@ -276,7 +276,7 @@ async function collectMetaTitlesInOpfsVault(
   }, dirName);
 }
 
-test.describe('Collect+ 本地同步目录校验与迁移管理 E2E 验证', () => {
+test.describe('CollectPlus 本地同步目录校验与迁移管理 E2E 验证', () => {
   test('拒绝磁盘根目录与非空未初始化文件夹（零文件写入），空目录正常绑定', async ({
     context,
     extensionUrl,
@@ -356,7 +356,7 @@ test.describe('Collect+ 本地同步目录校验与迁移管理 E2E 验证', () 
     // 5. 非空未初始化文件夹 -> 拒绝且零污染
     await pickButton.click();
     await expect(
-      vaultSection.getByText(/不为空且未被 Collect\+ 初始化/),
+      vaultSection.getByText(/不为空且未被 CollectPlus 初始化/),
     ).toBeVisible();
     await expect(vaultSection.getByText('尚未绑定')).toBeVisible();
     expect(

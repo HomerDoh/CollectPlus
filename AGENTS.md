@@ -1,10 +1,10 @@
 # AGENTS.md
 
-本文件遵循 [AGENTS.md](https://agents.md/) 开放规范，为所有参与 **Collect+** 项目的 AI Coding Agent（Cursor、Codex、Claude Code、Gemini CLI 等）提供持久化架构上下文、开发命令、工程红线与三层采集拓展 SOP。
+本文件遵循 [AGENTS.md](https://agents.md/) 开放规范，为所有参与 **CollectPlus** 项目的 AI Coding Agent（Cursor、Codex、Claude Code、Gemini CLI 等）提供持久化架构上下文、开发命令、工程红线与三层采集拓展 SOP。
 
 ## 1. Project Overview
 
-- **项目名称**：Collect+（包名 `collect-plus`，本地收藏库默认目录 `CollectVault`）
+- **项目名称**：CollectPlus（包名 `collect-plus`，本地收藏库默认目录 `CollectVault`）
 - **产品定位**：开源、本地优先、零外部后端依赖的 Chrome Manifest V3 跨平台全网防失效收藏管理扩展。
 - **核心采集架构（通用内核 + 三层渐进提取）**：
   - **Tier 1 通用全网提取引擎（Universal Web Extractor，`platform: 'web'`）**：零配置兜底任意 `http://` / `https://` 网页。平时**零注入、零内存占用**，仅在用户点击 Popup 或按下 `Alt+S` 时经 `chrome.scripting.executeScript` 按需注入轻量无 React 脚本，提取 JSON-LD / OpenGraph / 语义正文 / 高清配图 / `<video>` & `PerformanceResourceTiming`（`.mp4` / `.m3u8` / `.mpd`）媒体流，并经任务级动态 Session DNR 自动注入防盗链 `Referer`。

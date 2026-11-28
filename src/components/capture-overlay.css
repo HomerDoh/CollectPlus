@@ -1,4 +1,4 @@
-/* Collect+ Shadow DOM 独立隔离样式表（零宿主依赖，全 px 单位防宿主 rem 污染） */
+/* CollectPlus Shadow DOM 独立隔离样式表（零宿主依赖，全 px 单位防宿主 rem 污染） */
 
 :host {
   all: initial;

@@ -117,7 +117,7 @@ async function applyLanguage(lang: UiLanguage): Promise<void> {
     currentLanguage = lang;
     overrideMessages = messages;
   } catch (error) {
-    console.warn(`[Collect+] Failed to load locale "${lang}":`, error);
+    console.warn(`[CollectPlus] Failed to load locale "${lang}":`, error);
     currentLanguage = 'auto';
     overrideMessages = null;
   }

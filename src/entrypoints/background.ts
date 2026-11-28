@@ -1,5 +1,5 @@
 /**
- * Collect+ Background Service Worker 事件中枢。
+ * CollectPlus Background Service Worker 事件中枢。
  *
  * 职责：
  * 1. 会话级 DNR 防盗链请求头规则幂等同步；
@@ -270,7 +270,7 @@ async function recoverStaleTasksOnStartup(): Promise<void> {
   try {
     await startupRecoveryPromise;
   } catch (error) {
-    console.warn('[Collect+] Failed to recover stale tasks on startup:', error);
+    console.warn('[CollectPlus] Failed to recover stale tasks on startup:', error);
   } finally {
     startupRecoveryPromise = null;
   }
@@ -397,7 +397,7 @@ async function pumpDownloadQueue(): Promise<void> {
           await registerTaskDnrRules(latestTask.id, item.assets).catch(
             (dnrErr) => {
               console.warn(
-                '[Collect+] Failed to register dynamic task DNR rules:',
+                '[CollectPlus] Failed to register dynamic task DNR rules:',
                 dnrErr,
               );
             },
@@ -429,7 +429,7 @@ async function pumpDownloadQueue(): Promise<void> {
       }
     } while (pendingQueuePump);
   } catch (error) {
-    console.error('[Collect+] Download queue pump failed:', error);
+    console.error('[CollectPlus] Download queue pump failed:', error);
   } finally {
     isPumpingQueue = false;
     void scheduleActionIconSync();
@@ -483,7 +483,7 @@ async function resolveVideoAssetsSizeBytes(
       return probeRes.totalSizeBytes;
     }
   } catch (error) {
-    console.warn('[Collect+] Failed to probe video size before auto-save:', error);
+    console.warn('[CollectPlus] Failed to probe video size before auto-save:', error);
   } finally {
     void releaseTaskDnrRules(probeRuleKey);
   }
@@ -1824,7 +1824,7 @@ async function handleOpenLibraryPage(
       await chrome.tabs.create({ url: targetUrl });
     }
   } catch (error) {
-    console.error('[Collect+] Failed to open library page:', error);
+    console.error('[CollectPlus] Failed to open library page:', error);
   }
 
   return { ok: true };
@@ -1911,7 +1911,7 @@ async function handleOffscreenProgress(
       void scheduleActionIconSync();
     }
   } catch (error) {
-    console.warn('[Collect+] Failed to handle OFFSCREEN_PROGRESS:', error);
+    console.warn('[CollectPlus] Failed to handle OFFSCREEN_PROGRESS:', error);
   }
 
   return { ok: true };
@@ -1981,7 +1981,7 @@ async function handleOffscreenComplete(
       await removeItemFromOpfs(message.itemId).catch(() => undefined);
     }
   } catch (error) {
-    console.error('[Collect+] Failed to handle OFFSCREEN_COMPLETE:', error);
+    console.error('[CollectPlus] Failed to handle OFFSCREEN_COMPLETE:', error);
   } finally {
     void releaseTaskDnrRules(message.taskId);
     void scheduleActionIconSync();
@@ -2026,7 +2026,7 @@ async function handleOffscreenError(
       }
     });
   } catch (error) {
-    console.error('[Collect+] Failed to handle OFFSCREEN_ERROR:', error);
+    console.error('[CollectPlus] Failed to handle OFFSCREEN_ERROR:', error);
   } finally {
     void releaseTaskDnrRules(message.taskId);
     void scheduleActionIconSync();
@@ -2117,7 +2117,7 @@ async function handleOffscreenCommentsComplete(
     });
   } catch (error) {
     console.error(
-      '[Collect+] Failed to handle OFFSCREEN_COMMENTS_COMPLETE:',
+      '[CollectPlus] Failed to handle OFFSCREEN_COMMENTS_COMPLETE:',
       error,
     );
   } finally {
@@ -2132,7 +2132,7 @@ async function handleOffscreenCommentsError(
 ): Promise<BackgroundResponseMap['OFFSCREEN_COMMENTS_ERROR']> {
   inFlightCommentItemIds.delete(message.itemId);
   console.warn(
-    `[Collect+] Comment staging failed for item ${message.itemId}:`,
+    `[CollectPlus] Comment staging failed for item ${message.itemId}:`,
     message.error,
   );
   return { ok: true };
@@ -2228,7 +2228,7 @@ export default defineBackground(() => {
     }
     void scheduleActionIconSync();
     void ensureDnrReady(true).catch((error) => {
-      console.error('[Collect+] Failed to sync DNR rules onInstalled:', error);
+      console.error('[CollectPlus] Failed to sync DNR rules onInstalled:', error);
     });
   });
 
@@ -2236,7 +2236,7 @@ export default defineBackground(() => {
     void ensureDnrReady(true)
       .then(() => recoverStaleTasksOnStartup())
       .catch((error) => {
-        console.error('[Collect+] Failed during onStartup recovery:', error);
+        console.error('[CollectPlus] Failed during onStartup recovery:', error);
       });
   });
 
@@ -2278,7 +2278,7 @@ export default defineBackground(() => {
         })
         .catch((error) => {
           console.error(
-            `[Collect+] Error handling message "${message.type}":`,
+            `[CollectPlus] Error handling message "${message.type}":`,
             error,
           );
           sendResponse({
@@ -2295,8 +2295,8 @@ export default defineBackground(() => {
   void ensureDnrReady()
     .then(() => recoverStaleTasksOnStartup())
     .catch((error) => {
-      console.error('[Collect+] Background initialization error:', error);
+      console.error('[CollectPlus] Background initialization error:', error);
     });
 
-  console.info('[Collect+] Background service worker initialized.');
+  console.info('[CollectPlus] Background service worker initialized.');
 });

@@ -357,7 +357,7 @@ export default function App() {
           </span>
           <div>
             <h1 className="text-sm font-semibold leading-tight text-[var(--cp-text)]">
-              Collect+
+              CollectPlus
             </h1>
             <p className="text-[11px] text-[var(--cp-text-muted)]">
               {i18n.t('popup.tagline')}

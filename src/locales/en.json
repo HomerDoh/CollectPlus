@@ -1,6 +1,6 @@
 {
   "extDescription": "Local-first cross-platform offline bookmark & media archive extension",
-  "commandCaptureDescription": "Capture the current page's video or gallery to Collect+",
+  "commandCaptureDescription": "Capture the current page's video or gallery to CollectPlus",
   "common": {
     "cancel": "Cancel",
     "confirm": "Confirm",
@@ -70,8 +70,8 @@
     "compactWan": "{value}0K"
   },
   "actionIcon": {
-    "downloadingMulti": "Collect+ · {count} downloads left ({progress}%)",
-    "downloadingSingle": "Collect+ · Downloading {progress}%"
+    "downloadingMulti": "CollectPlus · {count} downloads left ({progress}%)",
+    "downloadingSingle": "CollectPlus · Downloading {progress}%"
   },
   "popup": {
     "tagline": "Local-first offline archive",
@@ -91,8 +91,8 @@
     "universalReady": "Universal web capture ready: {host}",
     "captureTriggered": "Capture triggered. Downloading media silently in the background.",
     "openLibraryFailed": "Failed to open Library: {error}",
-    "pinHintTitle": "Pin Collect+ to your browser toolbar",
-    "pinHintDesc": "Click the puzzle icon at the top right and pin Collect+ for quick access and download progress.",
+    "pinHintTitle": "Pin CollectPlus to your browser toolbar",
+    "pinHintDesc": "Click the puzzle icon at the top right and pin CollectPlus for quick access and download progress.",
     "pinHintDismissAria": "Dismiss pin hint",
     "pinHintGotIt": "Got it",
     "vaultHintTitle": "No local sync folder selected",
@@ -111,7 +111,7 @@
     "statTotal": "Total",
     "statPendingSync": "Pending",
     "statDownloading": "Active",
-    "openLibraryBtn": "Open Collect+ Library",
+    "openLibraryBtn": "Open CollectPlus Library",
     "skipPersistenceSuccess": "Local save skipped ({reason}). Metadata kept and future auto-sync skipped.",
     "skipPersistenceSubmitting": "Skipping local save...",
     "skipPersistenceBtn": "Skip Local Save for Current Item",
@@ -143,10 +143,10 @@
     "syncPromptSubtitle": "Signed-in {platform} account detected",
     "syncPromptSubtitleWithAccount": "Signed-in {platform} account detected ({account})",
     "syncPromptCloseAria": "Not now and close",
-    "syncPromptDesc": "Sync all existing favorites from this account to your local Collect+ offline library? Already saved items will be skipped automatically.",
+    "syncPromptDesc": "Sync all existing favorites from this account to your local CollectPlus offline library? Already saved items will be skipped automatically.",
     "syncPromptLaterBtn": "Not Now",
     "syncPromptNowBtn": "Sync Now",
-    "syncPromptHint": "You can enable \"Auto-sync all favorites\" in Collect+ Settings",
+    "syncPromptHint": "You can enable \"Auto-sync all favorites\" in CollectPlus Settings",
     "syncBannerSyncingTitle": "Syncing all account favorites...",
     "syncBannerSyncingSub": "Scanned {fetched} · Added {added}",
     "syncBannerExistingPart": " · Existing {count}",
@@ -160,9 +160,9 @@
     "syncBannerErrorTitle": "Full favorite sync did not complete",
     "syncBannerErrorDefault": "An error occurred during sync. Please try again later.",
     "syncBannerCloseAria": "Dismiss sync notice",
-    "fabExpandTitle": "Expand Collect+ capture button (Alt+S)",
-    "fabExpandAria": "Expand Collect+ capture button",
-    "fabCaptureTitle": "Save current item to Collect+ (Shortcut Alt+S)",
+    "fabExpandTitle": "Expand CollectPlus capture button (Alt+S)",
+    "fabExpandAria": "Expand CollectPlus capture button",
+    "fabCaptureTitle": "Save current item to CollectPlus (Shortcut Alt+S)",
     "fabCapturing": "Capturing...",
     "fabCapture": "Collect",
     "fabCollapseTitle": "Collapse floating button",
@@ -451,7 +451,7 @@
     "gdriveRedirectUriLabel": "Authorized Redirect URI (add in Google Cloud Console)",
     "gdriveCopyBtn": "Copy",
     "gdriveCopied": "Copied",
-    "gdriveScopeNotice": "Uses non-sensitive drive.file scope only: Collect+ can only access folders and files it creates, never other private files in your Drive. Access tokens stay in memory session only and are never written to disk or metadata.",
+    "gdriveScopeNotice": "Uses non-sensitive drive.file scope only: CollectPlus can only access folders and files it creates, never other private files in your Drive. Access tokens stay in memory session only and are never written to disk or metadata.",
     "gdriveConnectedNotice": "Connected to Google Drive ({folder})",
     "gdriveDisconnectedNotice": "Disconnected Google Drive (cloud files remain intact)",
     "gdriveConnectFailedPrefix": "Failed to connect Google Drive",
@@ -581,7 +581,7 @@
     "languageZhCN": "简体中文",
     "languageEn": "English",
     "languageUpdatedNotice": "Language switched to {label}",
-    "migrationConflictTitle": "Target Folder Already Initialized by Collect+",
+    "migrationConflictTitle": "Target Folder Already Initialized by CollectPlus",
     "migrationConflictIntro1": "Existing CollectVault data was found in ",
     "migrationConflictIntro2": ". Choose how to migrate files from ",
     "migrationConflictIntro3": " into this folder:",
@@ -605,7 +605,7 @@
     "confirmClearCacheBtn": "Confirm Clear Cache"
   },
   "library": {
-    "pageTitle": "Collect+ Library",
+    "pageTitle": "CollectPlus Library",
     "syncVaultFailedPrefix": "Failed to sync to CollectVault",
     "rebuildIndexFailed": "Index rebuild failed: {error}",
     "migrateVaultFailedPrefix": "Failed to migrate local sync folder",
@@ -657,7 +657,7 @@
   "vault": {
     "selectedDirFallback": "Selected folder",
     "errDiskRoot": "Cannot use a drive root or system-protected directory as the local sync folder. Please choose or create a dedicated empty subfolder.",
-    "errNonEmpty": "Selected folder \"{label}\" is not empty and not initialized by Collect+. Choose an empty folder or an existing CollectVault folder.",
+    "errNonEmpty": "Selected folder \"{label}\" is not empty and not initialized by CollectPlus. Choose an empty folder or an existing CollectVault folder.",
     "errSameDir": "Selected folder \"{label}\" is already the current local sync folder.",
     "errNestedDir": "Selected folder \"{label}\" is nested inside or contains the current sync folder. Please choose an independent folder.",
     "errPermission": "Cannot write to \"{name}\" (common causes: missing user write permissions, read-only folder, or blocked by security software). Try choosing a folder under Documents or updating permissions.",

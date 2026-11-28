@@ -1,5 +1,5 @@
 /**
- * Collect+ 插件化持久化存储（Vault Storage Provider）核心契约。
+ * CollectPlus 插件化持久化存储（Vault Storage Provider）核心契约。
  *
  * 所有持久化后端（本地目录、Google Drive、后续扩展的 WebDAV / S3 / OneDrive 等）
  * 均须实现本接口并注册到 `src/storage/providers/registry.ts`。

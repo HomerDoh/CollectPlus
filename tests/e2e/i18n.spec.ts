@@ -67,12 +67,12 @@ test('i18n: English locale (--lang=en-US) renders manifest, popup, library and s
     await popupPage.goto(`chrome-extension://${extensionId}/popup.html`);
     await expect(popupPage.getByText('Local-first offline archive')).toBeVisible();
     await expect(
-      popupPage.getByRole('button', { name: 'Open Collect+ Library' }),
+      popupPage.getByRole('button', { name: 'Open CollectPlus Library' }),
     ).toBeVisible();
 
     const libraryPage = await context.newPage();
     await libraryPage.goto(`chrome-extension://${extensionId}/library.html`);
-    await expect(libraryPage).toHaveTitle('Collect+ Library');
+    await expect(libraryPage).toHaveTitle('CollectPlus Library');
     await expect(
       libraryPage.getByRole('button', { name: /All Items/ }),
     ).toBeVisible();
@@ -129,7 +129,7 @@ test('i18n: Settings language selector switches Library and Popup live and persi
 
     const libraryPage = await context.newPage();
     await libraryPage.goto(`chrome-extension://${extensionId}/library.html`);
-    await expect(libraryPage).toHaveTitle('Collect+ 媒体库');
+    await expect(libraryPage).toHaveTitle('CollectPlus 媒体库');
 
     const popupPage = await context.newPage();
     await popupPage.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -143,12 +143,12 @@ test('i18n: Settings language selector switches Library and Popup live and persi
 
     await langSelect.selectOption('en');
     await expect(libraryPage.getByText('Extension Settings')).toBeVisible();
-    await expect(libraryPage).toHaveTitle('Collect+ Library');
+    await expect(libraryPage).toHaveTitle('CollectPlus Library');
     await expect(popupPage.getByText('Local-first offline archive')).toBeVisible();
 
     // 刷新管理台后仍保持 English
     await libraryPage.reload();
-    await expect(libraryPage).toHaveTitle('Collect+ Library');
+    await expect(libraryPage).toHaveTitle('CollectPlus Library');
     await expect(
       libraryPage.getByRole('button', { name: /All Items/ }),
     ).toBeVisible();
@@ -162,7 +162,7 @@ test('i18n: Settings language selector switches Library and Popup live and persi
     );
     await libraryPage.getByTestId('setting-ui-language').selectOption('zh_CN');
     await expect(libraryPage.getByText('插件设置')).toBeVisible();
-    await expect(libraryPage).toHaveTitle('Collect+ 媒体库');
+    await expect(libraryPage).toHaveTitle('CollectPlus 媒体库');
     await expect(popupPage.getByText('本地优先防失效收藏')).toBeVisible();
 
     expect(pageErrors).toEqual([]);

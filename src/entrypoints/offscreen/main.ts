@@ -1,5 +1,5 @@
 /**
- * Collect+ Offscreen Document 入口。
+ * CollectPlus Offscreen Document 入口。
  *
  * 接收来自 Background Service Worker 的下载控制指令（PING / START / STAGE_COMMENTS / ABORT），
  * 调度 `executeDownloadJob` 与 `stageItemCommentsToOpfs` 流式落盘至 OPFS，
@@ -43,7 +43,7 @@ function scheduleAutoFlushToVault(): void {
         try {
           await tryAutoFlushToVault();
         } catch (error) {
-          console.warn('[Collect+] Auto flush to CollectVault skipped:', error);
+          console.warn('[CollectPlus] Auto flush to CollectVault skipped:', error);
         }
       } while (pendingAutoFlush);
     } finally {
@@ -246,4 +246,4 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
-console.info('[Collect+] Offscreen document ready.');
+console.info('[CollectPlus] Offscreen document ready.');

@@ -31,7 +31,7 @@ function buildSeedItem(
   };
 }
 
-test.describe('Collect+ 瑞士极简主题切换与平台详情页原生配色', () => {
+test.describe('CollectPlus 瑞士极简主题切换与平台详情页原生配色', () => {
   test('侧边栏默认跟随系统，切换明暗主题持久化并同步至 Popup，且不同平台详情页应用各自配色', async ({
     context,
     extensionUrl,

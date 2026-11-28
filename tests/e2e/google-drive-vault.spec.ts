@@ -470,7 +470,7 @@ function createMockGoogleDriveServer(expectedToken: string) {
   };
 }
 
-test.describe('Collect+ 插件化远程持久化（Google Drive）全链路 E2E 验证', () => {
+test.describe('CollectPlus 插件化远程持久化（Google Drive）全链路 E2E 验证', () => {
   test('独立 Google Drive 插件：连接授权、分片上传大视频、云端重建索引、DNR 流式播放与断开隔离', async ({
     context,
     serviceWorker,
@@ -705,7 +705,7 @@ test.describe('Collect+ 插件化远程持久化（Google Drive）全链路 E2E 
     // 4. 验证 Popup 识别已配置的云存储，不再展示未绑定目录提示
     const popupPage = await context.newPage();
     await popupPage.goto(extensionUrl('popup.html'));
-    await expect(popupPage.getByRole('heading', { name: 'Collect+' })).toBeVisible();
+    await expect(popupPage.getByRole('heading', { name: 'CollectPlus' })).toBeVisible();
     await expect(popupPage.getByTestId('popup-vault-hint')).toHaveCount(0);
     await popupPage.close();
 

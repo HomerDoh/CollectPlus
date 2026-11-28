@@ -1,5 +1,5 @@
 /**
- * Collect+ 本地高准确率四级自动分类引擎（零外部接口、零大模型、零第三方依赖）。
+ * CollectPlus 本地高准确率四级自动分类引擎（零外部接口、零大模型、零第三方依赖）。
  *
  * 严格约束：
  * 1. 仅使用跨平台稳定的标准字段（platform / author / hashtags / title / description 前 150 字），

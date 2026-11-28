@@ -13,8 +13,8 @@ export default defineConfig({
   }),
   manifest: {
     default_locale: 'zh_CN',
-    name: 'Collect+',
-    short_name: 'Collect+',
+    name: 'CollectPlus',
+    short_name: 'CollectPlus',
     description: '__MSG_extDescription__',
     ...(extensionPublicKey ? { key: extensionPublicKey } : {}),
     permissions: [
@@ -50,7 +50,7 @@ export default defineConfig({
       },
     },
     action: {
-      default_title: 'Collect+',
+      default_title: 'CollectPlus',
     },
   },
 });

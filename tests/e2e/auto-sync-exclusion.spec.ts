@@ -15,7 +15,7 @@ interface ExcludedVaultInspection {
   exclusionDetail: string | null;
 }
 
-test.describe('Collect+ 「不自动同步」特殊分类与防重复自动采集闭环', () => {
+test.describe('CollectPlus 「不自动同步」特殊分类与防重复自动采集闭环', () => {
   test('回收站条目不会被自动同步误恢复', async ({
     context,
     extensionUrl,

@@ -463,7 +463,7 @@ function createMockCloudflareR2Server(config: {
   };
 }
 
-test.describe('Collect+ 插件化远程持久化（Cloudflare R2）全链路 E2E 验证', () => {
+test.describe('CollectPlus 插件化远程持久化（Cloudflare R2）全链路 E2E 验证', () => {
   test('独立 Cloudflare R2 插件：SigV4 验签连接、分片上传大视频、云端重建索引、预签名流式播放与断开隔离', async ({
     context,
     extensionUrl,
@@ -694,7 +694,7 @@ test.describe('Collect+ 插件化远程持久化（Cloudflare R2）全链路 E2E
     const popupPage = await context.newPage();
     await popupPage.goto(extensionUrl('popup.html'));
     await expect(
-      popupPage.getByRole('heading', { name: 'Collect+' }),
+      popupPage.getByRole('heading', { name: 'CollectPlus' }),
     ).toBeVisible();
     await expect(popupPage.getByTestId('popup-vault-hint')).toHaveCount(0);
     await popupPage.close();

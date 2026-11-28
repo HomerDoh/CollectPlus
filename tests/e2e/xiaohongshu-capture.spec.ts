@@ -7,7 +7,7 @@ import {
   MOCK_XHS_VIDEO_TITLE,
 } from './fixtures/xiaohongshu-mock.ts';
 
-test.describe('Collect+ 小红书独立插件全链路 E2E 验证', () => {
+test.describe('CollectPlus 小红书独立插件全链路 E2E 验证', () => {
   test('小红书视频笔记悬浮按钮采集、H.264 下载、离线评论与管理台离线播放', async ({
     context,
     extensionUrl,

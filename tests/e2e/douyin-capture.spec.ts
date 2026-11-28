@@ -21,7 +21,7 @@ function createGate(): DeferredGate {
   return { promise, release };
 }
 
-test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离线播放验证', () => {
+test.describe('CollectPlus 抖音无弹窗采集、扩展图标环形进度与离线播放验证', () => {
   test('悬浮按钮采集视频 -> 无页面弹窗 -> 管理台离线播放及状态机不变量校验', async ({
     context,
     extensionUrl,
@@ -204,7 +204,7 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
       remainingCount: 10,
       progress: 42,
       countLabel: '10',
-      title: 'Collect+ · 剩余 10 项下载 (42%)',
+      title: 'CollectPlus · 剩余 10 项下载 (42%)',
     });
 
     const singleTaskState = computeActionIconState([
@@ -215,7 +215,7 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
       remainingCount: 1,
       progress: 78,
       countLabel: null,
-      title: 'Collect+ · 下载中 78%',
+      title: 'CollectPlus · 下载中 78%',
     });
 
     expect(computeActionIconState([])).toEqual({
@@ -223,7 +223,7 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
       remainingCount: 0,
       progress: 0,
       countLabel: null,
-      title: 'Collect+',
+      title: 'CollectPlus',
     });
 
     // 2. 浏览器全链路验证：连续收藏 3 条视频并通过门控逐个放行下载，校验 Service Worker OffscreenCanvas 图标与标题状态流转
@@ -280,7 +280,7 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
         .poll(async () =>
           serviceWorker.evaluate(() => chrome.action.getTitle({})),
         )
-        .toBe('Collect+ · 剩余 3 项下载 (0%)');
+        .toBe('CollectPlus · 剩余 3 项下载 (0%)');
       expect(
         await serviceWorker.evaluate(() => chrome.action.getBadgeText({})),
       ).toBe('');
@@ -291,7 +291,7 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
         .poll(async () =>
           serviceWorker.evaluate(() => chrome.action.getTitle({})),
         )
-        .toBe('Collect+ · 剩余 2 项下载 (0%)');
+        .toBe('CollectPlus · 剩余 2 项下载 (0%)');
 
       // 放行第 2 个视频下载完成 -> 仅剩 1 项，不显示数字 1（切换为单任务环形进度态）
       gates.get(videoIds[1])?.release();
@@ -299,7 +299,7 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
         .poll(async () =>
           serviceWorker.evaluate(() => chrome.action.getTitle({})),
         )
-        .toBe('Collect+ · 下载中 0%');
+        .toBe('CollectPlus · 下载中 0%');
       expect(
         await serviceWorker.evaluate(() => chrome.action.getBadgeText({})),
       ).toBe('');
@@ -310,7 +310,7 @@ test.describe('Collect+ 抖音无弹窗采集、扩展图标环形进度与离�
         .poll(async () =>
           serviceWorker.evaluate(() => chrome.action.getTitle({})),
         )
-        .toBe('Collect+');
+        .toBe('CollectPlus');
 
       // 3. 像素级不变量校验：确认空闲态与活跃态中间 icon 与白色书签 1:1 尺寸完全一致、外圈圆形进度环与 icon 间有透明 1px 边距且四角透明
       const checkPage = await context.newPage();

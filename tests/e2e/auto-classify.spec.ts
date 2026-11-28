@@ -14,7 +14,7 @@ interface StoredItemSummary {
   folderAssignedBy?: 'manual' | 'auto';
 }
 
-test.describe('Collect+ 前置手动指定文件夹与本地高准确率自动分类 E2E', () => {
+test.describe('CollectPlus 前置手动指定文件夹与本地高准确率自动分类 E2E', () => {
   test('前置手动指定（悬浮按钮 / 原生收藏 5s Toast / Popup）优先，未指定时按规则与历史学习自动分类并安全兜底未分类', async ({
     context,
     extensionUrl,

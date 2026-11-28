@@ -10,7 +10,7 @@ import {
   MOCK_ZHIHU_ZVIDEO_TITLE,
 } from './fixtures/zhihu-mock.ts';
 
-test.describe('Collect+ 知乎独立插件全链路 E2E 验证', () => {
+test.describe('CollectPlus 知乎独立插件全链路 E2E 验证', () => {
   test('知乎回答采集（js-initialData + 多张原图 + 离线文章阅读 + 离线评论）', async ({
     context,
     extensionUrl,

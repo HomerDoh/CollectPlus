@@ -6,7 +6,7 @@ import {
   MOCK_BILI_TITLE,
 } from './fixtures/bilibili-mock.ts';
 
-test.describe('Collect+ Bilibili 独立收藏插件全链路 E2E 验证', () => {
+test.describe('CollectPlus Bilibili 独立收藏插件全链路 E2E 验证', () => {
   test('悬浮按钮采集 B站 DASH 视频 -> Mediabunny 无损混流 -> 管理台离线播放与评论查看', async ({
     context,
     extensionUrl,

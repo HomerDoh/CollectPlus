@@ -1,5 +1,5 @@
 /*
- * Collect+ 各网站内容详情页原生明暗配色样式总入口（持久化保存于插件内）。
+ * CollectPlus 各网站内容详情页原生明暗配色样式总入口（持久化保存于插件内）。
  *
  * 作用范围：挂载 `[data-platform="<id>"]` 的详情页容器（ItemDetailDrawer / ItemCommentsPanel）。
  * 各平台独立样式文件位于 `./platforms/<platform>.css`，编译时静态打包进插件，

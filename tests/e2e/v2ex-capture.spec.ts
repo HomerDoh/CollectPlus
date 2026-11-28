@@ -8,7 +8,7 @@ import {
   MOCK_V2EX_TOPIC_TITLE,
 } from './fixtures/v2ex-mock.ts';
 
-test.describe('Collect+ V2EX 独立收藏插件全链路 E2E 验证', () => {
+test.describe('CollectPlus V2EX 独立收藏插件全链路 E2E 验证', () => {
   test('悬浮按钮采集 V2EX 主题（含附言、内嵌图与回复）-> 管理台离线阅读与筛选', async ({
     context,
     extensionUrl,

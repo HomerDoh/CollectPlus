@@ -53,7 +53,7 @@ function buildSeedRecord(input: SeedItemInput): Record<string, unknown> {
   };
 }
 
-test.describe('Collect+ 控制台设置页、媒体类型与平台筛选验证', () => {
+test.describe('CollectPlus 控制台设置页、媒体类型与平台筛选验证', () => {
   test('设置页悬浮图标开关实时同步、偏好持久化、缓存统计与清空浏览器缓存', async ({
     context,
     extensionUrl,

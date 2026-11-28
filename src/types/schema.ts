@@ -1,5 +1,5 @@
 /**
- * Collect+ 核心元数据 Schema 与本地存储数据结构定义。
+ * CollectPlus 核心元数据 Schema 与本地存储数据结构定义。
  *
  * 铁律：所有写入本地 CollectVault（meta.json / taxonomy.json / .collect-vault.json）的
  * 元数据必须仅包含相对路径，禁止包含绝对路径或 Base64 缩略图数据。

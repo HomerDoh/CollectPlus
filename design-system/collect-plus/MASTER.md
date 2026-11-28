@@ -1,6 +1,6 @@
-# Collect+ Design System — Master Specification (Swiss Precision)
+# CollectPlus Design System — Master Specification (Swiss Precision)
 
-> **Source of Truth** for all Collect+ extension surfaces (`library`, `popup`, modals, and overlays).  
+> **Source of Truth** for all CollectPlus extension surfaces (`library`, `popup`, modals, and overlays).  
 > Generated & adapted via `ui-ux-pro-max` (`Flat Design` / `Minimalism & Swiss Style`, Density `8/10`).
 
 ## 1. Visual Principles

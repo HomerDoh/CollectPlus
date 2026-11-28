@@ -7,7 +7,7 @@ import {
   type MockLoggedInUser,
 } from './fixtures/douyin-mock.ts';
 
-test.describe('Collect+ 自动同步全部收藏与取消收藏同步闭环验证', () => {
+test.describe('CollectPlus 自动同步全部收藏与取消收藏同步闭环验证', () => {
   test('总开关关闭时首次进入已登录网页弹窗询问：暂不同步后不再打扰，切换账号重新弹窗并确认多页同步', async ({
     context,
     extensionUrl,
